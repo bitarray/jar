@@ -13,6 +13,13 @@
 
 extern crate alloc;
 
+use core::sync::atomic::{AtomicU32, AtomicU64};
+
+/// Maximum fixed execution lanes the guest runtime can address. The production
+/// default vCPU pool is capped lower, but host configuration must not exceed
+/// this ABI-visible lane table size.
+pub const MAX_EXECUTION_LANES: usize = 64;
+
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
 /// response is 32 bytes packing four LE u64s (allocated_bytes,
 /// allocation_count, fragment_count, available_bytes).
@@ -49,6 +56,11 @@ pub const FN_ID_NUB_GET_BOOT_INFO: u32 = 5;
 /// JIT cache turns the loop into pure warm-cache execute, which isn't
 /// what we want to measure for PolkaVM-shaped workloads).
 pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
+/// `fn_id` for a long-lived per-vCPU invoke worker. Payload is a little-endian
+/// `u32` lane index. The function does not use the legacy rkyv response ring;
+/// it polls that lane's [`ParallelInvokeSlot`] in scratch memory, runs invokes
+/// with `run_top_on_lane`, and writes results back into the same slot.
+pub const FN_ID_NUB_INVOKE_WORKER: u32 = 7;
 
 /// Boot-time info published by the guest at a known location (linker
 /// section `.boot_info`). The host reads it after the sandbox boots
@@ -155,6 +167,7 @@ pub const SCRATCHPAD_HEAD_LEN: usize = 128;
 
 /// Invocation result. Both backends produce this shape on completion;
 /// rkyv-archived on the wire from the cached path's response.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct InvocationResult {
@@ -167,3 +180,37 @@ pub struct InvocationResult {
     /// region is mapped.
     pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
 }
+
+pub const PARALLEL_INVOKE_SLOT_BYTES: usize = 512;
+
+pub const PARALLEL_INVOKE_STATUS_EMPTY: u32 = 0;
+pub const PARALLEL_INVOKE_STATUS_READY: u32 = 1;
+pub const PARALLEL_INVOKE_STATUS_RUNNING: u32 = 2;
+pub const PARALLEL_INVOKE_STATUS_DONE: u32 = 3;
+pub const PARALLEL_INVOKE_STATUS_STOP: u32 = 4;
+pub const PARALLEL_INVOKE_STATUS_STARTING: u32 = 5;
+pub const PARALLEL_INVOKE_STATUS_EVICT_JIT_READY: u32 = 6;
+
+/// One host<->guest invoke slot. Slots are addressed by lane index at
+/// `parallel_slot_base + lane * PARALLEL_INVOKE_SLOT_BYTES`.
+///
+/// Synchronization protocol:
+/// - host writes `job_id` and `packet`, then stores `READY` with release;
+/// - guest CASes `READY -> RUNNING`, runs the invoke, writes `result`, then
+///   stores `DONE` with release;
+/// - host reads `DONE` with acquire, copies `result`, then stores `EMPTY`.
+///
+/// Bench-only control commands, such as `EVICT_JIT_READY`, use the same
+/// `RUNNING -> DONE -> EMPTY` completion protocol after the host reserves all
+/// lanes.
+#[repr(C, align(64))]
+pub struct ParallelInvokeSlot {
+    pub status: AtomicU32,
+    pub _pad0: u32,
+    pub job_id: AtomicU64,
+    pub packet: InvokePacket,
+    pub result: InvocationResult,
+}
+
+const _: () = assert!(core::mem::size_of::<ParallelInvokeSlot>() <= PARALLEL_INVOKE_SLOT_BYTES);
+const _: () = assert!(core::mem::align_of::<ParallelInvokeSlot>() <= 64);

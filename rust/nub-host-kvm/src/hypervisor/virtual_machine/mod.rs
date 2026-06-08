@@ -84,6 +84,23 @@ pub(crate) enum VmExit {
     Retry(),
 }
 
+/// Stable index of a vCPU in the VM's fixed vCPU pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct VcpuLane(usize);
+
+impl VcpuLane {
+    /// The legacy control lane used by the existing host dispatch path.
+    pub(crate) const PRIMARY: Self = Self(0);
+
+    pub(crate) fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
 /// VM error
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum VmError {
@@ -117,6 +134,10 @@ pub enum CreateVmError {
 /// RunVCPU error
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RunVcpuError {
+    #[error("Invalid vCPU lane: {0}")]
+    InvalidVcpuLane(usize),
+    #[error("vCPU lane lock poisoned: {0}")]
+    VcpuLanePoisoned(usize),
     #[error("Failed to decode message type: {0}")]
     DecodeIOMessage(u32),
     #[error("Increment RIP failed: {0}")]
@@ -130,6 +151,10 @@ pub enum RunVcpuError {
 /// Register error
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RegisterError {
+    #[error("Invalid vCPU lane: {0}")]
+    InvalidVcpuLane(usize),
+    #[error("vCPU lane lock poisoned: {0}")]
+    VcpuLanePoisoned(usize),
     #[error("Failed to get registers: {0}")]
     GetRegs(HypervisorError),
     #[error("Failed to set registers: {0}")]
@@ -162,9 +187,8 @@ pub enum HypervisorError {
     KvmError(#[from] kvm_ioctls::Error),
 }
 
-/// Trait for single-vCPU VMs. Provides a common interface for basic VM operations.
-/// Common interface for the single-vCPU KVM VM.
-pub(crate) trait VirtualMachine: Debug + Send {
+/// Common interface for a VM with a fixed vCPU pool.
+pub(crate) trait VirtualMachine: Debug + Send + Sync {
     /// Map memory region into this VM
     ///
     /// # Safety
@@ -178,19 +202,70 @@ pub(crate) trait VirtualMachine: Debug + Send {
         region: (u32, &MemoryRegion),
     ) -> std::result::Result<(), MapMemoryError>;
 
-    /// Runs the vCPU until it exits.
+    /// Number of vCPU lanes created for this VM.
+    fn vcpu_count(&self) -> usize;
+
+    /// Runs the selected vCPU until it exits.
     /// Note: this function emits traces spans for guests;
     /// the span setup is called right before the KVM run-vcpu ioctl.
-    fn run_vcpu(&mut self) -> std::result::Result<VmExit, RunVcpuError>;
+    fn run_vcpu_on(&self, lane: VcpuLane) -> std::result::Result<VmExit, RunVcpuError>;
+
+    /// Runs the primary control vCPU until it exits.
+    fn run_vcpu(&self) -> std::result::Result<VmExit, RunVcpuError> {
+        self.run_vcpu_on(VcpuLane::PRIMARY)
+    }
 
     /// Get regs
-    fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError>;
+    fn regs_on(&self, lane: VcpuLane) -> std::result::Result<CommonRegisters, RegisterError>;
+
+    /// Get regs on the primary control vCPU.
+    fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
+        self.regs_on(VcpuLane::PRIMARY)
+    }
+
     /// Set regs
-    fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError>;
+    fn set_regs_on(
+        &self,
+        lane: VcpuLane,
+        regs: &CommonRegisters,
+    ) -> std::result::Result<(), RegisterError>;
+
+    /// Set regs on the primary control vCPU.
+    fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError> {
+        self.set_regs_on(VcpuLane::PRIMARY, regs)
+    }
+
     /// Set fpu regs
-    fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError>;
+    fn set_fpu_on(&self, lane: VcpuLane, fpu: &CommonFpu)
+    -> std::result::Result<(), RegisterError>;
+
+    /// Set fpu regs on the primary control vCPU.
+    fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError> {
+        self.set_fpu_on(VcpuLane::PRIMARY, fpu)
+    }
+
     /// Set special regs
-    fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError>;
+    fn set_sregs_on(
+        &self,
+        lane: VcpuLane,
+        sregs: &CommonSpecialRegisters,
+    ) -> std::result::Result<(), RegisterError>;
+
+    /// Set special regs on the primary control vCPU.
+    fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError> {
+        self.set_sregs_on(VcpuLane::PRIMARY, sregs)
+    }
+
+    /// Get special regs
+    fn sregs_on(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<CommonSpecialRegisters, RegisterError>;
+
+    /// Get special regs on the primary control vCPU.
+    fn sregs(&self) -> std::result::Result<CommonSpecialRegisters, RegisterError> {
+        self.sregs_on(VcpuLane::PRIMARY)
+    }
 }
 
 #[cfg(test)]

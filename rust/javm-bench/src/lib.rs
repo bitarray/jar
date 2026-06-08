@@ -12,9 +12,8 @@
 //!
 //! - `run_interpreter` — `Nub::new_local()` drives the byte-PVM
 //!   interpreter (`javm-exec`) in-process.
-//! - `run_recompiler` — a long-lived `Nub::new_hyperlight()` sandbox
-//!   (cached in a `OnceLock`) drives the in-kernel JIT path through
-//!   the same `invoke_cached` API.
+//! - `run_recompiler` — the process-wide `Nub::hyperlight()` singleton
+//!   drives the in-kernel JIT path through the same `invoke_cached` API.
 //!
 //! `BuiltCaps` holds the pre-built `Cap` graph + its precomputed
 //! hashes. Construction happens once per workload at bench warm-up via
@@ -30,8 +29,7 @@ use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
-use nub::{InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
-use std::sync::{Mutex, OnceLock};
+use nub::{HyperlightNubGuard, InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
 /// (`ecalli 0`). Both backends surface it as `exit_reason=4,
@@ -140,7 +138,7 @@ impl BuiltCaps {
 
     /// Put every cap into `nub`'s cache via `put_cap_with_hash`.
     /// Idempotent re-puts after the first call are refcount bumps only.
-    pub fn put_into(&self, nub: &mut Nub) {
+    pub fn put_into(&self, nub: &Nub) {
         for (h, cap) in &self.data_caps {
             nub.put_cap_with_hash(*h, cap)
                 .unwrap_or_else(|e| panic!("put_cap_with_hash data: {e}"));
@@ -154,45 +152,21 @@ impl BuiltCaps {
     }
 }
 
-/// RAII guard around the singleton Hyperlight Nub. Derefs to `&mut Nub`.
-///
-/// The sandbox is **never** torn down and rebuilt — doing so (the former
-/// `reset_nub_hyperlight`) re-`mmap`'d the snapshot at the same fixed guest VA
-/// while the prior KVM memslot/mapping could still alias it, which trampled
-/// host heap (the "went past end of probe sequence" corruption). One long-lived
-/// sandbox runs thousands of distinct invocations cleanly, so the guard simply
-/// holds the singleton.
-pub struct NubGuard {
-    inner: std::sync::MutexGuard<'static, Nub>,
-}
-
-impl std::ops::Deref for NubGuard {
-    type Target = Nub;
-    fn deref(&self) -> &Nub {
-        &self.inner
-    }
-}
-
-impl std::ops::DerefMut for NubGuard {
-    fn deref_mut(&mut self) -> &mut Nub {
-        &mut self.inner
-    }
-}
+/// Cloneable handle to the process-wide Hyperlight Nub.
+pub type NubGuard = HyperlightNubGuard;
 
 /// Bench-side accessor for the long-lived Hyperlight Nub. Returned
 /// guard holds the singleton mutex for the duration of one
 /// criterion `iter_batched` step (setup + routine).
 pub fn nub_hyperlight_lock() -> NubGuard {
-    NubGuard {
-        inner: nub_hyperlight().lock().expect("nub mutex"),
-    }
+    Nub::hyperlight().expect("Hyperlight sandbox")
 }
 
 /// Bench helper: drive one invocation through an already-locked Nub.
 /// Used inside `iter_batched`'s routine closure so the timed body is
 /// just the host-call round-trip + JIT path (no mutex acquire, no
 /// cap publish, no sandbox rebuild).
-pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
+pub fn invoke(nub: &Nub, built: &BuiltCaps) -> (u64, u64) {
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("invoke_cached: {e}"));
@@ -204,8 +178,8 @@ pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
 /// state, so a fresh Nub each call is fine — and matches the chain's
 /// per-event allocation model).
 pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = Nub::new_local();
-    built.put_into(&mut nub);
+    let nub = Nub::new_local();
+    built.put_into(&nub);
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("interpreter invoke_cached: {e}"));
@@ -217,8 +191,8 @@ pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
 /// the same Image hit the JIT compile cache. Useful for measuring
 /// steady-state execute throughput in isolation.
 pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = nub_hyperlight_lock();
-    built.put_into(&mut nub);
+    let nub = nub_hyperlight_lock();
+    built.put_into(&nub);
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
@@ -298,8 +272,8 @@ impl RawRun {
 /// `Ok` in practice; an `Err` is still mapped to the abort sentinel for
 /// symmetry with the recompiler.
 pub fn run_interpreter_raw(built: &BuiltCaps) -> RawRun {
-    let mut nub = Nub::new_local();
-    built.put_into(&mut nub);
+    let nub = Nub::new_local();
+    built.put_into(&nub);
     match nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS) {
         Ok(r) => RawRun::from_result(&r),
         Err(_) => RawRun::aborted(),
@@ -315,19 +289,12 @@ pub fn run_interpreter_raw(built: &BuiltCaps) -> RawRun {
 /// returns `Err` → `ABORT_SENTINEL`. (For valid PVM2 code no abort occurs, so
 /// long differential sweeps run uninterrupted.)
 pub fn run_recompiler_raw(built: &BuiltCaps) -> RawRun {
-    let mut nub = nub_hyperlight_lock();
-    built.put_into(&mut nub);
+    let nub = nub_hyperlight_lock();
+    built.put_into(&nub);
     match nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS) {
         Ok(r) => RawRun::from_result(&r),
         Err(_) => RawRun::aborted(),
     }
-}
-
-/// The long-lived Hyperlight sandbox, shared across every invocation. Built
-/// once and never torn down (see [`NubGuard`] for why a rebuild corrupts).
-fn nub_hyperlight() -> &'static Mutex<Nub> {
-    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
-    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
 }
 
 // ============================================================================
@@ -456,7 +423,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
 
 /// One sub-VM bench iteration: invoke the top instance with `depth` and
 /// panic unless it halted cleanly on the trampoline HostCall(0).
-pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
+pub fn invoke_sub_vm(nub: &Nub, top: &SubVmTop, depth: u64) {
     let result = nub
         .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
         .expect("invoke_cached");
@@ -474,7 +441,7 @@ pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
 /// a clean trampoline halt. Used by the `sub_vm_gas_parity` test to check the
 /// recompiler's category-#3 charge is identical per recursion level (gas affine
 /// in depth — a multi-frame determinism guard).
-pub fn invoke_sub_vm_gas(nub: &mut Nub, top: &SubVmTop, depth: u64) -> (u64, u64) {
+pub fn invoke_sub_vm_gas(nub: &Nub, top: &SubVmTop, depth: u64) -> (u64, u64) {
     let result = nub
         .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
         .expect("invoke_cached");
@@ -495,7 +462,7 @@ pub fn invoke_sub_vm_gas(nub: &mut Nub, top: &SubVmTop, depth: u64) -> (u64, u64
 /// Like [`invoke_sub_vm`] but also asserts the top-level return value. Used by
 /// the data-recurse correctness check to confirm each level reads its pinned
 /// RO data + writes its initial RW data correctly (not just that it halts).
-pub fn invoke_sub_vm_expect(nub: &mut Nub, top: &SubVmTop, depth: u64, expected_return: u64) {
+pub fn invoke_sub_vm_expect(nub: &Nub, top: &SubVmTop, depth: u64, expected_return: u64) {
     let result = nub
         .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
         .expect("invoke_cached");
@@ -540,9 +507,9 @@ pub fn run_recurse_bench(c: &mut Criterion, blob: &[u8], label: &str) {
     // depth 0 (single CALL/HALT) + depth 1 sanity before the loop —
     // catches top-frame / direct-mapping setup bugs early.
     {
-        let mut nub = nub_hyperlight_lock();
-        invoke_sub_vm(&mut nub, &top, 0);
-        invoke_sub_vm(&mut nub, &top, 1);
+        let nub = nub_hyperlight_lock();
+        invoke_sub_vm(&nub, &top, 0);
+        invoke_sub_vm(&nub, &top, 1);
     }
     eprintln!("[{label}] depth 0/1 ok");
 
@@ -551,7 +518,7 @@ pub fn run_recurse_bench(c: &mut Criterion, blob: &[u8], label: &str) {
     for &depth in &[10u64, 100, 1_000] {
         g.throughput(Throughput::Elements(depth));
         g.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &d| {
-            b.iter(|| invoke_sub_vm(&mut nub_hyperlight_lock(), &top, d))
+            b.iter(|| invoke_sub_vm(&nub_hyperlight_lock(), &top, d))
         });
     }
     g.finish();
@@ -601,7 +568,7 @@ fn pt_cache_expected_return(n: u64) -> u64 {
 /// `host_call`s the resident `B` `n` times. Asserts a clean trampoline
 /// halt and that the summed echoes match. Returns
 /// `(return_value, gas_used)`.
-pub fn invoke_pt_cache(nub: &mut Nub, top: &PtCacheTop, n: u64) -> (u64, u64) {
+pub fn invoke_pt_cache(nub: &Nub, top: &PtCacheTop, n: u64) -> (u64, u64) {
     let result = nub
         .invoke_cached(top.top_instance, 0, [n, 0, 0, 0], INITIAL_GAS)
         .expect("invoke_cached");
@@ -640,9 +607,9 @@ pub fn run_pt_cache_bench(c: &mut Criterion, blob: &[u8], label: &str) {
     );
 
     {
-        let mut nub = nub_hyperlight_lock();
-        invoke_pt_cache(&mut nub, &top, 1);
-        invoke_pt_cache(&mut nub, &top, 2);
+        let nub = nub_hyperlight_lock();
+        invoke_pt_cache(&nub, &top, 1);
+        invoke_pt_cache(&nub, &top, 2);
     }
     eprintln!("[{label}] n 1/2 ok");
 
@@ -651,7 +618,7 @@ pub fn run_pt_cache_bench(c: &mut Criterion, blob: &[u8], label: &str) {
     for &n in &[10u64, 100, 1_000] {
         g.throughput(Throughput::Elements(n));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            b.iter(|| invoke_pt_cache(&mut nub_hyperlight_lock(), &top, n))
+            b.iter(|| invoke_pt_cache(&nub_hyperlight_lock(), &top, n))
         });
     }
     g.finish();

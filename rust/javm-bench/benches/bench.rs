@@ -31,9 +31,9 @@ macro_rules! bench_workload {
             g.bench_function("recompiler_warm", |b| {
                 b.iter_batched(
                     || javm_bench::nub_hyperlight_lock(),
-                    |mut nub| {
-                        built.put_into(&mut nub);
-                        javm_bench::invoke(&mut *nub, &built)
+                    |nub| {
+                        built.put_into(&nub);
+                        javm_bench::invoke(&nub, &built)
                     },
                     BatchSize::PerIteration,
                 )
@@ -41,13 +41,13 @@ macro_rules! bench_workload {
             g.bench_function("recompiler_cold", |b| {
                 b.iter_batched(
                     || {
-                        let mut nub = javm_bench::nub_hyperlight_lock();
+                        let nub = javm_bench::nub_hyperlight_lock();
                         nub.evict_jit_all().expect("evict_jit_all");
                         nub
                     },
-                    |mut nub| {
-                        built.put_into(&mut nub);
-                        javm_bench::invoke(&mut *nub, &built)
+                    |nub| {
+                        built.put_into(&nub);
+                        javm_bench::invoke(&nub, &built)
                     },
                     BatchSize::PerIteration,
                 )

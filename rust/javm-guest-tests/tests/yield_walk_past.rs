@@ -148,7 +148,7 @@ fn run(nub: &mut Nub, handler_ops: &[u32]) -> u32 {
 
 #[test]
 fn walk_past_intermediate_routing() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // CALL_RESUME: C's yield routes past B to A; A resumes C (the real yielder),
     // C completes and unwinds C→B→A → clean halt (reason 4).

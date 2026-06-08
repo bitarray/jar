@@ -61,7 +61,7 @@ fn local_invoke_cached_ecalli_42() {
 
 #[test]
 fn hyperlight_invoke_cached_ecalli_42() {
-    let mut nub = Nub::new_hyperlight().expect("hyperlight");
+    let mut nub = Nub::hyperlight().expect("hyperlight");
     let result = publish_and_invoke(&mut nub);
     assert_eq!(result.exit_reason, 4, "expected HostCall");
     assert_eq!(result.exit_arg, 42, "expected ecalli imm");

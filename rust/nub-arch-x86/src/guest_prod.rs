@@ -4,13 +4,18 @@
 //! automatically.
 
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 use hyperlight_guest_bin::guest_function;
 use javm_cap::cap::Cap;
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
-    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket, SCRATCHPAD_HEAD_LEN,
+    FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
+    PARALLEL_INVOKE_SLOT_BYTES, PARALLEL_INVOKE_STATUS_DONE, PARALLEL_INVOKE_STATUS_EMPTY,
+    PARALLEL_INVOKE_STATUS_EVICT_JIT_READY, PARALLEL_INVOKE_STATUS_READY,
+    PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING, PARALLEL_INVOKE_STATUS_STOP,
+    ParallelInvokeSlot, SCRATCHPAD_HEAD_LEN,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -80,6 +85,129 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
         .into_vec()
 }
 
+fn invocation_result_from_outcome(
+    outcome: Result<crate::call_loop::LoopOutcome, u32>,
+) -> InvocationResult {
+    match outcome {
+        Ok(o) => InvocationResult {
+            exit_reason: o.exit_reason,
+            exit_arg: o.exit_arg,
+            return_value: o.return_value,
+            gas_remaining: o.gas_remaining.max(0) as u64,
+            scratchpad_head: o.scratchpad_head,
+        },
+        Err(code) => InvocationResult {
+            exit_reason: u32::MAX,
+            exit_arg: code,
+            return_value: 0,
+            gas_remaining: 0,
+            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+        },
+    }
+}
+
+fn parallel_slot_for_lane(lane: usize) -> Option<*mut ParallelInvokeSlot> {
+    let handle = unsafe { &*core::ptr::addr_of!(hyperlight_guest_bin::GUEST_HANDLE) };
+    let peb = handle.peb()?;
+    let output_ptr = unsafe { (*peb).output_stack.ptr as usize };
+    let output_size = unsafe { (*peb).output_stack.size as usize };
+    let base = output_ptr.checked_add(output_size)?;
+    let offset = lane.checked_mul(PARALLEL_INVOKE_SLOT_BYTES)?;
+    Some((base + offset) as *mut ParallelInvokeSlot)
+}
+
+/// Long-lived lane worker for the parallel invoke slot ABI. This function is
+/// started once per vCPU lane by the host and intentionally does not use the
+/// legacy rkyv response ring while running.
+#[guest_function(fn_id = FN_ID_NUB_INVOKE_WORKER)]
+pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
+    if payload.len() != core::mem::size_of::<u32>() {
+        return Vec::new();
+    }
+    let lane =
+        u32::from_le_bytes(payload.try_into().expect("lane payload length checked")) as usize;
+    let Some(slot) = parallel_slot_for_lane(lane) else {
+        return Vec::new();
+    };
+    let lane = crate::execution_lane::ExecutionLane::new(lane);
+    unsafe {
+        if (*slot).status.load(Ordering::Acquire) == PARALLEL_INVOKE_STATUS_STARTING {
+            (*slot)
+                .status
+                .store(PARALLEL_INVOKE_STATUS_EMPTY, Ordering::Release);
+        }
+    }
+
+    loop {
+        let status = unsafe { (*slot).status.load(Ordering::Acquire) };
+        match status {
+            PARALLEL_INVOKE_STATUS_READY => {
+                let claimed = unsafe {
+                    (*slot).status.compare_exchange(
+                        PARALLEL_INVOKE_STATUS_READY,
+                        PARALLEL_INVOKE_STATUS_RUNNING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                };
+                if claimed.is_err() {
+                    continue;
+                }
+                let packet = unsafe { core::ptr::addr_of!((*slot).packet).read_volatile() };
+                let outcome = crate::call_loop::run_top_on_lane(
+                    lane,
+                    &packet.instance_hash,
+                    packet.endpoint_idx,
+                    packet.args,
+                    packet.initial_gas as i64,
+                );
+                crate::state_cache::CACHE.sweep_instances();
+                let result = invocation_result_from_outcome(outcome);
+                unsafe {
+                    core::ptr::addr_of_mut!((*slot).result).write_volatile(result);
+                    (*slot)
+                        .status
+                        .store(PARALLEL_INVOKE_STATUS_DONE, Ordering::Release);
+                }
+            }
+            PARALLEL_INVOKE_STATUS_EVICT_JIT_READY => {
+                let claimed = unsafe {
+                    (*slot).status.compare_exchange(
+                        PARALLEL_INVOKE_STATUS_EVICT_JIT_READY,
+                        PARALLEL_INVOKE_STATUS_RUNNING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                };
+                if claimed.is_err() {
+                    continue;
+                }
+                crate::jit_cache::evict_all();
+                crate::state_cache::CACHE.sweep_instances();
+                unsafe {
+                    core::ptr::addr_of_mut!((*slot).result).write_volatile(InvocationResult {
+                        exit_reason: 0,
+                        exit_arg: 0,
+                        return_value: 0,
+                        gas_remaining: 0,
+                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                    });
+                    (*slot)
+                        .status
+                        .store(PARALLEL_INVOKE_STATUS_DONE, Ordering::Release);
+                }
+            }
+            PARALLEL_INVOKE_STATUS_STOP => unsafe {
+                (*slot)
+                    .status
+                    .store(PARALLEL_INVOKE_STATUS_EMPTY, Ordering::Release);
+                return Vec::new();
+            },
+            _ => core::hint::spin_loop(),
+        }
+    }
+}
+
 /// Heap-resident cap-directory publisher. Validates the
 /// rkyv-archived [`Cap`] payload via [`rkyv::access`] (zero-copy)
 /// then materialises an owned `Cap` via [`rkyv::deserialize`] and
@@ -121,13 +249,12 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
 /// next `nub_invoke_cached` call pays a full recompile. Empty
 /// payload, empty response. Not meant for production paths — the
 /// cache is content-addressed and re-compiling the same Image
-/// produces identical native code.
+/// produces identical native code. This intentionally leaves clean
+/// instance-memory memos intact; the cold bench target is "recompile +
+/// execute", not "rebuild every runtime memo".
 #[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
 pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
     crate::jit_cache::evict_all();
-    // Drop the per-image clean-mem memo too, so a "cold" bench re-composes the
-    // instance backing rather than cloning a warm one.
-    crate::call_loop::evict_mem_cache();
     Vec::new()
 }
 

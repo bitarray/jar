@@ -50,11 +50,12 @@ pub struct CachedCap {
     pub cache: SpinMutex<CapCache>,
 }
 
-/// SAFETY: Hyperlight serialises guest execution and RPCs; these resident
-/// caches never move across concurrently-running threads. The impl only lets
-/// them live behind the static directory mutex.
+/// SAFETY: the cap payload is immutable once resident; mutable derived state
+/// lives behind `cache`'s spin mutex or is moved into a `KernelFrame` while
+/// running. Sharing `CachedCap` through the static directory therefore does not
+/// create unsynchronized mutation of the cache or of a live frame runtime.
 unsafe impl Send for CachedCap {}
-/// SAFETY: same single-threaded guest invariant as the `Send` impl above.
+/// SAFETY: same synchronization and move-ownership invariant as `Send`.
 unsafe impl Sync for CachedCap {}
 
 /// The derived runtime cache attached to a resident cap. `None` for a cap with

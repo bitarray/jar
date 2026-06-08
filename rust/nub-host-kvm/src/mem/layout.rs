@@ -63,6 +63,7 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
+use nub_arch_x86_abi::PARALLEL_INVOKE_SLOT_BYTES;
 use nub_host_common::mem::{HyperlightPEB, PAGE_SIZE_USIZE};
 use tracing::{Span, instrument};
 
@@ -207,7 +208,8 @@ impl SandboxMemoryLayout {
         let min_scratch_size = nub_host_common::layout::min_scratch_size(
             cfg.get_input_data_size(),
             cfg.get_output_data_size(),
-        );
+        ) + Self::parallel_invoke_slots_size(cfg.get_vcpu_count())
+            + Self::exception_stack_size(cfg.get_vcpu_count());
         if scratch_size < min_scratch_size {
             return Err(MemoryRequestTooSmall(scratch_size, min_scratch_size));
         }
@@ -331,12 +333,46 @@ impl SandboxMemoryLayout {
         0
     }
 
+    pub(crate) fn parallel_invoke_slots_size(vcpu_count: usize) -> usize {
+        (vcpu_count.max(1) * PARALLEL_INVOKE_SLOT_BYTES)
+            .next_multiple_of(nub_host_common::vmem::PAGE_SIZE)
+    }
+
+    pub(crate) fn exception_stack_size(vcpu_count: usize) -> usize {
+        (vcpu_count.max(1) as u64 * nub_host_common::layout::VCPU_EXCEPTION_STACK_STRIDE) as usize
+    }
+
+    pub(crate) fn get_parallel_invoke_slots_size(&self) -> usize {
+        Self::parallel_invoke_slots_size(self.sandbox_memory_config.get_vcpu_count())
+    }
+
+    pub(crate) fn get_vcpu_count(&self) -> usize {
+        self.sandbox_memory_config.get_vcpu_count()
+    }
+
+    pub(crate) fn get_parallel_invoke_slots_scratch_host_offset(&self) -> usize {
+        self.sandbox_memory_config.get_input_data_size()
+            + self.sandbox_memory_config.get_output_data_size()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_parallel_invoke_slot_scratch_host_offset(&self, lane: usize) -> usize {
+        self.get_parallel_invoke_slots_scratch_host_offset() + lane * PARALLEL_INVOKE_SLOT_BYTES
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_parallel_invoke_slots_gva(&self) -> u64 {
+        nub_host_common::layout::scratch_base_gva(self.scratch_size)
+            + self.get_parallel_invoke_slots_scratch_host_offset() as u64
+    }
+
     /// Get the offset from the beginning of the scratch region to the
     /// location where page tables will be eagerly copied on restore
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_pt_base_scratch_offset(&self) -> usize {
         (self.sandbox_memory_config.get_input_data_size()
-            + self.sandbox_memory_config.get_output_data_size())
+            + self.sandbox_memory_config.get_output_data_size()
+            + self.get_parallel_invoke_slots_size())
         .next_multiple_of(nub_host_common::vmem::PAGE_SIZE)
     }
 
@@ -416,7 +452,8 @@ impl SandboxMemoryLayout {
         let min_fixed_scratch = nub_host_common::layout::min_scratch_size(
             self.sandbox_memory_config.get_input_data_size(),
             self.sandbox_memory_config.get_output_data_size(),
-        );
+        ) + self.get_parallel_invoke_slots_size()
+            + Self::exception_stack_size(self.sandbox_memory_config.get_vcpu_count());
         let min_scratch = min_fixed_scratch + size;
         if self.scratch_size < min_scratch {
             return Err(MemoryRequestTooSmall(self.scratch_size, min_scratch));

@@ -163,7 +163,7 @@ fn run(nub: &mut Nub, catch_oog: bool) -> u32 {
 
 #[test]
 fn oog_routes_to_chain_handler_and_resumes() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // With the chain catching kernel:oog: the child OOGs at meter 0, routes to
     // the chain, the chain tops up + resumes, the child completes, and the chain

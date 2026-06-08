@@ -38,6 +38,7 @@ use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 use javm_cap::CapHash;
 
 use crate::cached_cap::{CachedCap, CapCache};
+use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::page_alloc::PageBuf;
 use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
 
@@ -46,12 +47,8 @@ use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
 /// The arena holds DISPATCH / JIT / TRAMP regions contiguously,
 /// page-aligned. The `template` is a pre-built PD subtree (one PD + up to a
 /// handful of PT pages) whose leaf PTEs already point at the arena's pages
-/// with the right permissions. It is borrowed as the META entry of
-/// `pml4_slot_template` (the whole PML4 slot-1 PDPT, which also points
-/// CTX/STACK at the global shared pages); per-call page tables install that
-/// whole subtree with one
-/// [`PageTable::install_borrowed_pdpt`](crate::paging::PageTable::install_borrowed_pdpt)
-/// instead of running `pt.map` over the arena + CTX + STACK.
+/// with the right permissions. Per-frame runtimes compose this META PD with
+/// lane-local CTX/STACK PDs into their own small PML4 slot template.
 ///
 /// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
 /// it via static atomics and never needs it mapped into ring-3.
@@ -86,19 +83,44 @@ pub struct CompiledImage {
     pub trap_table: Vec<(u32, u32, u32)>,
     /// Template PD subtree mapping the arena pages at per-call VAs. Owns the
     /// backing PD + PT pages (freed on image eviction — V1: effectively never);
-    /// its PD is borrowed as PDPT[META] by [`pml4_slot_template`] below.
+    /// its PD is borrowed as PDPT[META] by each frame runtime's slot template.
     #[allow(dead_code)]
     pub template: TemplatePT,
-    /// Template for the whole PML4 slot-1 subtree (PDPT covering CTX | META |
-    /// STACK). Per-call PTs install [`template_pdpt_pa`] into the PML4 with one
-    /// borrowed write ([`PageTable::install_borrowed_pdpt`](crate::paging::PageTable::install_borrowed_pdpt)),
-    /// avoiding per-frame CTX/STACK PDPT/PD/PT allocation. Owns the PDPT + the
-    /// CTX/STACK PD/PT pages (the META PD is owned by `template`).
-    #[allow(dead_code)]
-    pub pml4_slot_template: Pml4SlotTemplate,
-    /// Physical address of `pml4_slot_template`'s PDPT page, cached for fast
-    /// install on the per-call hot path.
-    pub template_pdpt_pa: u64,
+    /// Physical address of `template`'s PD page, cached for fast composition
+    /// into a frame runtime's CTX | META | STACK slot template.
+    pub template_pd_pa: u64,
+    /// Per-lane PML4 slot-1 templates joining that lane's CTX/STACK PDs with
+    /// this Image's META arena PD. Frame runtimes borrow the PDPT from here,
+    /// restoring the old one-PML4-write hot path without sharing CTX/STACK
+    /// scratch pages across vCPUs.
+    lane_slot_templates: Vec<Option<Pml4SlotTemplate>>,
+}
+
+impl CompiledImage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn template_pdpt_pa_for_lane(
+        &mut self,
+        lane: ExecutionLane,
+        ctx_va: u64,
+        ctx_pd_pa: u64,
+        arena_base_va: u64,
+        stack_va: u64,
+        stack_pd_pa: u64,
+    ) -> Option<u64> {
+        lane.assert_in_range();
+        let slot = &mut self.lane_slot_templates[lane.index()];
+        if slot.is_none() {
+            *slot = Some(Pml4SlotTemplate::new(
+                ctx_va,
+                ctx_pd_pa,
+                arena_base_va,
+                self.template_pd_pa,
+                stack_va,
+                stack_pd_pa,
+            )?);
+        }
+        slot.as_ref()?.pdpt_pa()
+    }
 }
 
 static NEXT_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -138,9 +160,9 @@ pub fn evict_all() {
 ///
 /// # Safety
 ///
-/// Hyperlight serialises host calls. The compiled artifact is boxed inside the
-/// resident `CachedCap`, so raw pointers into it remain stable as long as that
-/// cap cache is not evicted while frames are live.
+/// The compiled artifact is boxed inside the resident `CachedCap`, so raw
+/// pointers into it remain stable as long as that cap cache is not evicted
+/// while frame runtimes are live.
 #[allow(clippy::too_many_arguments)]
 pub fn with_compiled_image<R>(
     image_cap: &CachedCap,
@@ -149,12 +171,9 @@ pub fn with_compiled_image<R>(
     code_base: u32,
     arena_base_va: u64,
     ctx_va: u64,
-    stack_va: u64,
-    ctx_pd_pa: u64,
-    stack_pd_pa: u64,
     mem_cycles: u8,
     helpers: HelperFns,
-    f: impl FnOnce(&CompiledImage) -> R,
+    f: impl FnOnce(&mut CompiledImage) -> R,
 ) -> R {
     let mut cache = image_cap.cache.lock();
     if !matches!(&*cache, CapCache::Image(_)) {
@@ -164,14 +183,11 @@ pub fn with_compiled_image<R>(
             code_base,
             arena_base_va,
             ctx_va,
-            stack_va,
-            ctx_pd_pa,
-            stack_pd_pa,
             mem_cycles,
             helpers,
         )));
     }
-    let CapCache::Image(compiled) = &*cache else {
+    let CapCache::Image(compiled) = &mut *cache else {
         unreachable!("image cache variant installed above")
     };
     f(compiled)
@@ -184,9 +200,6 @@ fn compile_image(
     code_base: u32,
     arena_base_va: u64,
     ctx_va: u64,
-    stack_va: u64,
-    ctx_pd_pa: u64,
-    stack_pd_pa: u64,
     mem_cycles: u8,
     helpers: HelperFns,
 ) -> CompiledImage {
@@ -287,23 +300,8 @@ fn compile_image(
     let template_pd_pa = template
         .pd_pa()
         .expect("template PD must be in kernel half");
-
-    // Build this Image's PML4 slot-1 PDPT once: CTX/STACK borrow the
-    // process-global CTX/STACK PD subtrees, META this Image's arena PD. The
-    // PDPT is the only table owned per Image; per-call PTs install it with a
-    // single borrowed PML4 write.
-    let pml4_slot_template = Pml4SlotTemplate::new(
-        ctx_va,
-        ctx_pd_pa,
-        arena_base_va,
-        template_pd_pa,
-        stack_va,
-        stack_pd_pa,
-    )
-    .expect("Pml4SlotTemplate alloc");
-    let template_pdpt_pa = pml4_slot_template
-        .pdpt_pa()
-        .expect("template PDPT must be in kernel half");
+    let mut lane_slot_templates = Vec::with_capacity(MAX_EXECUTION_LANES);
+    lane_slot_templates.resize_with(MAX_EXECUTION_LANES, || None);
 
     CompiledImage {
         arena,
@@ -316,7 +314,7 @@ fn compile_image(
         exit_label_offset,
         trap_table,
         template,
-        pml4_slot_template,
-        template_pdpt_pa,
+        template_pd_pa,
+        lane_slot_templates,
     }
 }

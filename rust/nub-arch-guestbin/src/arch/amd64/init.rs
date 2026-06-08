@@ -104,17 +104,20 @@ unsafe fn init_tss(pc: *mut ProcCtrl) {
     }
 }
 
-/// To initialise the main stack, we just pre-emptively map the first
-/// page of it.
+/// Initialise the dispatch stacks used by host→guest calls. Phase-1 parallel
+/// invoke workers are long-lived guest functions, so each vCPU lane needs a
+/// private stack instead of sharing the single legacy Hyperlight stack page.
 unsafe fn init_stack() -> u64 {
     use hyperlight_guest::layout::MAIN_STACK_TOP_GVA;
-    let stack_top_page_base = (MAIN_STACK_TOP_GVA - 1) & !0xfff;
+    let stack_bytes = nub_host_common::layout::VCPU_DISPATCH_STACK_STRIDE
+        * nub_host_common::layout::VCPU_DISPATCH_STACK_LANES;
+    let stack_base = MAIN_STACK_TOP_GVA - stack_bytes;
     unsafe {
         use nub_host_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
         crate::paging::map_region(
-            hyperlight_guest::prim_alloc::alloc_phys_pages(1),
-            stack_top_page_base as *mut u8,
-            PAGE_SIZE as u64,
+            hyperlight_guest::prim_alloc::alloc_phys_pages(stack_bytes / PAGE_SIZE as u64),
+            stack_base as *mut u8,
+            stack_bytes,
             MappingKind::Basic(BasicMapping {
                 readable: true,
                 writable: true,

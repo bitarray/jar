@@ -196,7 +196,7 @@ fn run_bare(nub: &mut Nub, op: u32) -> (u32, u32) {
 
 #[test]
 fn user_key_yield_routes_to_ancestor_and_resumes() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Positive: A's receiver registers YIELD_KEY, so B's yield routes to A
     // (skipping B's frames), A resumes B, B halts, A halts cleanly (reason 4 —

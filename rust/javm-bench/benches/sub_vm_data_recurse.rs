@@ -48,7 +48,7 @@ fn sub_vm_data_recurse(c: &mut Criterion) {
         let top = javm_bench::build_sub_vm_top(&mut nub, BLOB);
         const RO_SUM: u64 = 98_304;
         for depth in [0u64, 1, 2, 5, 300] {
-            javm_bench::invoke_sub_vm_expect(&mut nub, &top, depth, RO_SUM + (depth & 0xFF));
+            javm_bench::invoke_sub_vm_expect(&nub, &top, depth, RO_SUM + (depth & 0xFF));
         }
     }
 

@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracing::{Span, instrument};
@@ -26,9 +26,9 @@ use super::*;
 use crate::hypervisor::InterruptHandleImpl;
 use crate::hypervisor::LinuxInterruptHandle;
 use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
-use crate::hypervisor::virtual_machine::VirtualMachine;
 use crate::hypervisor::virtual_machine::kvm::KvmVm;
 use crate::hypervisor::virtual_machine::{HypervisorType, VmError, get_available_hypervisor};
+use crate::hypervisor::virtual_machine::{VcpuLane, VirtualMachine};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
@@ -52,35 +52,43 @@ impl HyperlightVm {
         type VmType = Box<dyn VirtualMachine>;
 
         let vm: VmType = match get_available_hypervisor() {
-            Some(HypervisorType::Kvm) => Box::new(KvmVm::new().map_err(VmError::CreateVm)?),
+            Some(HypervisorType::Kvm) => {
+                Box::new(KvmVm::new(config.get_vcpu_count()).map_err(VmError::CreateVm)?)
+            }
             None => return Err(CreateHyperlightVmError::NoHypervisorFound),
         };
 
-        vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(
-            root_pt_addr,
-        ))
-        .map_err(VmError::Register)?;
+        let sregs = CommonSpecialRegisters::standard_64bit_defaults(root_pt_addr);
+        vm.set_sregs(&sregs).map_err(VmError::Register)?;
+        for lane in 1..vm.vcpu_count() {
+            vm.set_sregs_on(VcpuLane::new(lane), &sregs)
+                .map_err(VmError::Register)?;
+        }
 
-        let interrupt_handle: Arc<dyn InterruptHandleImpl> = Arc::new(LinuxInterruptHandle {
-            state: AtomicU8::new(0),
-            #[cfg(all(
-                target_arch = "x86_64",
-                target_vendor = "unknown",
-                target_os = "linux",
-                target_env = "musl"
-            ))]
-            tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
-            #[cfg(not(all(
-                target_arch = "x86_64",
-                target_vendor = "unknown",
-                target_os = "linux",
-                target_env = "musl"
-            )))]
-            tid: AtomicU64::new(unsafe { libc::pthread_self() }),
-            retry_delay: config.get_interrupt_retry_delay(),
-            sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
-            dropped: AtomicBool::new(false),
-        });
+        let interrupt_handles: Vec<Arc<dyn InterruptHandleImpl>> = (0..vm.vcpu_count())
+            .map(|_| {
+                Arc::new(LinuxInterruptHandle {
+                    state: AtomicU8::new(0),
+                    #[cfg(all(
+                        target_arch = "x86_64",
+                        target_vendor = "unknown",
+                        target_os = "linux",
+                        target_env = "musl"
+                    ))]
+                    tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
+                    #[cfg(not(all(
+                        target_arch = "x86_64",
+                        target_vendor = "unknown",
+                        target_os = "linux",
+                        target_env = "musl"
+                    )))]
+                    tid: AtomicU64::new(unsafe { libc::pthread_self() }),
+                    retry_delay: config.get_interrupt_retry_delay(),
+                    sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
+                    dropped: AtomicBool::new(false),
+                }) as Arc<dyn InterruptHandleImpl>
+            })
+            .collect();
 
         let snapshot_slot = 0u32;
         let scratch_slot = 1u32;
@@ -88,7 +96,7 @@ impl HyperlightVm {
             vm,
             entrypoint,
             rsp_gva,
-            interrupt_handle,
+            interrupt_handles,
 
             snapshot_slot,
             snapshot_memory: None,
@@ -98,7 +106,7 @@ impl HyperlightVm {
 
             mmap_regions: Vec::new(),
 
-            pending_tlb_flush: false,
+            pending_tlb_flush: AtomicBool::new(false),
         };
 
         ret.install_snapshot_mapping(snapshot_mem)?;
@@ -155,6 +163,10 @@ impl HyperlightVm {
         }
         self.rsp_gva = regs.rsp;
         self.entrypoint = NextAction::Call(regs.rax);
+        let sregs = self.vm.sregs()?;
+        for lane in 1..self.vm.vcpu_count() {
+            self.vm.set_sregs_on(VcpuLane::new(lane), &sregs)?;
+        }
 
         Ok(())
     }
@@ -168,15 +180,74 @@ impl HyperlightVm {
     /// Returns `Ok` if the call succeeded, and an `Err` if it failed
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn dispatch_call_from_host(
-        &mut self,
+        &self,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.dispatch_call_from_host_on(VcpuLane::PRIMARY, mem_mgr, host_funcs)
+    }
+
+    /// Dispatch a host call on a selected vCPU lane. The old shared input/output
+    /// ring is still serialized by the caller; the concurrent invoke workers
+    /// use this only as their long-lived entry into the guest.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn dispatch_call_from_host_on(
+        &self,
+        lane: VcpuLane,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.prepare_dispatch_call_from_host(lane)?;
+        let result = self
+            .run_on(lane, mem_mgr, host_funcs)
+            .map_err(DispatchGuestCallError::Run);
+
+        // Clear the TLB flush flag only after run() returns. The guest
+        // may have been cancelled before it executed the flush.
+        self.pending_tlb_flush.store(false, Ordering::Release);
+
+        result
+    }
+
+    /// Dispatch a host call while sharing the sandbox memory manager with
+    /// other host threads. The run loop takes the memory-manager mutex only
+    /// around IO exits; slot-based invoke workers use this so KVM can keep
+    /// running while callers post jobs into scratch.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn dispatch_call_from_host_on_shared(
+        &self,
+        lane: VcpuLane,
+        mem_mgr: &Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.prepare_dispatch_call_from_host(lane)?;
+        let result = self
+            .run_on_shared(lane, mem_mgr, host_funcs)
+            .map_err(DispatchGuestCallError::Run);
+
+        // Clear the TLB flush flag only after run() returns. The guest
+        // may have been cancelled before it executed the flush.
+        self.pending_tlb_flush.store(false, Ordering::Release);
+
+        result
+    }
+
+    fn prepare_dispatch_call_from_host(
+        &self,
+        lane: VcpuLane,
     ) -> std::result::Result<(), DispatchGuestCallError> {
         let NextAction::Call(dispatch_func_addr) = self.entrypoint else {
             return Err(DispatchGuestCallError::Uninitialized);
         };
+        let rsp_gva = self
+            .rsp_gva
+            .checked_sub(lane.index() as u64 * nub_host_common::layout::VCPU_DISPATCH_STACK_STRIDE)
+            .ok_or(DispatchGuestCallError::InvalidLaneStack {
+                lane: lane.index(),
+                rsp: self.rsp_gva,
+            })?;
         let mut rflags = 1 << 1; // RFLAGS.1 is RES1
-        if self.pending_tlb_flush {
+        if self.pending_tlb_flush.load(Ordering::Acquire) {
             rflags |= 1 << 6; // set ZF if we need a tlb flush done before anything else executes
         }
         // set RIP and RSP, reset others
@@ -191,27 +262,25 @@ impl HyperlightVm {
             // address).  However, the x64 entry stub in
             // hyperlight_guest::arch::dispatch handles this itself,
             // so we do use the aligned address here.
-            rsp: self.rsp_gva,
+            rsp: rsp_gva,
             rflags,
             ..Default::default()
         };
         self.vm
-            .set_regs(&regs)
+            .set_regs_on(lane, &regs)
             .map_err(DispatchGuestCallError::SetupRegs)?;
 
         // reset fpu
-        self.vm
-            .set_fpu(&CommonFpu::default())
-            .map_err(DispatchGuestCallError::SetupRegs)?;
+        if lane == VcpuLane::PRIMARY {
+            self.vm
+                .set_fpu(&CommonFpu::default())
+                .map_err(DispatchGuestCallError::SetupRegs)?;
+        } else {
+            self.vm
+                .set_fpu_on(lane, &CommonFpu::default())
+                .map_err(DispatchGuestCallError::SetupRegs)?;
+        }
 
-        let result = self
-            .run(mem_mgr, host_funcs)
-            .map_err(DispatchGuestCallError::Run);
-
-        // Clear the TLB flush flag only after run() returns. The guest
-        // may have been cancelled before it executed the flush.
-        self.pending_tlb_flush = false;
-
-        result
+        Ok(())
     }
 }

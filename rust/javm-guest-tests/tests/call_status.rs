@@ -87,7 +87,7 @@ fn put_instance(nub: &mut Nub, img: &Image, cnode_h: [u8; 32]) -> nub::AbiCapHas
 
 #[test]
 fn phi8_status_is_ok_after_normal_call() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     let sender_h = nub
         .put_cap(&Cap::Instance(yield_sender(&Key::from(YIELD_KEY))))

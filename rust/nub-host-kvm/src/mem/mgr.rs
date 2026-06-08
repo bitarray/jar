@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use nub_arch_x86_abi::ParallelInvokeSlot;
 use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
+use std::mem::{align_of, offset_of, size_of};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
@@ -250,6 +252,57 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
 }
 
 impl SandboxMemoryManager<HostSharedMemory> {
+    #[allow(dead_code)]
+    pub(crate) fn parallel_invoke_slots_gva(&self) -> u64 {
+        self.layout.get_parallel_invoke_slots_gva()
+    }
+
+    pub(crate) fn parallel_invoke_slot_scratch_host_offset(&self, lane: usize) -> usize {
+        self.layout
+            .get_parallel_invoke_slot_scratch_host_offset(lane)
+    }
+
+    pub(crate) fn parallel_invoke_slot_host_ptr(
+        &self,
+        lane: usize,
+    ) -> Result<*mut ParallelInvokeSlot> {
+        let offset = self.parallel_invoke_slot_scratch_host_offset(lane);
+        let len = size_of::<ParallelInvokeSlot>();
+        if offset
+            .checked_add(len)
+            .is_none_or(|end| end > self.scratch_mem.mem_size())
+        {
+            return Err(crate::new_error!(
+                "parallel invoke slot {} is outside scratch memory",
+                lane
+            ));
+        }
+        let ptr = self.scratch_mem.base_ptr().wrapping_add(offset) as *mut ParallelInvokeSlot;
+        debug_assert_eq!(
+            (ptr as usize) % align_of::<ParallelInvokeSlot>(),
+            0,
+            "parallel invoke slot is not ABI-aligned"
+        );
+        Ok(ptr)
+    }
+
+    fn parallel_invoke_slot_field_offset(&self, lane: usize, field_offset: usize) -> usize {
+        self.parallel_invoke_slot_scratch_host_offset(lane) + field_offset
+    }
+
+    pub(crate) fn read_parallel_invoke_status(&self, lane: usize) -> Result<u32> {
+        self.scratch_mem.read::<u32>(
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, status)),
+        )
+    }
+
+    pub(crate) fn write_parallel_invoke_status(&self, lane: usize, status: u32) -> Result<()> {
+        self.scratch_mem.write::<u32>(
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, status)),
+            status,
+        )
+    }
+
     /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto
     /// the guest's input data ring.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
@@ -364,6 +417,12 @@ impl SandboxMemoryManager<HostSharedMemory> {
             self.layout.get_output_data_buffer_scratch_host_offset(),
             SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
+
+        let slot_start = self.layout.get_parallel_invoke_slots_scratch_host_offset();
+        let slot_end = slot_start + self.layout.get_parallel_invoke_slots_size();
+        self.scratch_mem.with_exclusivity(|scratch| {
+            scratch.as_mut_slice()[slot_start..slot_end].fill(0);
+        })?;
 
         // Copy page tables from `shared_mem` into scratch. PT bytes
         // are appended to the snapshot blob at build time and live

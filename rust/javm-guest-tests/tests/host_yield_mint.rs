@@ -110,7 +110,7 @@ fn run(nub: &mut Nub, sender_slot: u8) -> (u32, u32) {
 
 #[test]
 fn host_yield_mint_yield_via_kernel_root() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Positive: yielding the kernel:mint_yield sender runs the syscall inline;
     // the guest resumes and halts cleanly (reason 4, arg 0 — the trailing

@@ -110,7 +110,7 @@ fn run(nub: &mut Nub, src: u8) -> (u32, u32) {
 
 #[test]
 fn root_cnode_instance_is_visible_to_guest() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Positive: the root-cnode Cap::Instance at INSTANCE_SLOT is visible, so
     // host_image_hash_chain reads it and the guest halts cleanly (reason 4,

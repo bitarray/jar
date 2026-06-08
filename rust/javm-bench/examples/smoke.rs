@@ -96,7 +96,7 @@ mod imp {
         // One long-lived Hyperlight sandbox for every workload — never torn
         // down and rebuilt (that re-mmap'd the snapshot at the same fixed guest
         // VA and corrupted host heap). It publishes all workloads' caps cleanly.
-        let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+        let mut recomp = Nub::hyperlight().expect("Nub::hyperlight");
         let mut passes = 0usize;
         let mut fails: Vec<(&str, String)> = Vec::new();
 

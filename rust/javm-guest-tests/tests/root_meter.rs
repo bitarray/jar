@@ -1,11 +1,13 @@
-//! The TOP-level frame's own primary gas meter (`gas_slots` → `Gas{root_meter}`)
-//! is a first-class meter: `kernel:set_gas_meter` on it reads/writes the LIVE
-//! balance, so a chain can self-harvest its root meter (`set_gas_meter(root, 0)`
-//! returns the remaining and zeroes it), exactly like a child meter.
+//! The TOP-level frame's own primary gas meter (`gas_slots` -> `Gas{root_meter}`)
+//! is a first-class task-local meter: `kernel:set_gas_meter` on it reads/writes
+//! the LIVE balance, so a chain can self-harvest its root meter
+//! (`set_gas_meter(root, 0)` returns the remaining and zeroes it), exactly like
+//! a child meter.
 //!
 //! Regression for the validation finding "the top frame's own meter cannot be
 //! read/written via set_gas_meter" (it was stamped active=None and never seeded).
-//! With the fix the guest resolves and seeds the root meter from the host budget.
+//! With the fix the guest resolves and seeds the root meter from the invoke's
+//! initial gas budget.
 //!
 //! Gated to the nub Hyperlight host (linux-x86_64).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -29,7 +31,7 @@ fn ecalli(imm: u32) -> u32 {
 
 #[test]
 fn root_meter_self_harvest_via_set_gas_meter() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // The set_gas_meter YieldSender + the top's Gas{ROOT_METER} handle.
     let sender_h = nub
@@ -91,9 +93,6 @@ fn root_meter_self_harvest_via_set_gas_meter() {
         ))
         .expect("put instance");
 
-    // Fund the root meter host-side; invoke_cached seeds the run from it.
-    nub.set_meter(Key::from(ROOT_METER), BUDGET);
-
     // φ7=SENDER_SLOT, φ8=ROOT_METER, φ9=0 (the harvest value).
     let r = nub
         .invoke_cached(
@@ -111,10 +110,9 @@ fn root_meter_self_harvest_via_set_gas_meter() {
         "set_gas_meter(root,0) must return the live remaining, got {}",
         r.return_value,
     );
-    // It zeroed the meter: the harvested run leaves the root meter at 0.
+    // It zeroed the task-local meter; there is no host-side meter map to update.
     assert_eq!(
-        nub.get_meter(&Key::from(ROOT_METER)),
-        0,
-        "set_gas_meter(root,0) must zero the root meter",
+        r.gas_remaining, 0,
+        "set_gas_meter(root,0) must zero the root meter for this invocation",
     );
 }

@@ -31,6 +31,8 @@ pub mod cached_cap;
 #[cfg(target_os = "none")]
 pub mod call_loop;
 #[cfg(target_os = "none")]
+pub mod execution_lane;
+#[cfg(target_os = "none")]
 pub mod jit_cache;
 #[cfg(target_os = "none")]
 pub mod jit_run;

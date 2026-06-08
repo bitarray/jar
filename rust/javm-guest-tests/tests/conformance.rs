@@ -27,25 +27,12 @@ mod backend {
     use javm_cap::{Cap, Key, NUM_REGS};
     use nub::Nub;
     use ssz::Decode;
-    use std::sync::{Mutex, OnceLock};
 
     const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
     const GAS_BUDGET: u64 = 10_000_000_000;
 
     pub fn image() -> Image {
         Image::from_ssz_bytes(BLOB).expect("SSZ-decode guest-tests Image")
-    }
-
-    /// One Hyperlight sandbox shared across every test thread.
-    /// `Nub::new_hyperlight()` reserves a fixed host VA range and only one
-    /// live sandbox per process can occupy it (see
-    /// `nub_host_common::layout::reserve_guest_va_range`); sandbox
-    /// construction also costs ~hundreds of ms, so sharing keeps the run
-    /// dominated by JIT execution rather than boot. The same pattern is
-    /// used by the bench drivers in `javm-bench`.
-    fn hyperlight() -> &'static Mutex<Nub> {
-        static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
-        NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
     }
 
     /// Interpreter arm: a fresh in-process `LocalArch` Nub per call (cheap —
@@ -56,7 +43,11 @@ mod backend {
 
     /// Recompiler arm: the shared Hyperlight sandbox.
     pub fn recomp(image: &Image, ep: u8) -> (u64, u64) {
-        run(&mut hyperlight().lock().expect("nub mutex"), image, ep)
+        run(
+            &mut Nub::hyperlight().expect("Hyperlight sandbox"),
+            image,
+            ep,
+        )
     }
 
     /// Publish the canonical Image + an empty root CNode + an Instance
