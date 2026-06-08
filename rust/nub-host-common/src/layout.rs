@@ -117,6 +117,21 @@ pub const SCRATCH_TOP_SNAPSHOT_PT_GPA_BASE_OFFSET: u64 = 0x18;
 pub const SCRATCH_TOP_SNAPSHOT_GENERATION_OFFSET: u64 = 0x20;
 pub const SCRATCH_TOP_EXN_STACK_OFFSET: u64 = 0x30;
 
+/// Bytes reserved for each vCPU's ring-0 exception/interrupt stack. The stack
+/// top for lane `n` is below the legacy Hyperlight exception-stack top by
+/// `n * VCPU_EXCEPTION_STACK_STRIDE`.
+pub const VCPU_EXCEPTION_STACK_STRIDE: u64 = 64 * 1024;
+
+/// Bytes reserved for each vCPU's host-dispatch stack. These stacks are used
+/// while executing guest function dispatchers and long-lived invoke workers,
+/// not for ring-3 PVM execution.
+pub const VCPU_DISPATCH_STACK_STRIDE: u64 = 64 * 1024;
+
+/// Fixed number of dispatch-stack lanes mapped by the guest at boot. The
+/// public Nub default caps at 8 vCPUs, but this leaves headroom for explicit
+/// test/bench overrides without needing a guest ABI field during phase 1.
+pub const VCPU_DISPATCH_STACK_LANES: u64 = 64;
+
 pub fn scratch_base_gpa(size: usize) -> u64 {
     (MAX_GPA - size + 1) as u64
 }

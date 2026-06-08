@@ -2,9 +2,9 @@
 //!
 //! This test prepublishes several independent compute workloads, submits them
 //! through cloned `Nub` handles, checks the pinned serial results, then runs one
-//! normal follow-up invoke on the same singleton. Today the host call boundary
-//! still serializes inside the sandbox; this test locks in the public API shape
-//! that the guest multi-lane worker will use for true KVM parallelism.
+//! normal follow-up invoke on the same singleton. With `vcpu_count > 1`, the
+//! submitted refine jobs are routed through the KVM worker lanes rather than
+//! the legacy serialized control call path.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 

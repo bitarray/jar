@@ -183,6 +183,7 @@ pub const PARALLEL_INVOKE_STATUS_READY: u32 = 1;
 pub const PARALLEL_INVOKE_STATUS_RUNNING: u32 = 2;
 pub const PARALLEL_INVOKE_STATUS_DONE: u32 = 3;
 pub const PARALLEL_INVOKE_STATUS_STOP: u32 = 4;
+pub const PARALLEL_INVOKE_STATUS_STARTING: u32 = 5;
 
 /// One host<->guest invoke slot. Slots are addressed by lane index at
 /// `parallel_slot_base + lane * PARALLEL_INVOKE_SLOT_BYTES`.

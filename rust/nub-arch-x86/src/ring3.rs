@@ -34,11 +34,11 @@
 //!
 //! Notes:
 //!
-//! * **IST=1 for vector 0x81.** Hyperlight already sets up an
-//!   exception stack at `MAX_GVA - SCRATCH_TOP_EXN_STACK_OFFSET + 1`
-//!   and points TSS.IST1 at it. Using IST=1 means we don't need to
-//!   touch TSS.RSP0; the interrupt frame lands on the exception
-//!   stack and we abandon it after copying RAX out.
+//! * **IST=1 for vector 0x81.** [`prepare_ring3_entry`] installs a
+//!   lane-local TSS whose IST1 points at the active vCPU lane's private
+//!   exception stack. Using IST=1 means we don't need to touch TSS.RSP0;
+//!   the interrupt frame lands on that lane's exception stack and we abandon
+//!   it after copying RAX out.
 //! * **Lane-local state.** [`prepare_ring3_entry`] points GS at the active
 //!   lane's [`Ring3LaneRaw`]. The entry/exit assembly stores its saved kernel
 //!   RSP, saved CR3, and user RAX through GS, so two vCPUs can take the exit
@@ -48,8 +48,10 @@
 //!   side swapped before the final `int 0x81`.
 
 use core::cell::UnsafeCell;
-use core::mem::offset_of;
+use core::mem::{offset_of, size_of};
+use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Once;
 
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 
@@ -109,6 +111,137 @@ impl Ring3LaneState {
 static RING3_LANES: [Ring3LaneState; MAX_EXECUTION_LANES] =
     [const { Ring3LaneState::new() }; MAX_EXECUTION_LANES];
 
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+struct GdtEntry {
+    limit_low: u16,
+    base_low: u16,
+    base_middle: u8,
+    access: u8,
+    flags_limit: u8,
+    base_high: u8,
+}
+
+impl GdtEntry {
+    const fn new(base: u32, limit: u32, access: u8, flags: u8) -> Self {
+        Self {
+            limit_low: (limit & 0xffff) as u16,
+            base_low: (base & 0xffff) as u16,
+            base_middle: ((base >> 16) & 0xff) as u8,
+            access,
+            flags_limit: (((limit >> 16) & 0x0f) as u8) | ((flags & 0x0f) << 4),
+            base_high: ((base >> 24) & 0xff) as u8,
+        }
+    }
+
+    const fn user(access: u8, flags: u8) -> Self {
+        Self {
+            limit_low: 0,
+            base_low: 0,
+            base_middle: 0,
+            access,
+            flags_limit: (flags & 0x0f) << 4,
+            base_high: 0,
+        }
+    }
+
+    const fn tss(base: u64, limit: u32) -> [Self; 2] {
+        [
+            Self {
+                limit_low: (limit & 0xffff) as u16,
+                base_low: (base & 0xffff) as u16,
+                base_middle: ((base >> 16) & 0xff) as u8,
+                access: 0x89,
+                flags_limit: ((limit >> 16) & 0x0f) as u8,
+                base_high: ((base >> 24) & 0xff) as u8,
+            },
+            Self {
+                limit_low: ((base >> 32) & 0xffff) as u16,
+                base_low: ((base >> 48) & 0xffff) as u16,
+                base_middle: 0,
+                access: 0,
+                flags_limit: 0,
+                base_high: 0,
+            },
+        ]
+    }
+}
+
+#[repr(C, packed)]
+struct Tss {
+    _rsvd0: [u8; 4],
+    _rsp0: u64,
+    _rsp1: u64,
+    _rsp2: u64,
+    _rsvd1: [u8; 8],
+    ist1: u64,
+    _ist2: u64,
+    _ist3: u64,
+    _ist4: u64,
+    _ist5: u64,
+    _ist6: u64,
+    _ist7: u64,
+    _rsvd2: [u8; 10],
+    _iomap_base: u16,
+}
+
+impl Tss {
+    const fn new() -> Self {
+        Self {
+            _rsvd0: [0; 4],
+            _rsp0: 0,
+            _rsp1: 0,
+            _rsp2: 0,
+            _rsvd1: [0; 8],
+            ist1: 0,
+            _ist2: 0,
+            _ist3: 0,
+            _ist4: 0,
+            _ist5: 0,
+            _ist6: 0,
+            _ist7: 0,
+            _rsvd2: [0; 10],
+            _iomap_base: size_of::<Tss>() as u16,
+        }
+    }
+}
+
+#[repr(C, align(16))]
+struct LaneCpuControl {
+    gdt: [GdtEntry; 7],
+    tss: Tss,
+}
+
+impl LaneCpuControl {
+    const fn new() -> Self {
+        Self {
+            gdt: [GdtEntry::new(0, 0, 0, 0); 7],
+            tss: Tss::new(),
+        }
+    }
+}
+
+struct LaneCpuControlCell {
+    raw: UnsafeCell<LaneCpuControl>,
+}
+
+unsafe impl Sync for LaneCpuControlCell {}
+
+impl LaneCpuControlCell {
+    const fn new() -> Self {
+        Self {
+            raw: UnsafeCell::new(LaneCpuControl::new()),
+        }
+    }
+}
+
+static LANE_CPU: [LaneCpuControlCell; MAX_EXECUTION_LANES] =
+    [const { LaneCpuControlCell::new() }; MAX_EXECUTION_LANES];
+static LANE_CPU_READY: [AtomicBool; MAX_EXECUTION_LANES] =
+    [const { AtomicBool::new(false) }; MAX_EXECUTION_LANES];
+
+const TSS_SEL: u16 = 0x18;
+
 const LANE_INDEX_OFFSET: usize = offset_of!(Ring3LaneRaw, lane_index);
 const KERNEL_RESUME_RSP_OFFSET: usize = offset_of!(Ring3LaneRaw, kernel_resume_rsp);
 const SAVED_CR3_OFFSET: usize = offset_of!(Ring3LaneRaw, saved_cr3);
@@ -140,6 +273,62 @@ unsafe fn write_gs_bases(base: u64) {
         // correct even if a prior exception left it swapped.
         write_msr(IA32_KERNEL_GS_BASE, base);
     }
+}
+
+fn lane_exception_stack_top(lane: usize) -> u64 {
+    nub_host_common::layout::MAX_GVA as u64 - nub_host_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
+        + 1
+        - lane as u64 * nub_host_common::layout::VCPU_EXCEPTION_STACK_STRIDE
+}
+
+/// Install the lane-local GDT/TSS for the current vCPU.
+///
+/// Hyperlight's boot path starts every vCPU with lane 0's post-boot SREGs, so
+/// all lanes initially share one TSS and therefore one IST1 stack. Concurrent
+/// ring-3 exits and page faults need independent IST storage; otherwise two
+/// vCPUs can scribble over the same interrupt frames. We keep the selector
+/// layout identical to the boot GDT, but point the TSS descriptor at
+/// per-lane storage and load TR once for that lane.
+///
+/// # Safety
+/// Must run in ring 0 on the vCPU represented by `lane`, before that lane
+/// enters ring 3. A lane must not call this concurrently with itself.
+unsafe fn install_lane_cpu_control(lane: ExecutionLane) {
+    let idx = lane.index();
+    if LANE_CPU_READY[idx].load(Ordering::Acquire) {
+        return;
+    }
+
+    let ctrl = LANE_CPU[idx].raw.get();
+    let tss_ptr = unsafe { ptr::addr_of_mut!((*ctrl).tss) };
+    unsafe {
+        ptr::write(tss_ptr, Tss::new());
+        ptr::addr_of_mut!((*tss_ptr).ist1).write_unaligned(lane_exception_stack_top(idx));
+    }
+
+    let tss_base = tss_ptr as u64;
+    let tss_limit = (size_of::<Tss>() - 1) as u32;
+    let tss = GdtEntry::tss(tss_base, tss_limit);
+    let gdt = [
+        GdtEntry::new(0, 0, 0, 0),
+        GdtEntry::new(0, 0, 0x9A, 0xA),
+        GdtEntry::new(0, 0, 0x92, 0xC),
+        tss[0],
+        tss[1],
+        GdtEntry::user(0xFA, 0xA),
+        GdtEntry::user(0xF2, 0xC),
+    ];
+    unsafe {
+        ptr::addr_of_mut!((*ctrl).gdt).write(gdt);
+        let gdtr = crate::segments::GdtDescriptor {
+            limit: (size_of::<[GdtEntry; 7]>() - 1) as u16,
+            base: ptr::addr_of!((*ctrl).gdt) as u64,
+        };
+        crate::segments::lgdt(&gdtr);
+        core::arch::asm!("ltr ax", in("ax") TSS_SEL, options(nostack, preserves_flags));
+    }
+
+    LANE_CPU_READY[idx].store(true, Ordering::Release);
 }
 
 /// Return the lane selected by the current GS base. Valid while running in the
@@ -254,7 +443,10 @@ core::arch::global_asm!(
 /// by the currently running vCPU.
 pub unsafe fn prepare_ring3_entry(lane: ExecutionLane) {
     lane.assert_in_range();
-    unsafe { install_ring3_exit_gate() };
+    unsafe {
+        install_lane_cpu_control(lane);
+        install_ring3_exit_gate();
+    }
     let state = &RING3_LANES[lane.index()];
     unsafe {
         state.reset_for_entry(lane);
@@ -275,23 +467,22 @@ pub unsafe fn prepare_ring3_entry(lane: ExecutionLane) {
 /// this from an interrupt handler (which would race against the
 /// current CPU's GDTR/IDTR pointer).
 pub unsafe fn install_ring3_exit_gate() {
-    // First-call-only: install GDT user segments + patch IDT entry
-    // for the ring-3 exit vector. Both `install_user_segments` and
-    // `install_dpl3_handler` `Box::leak` ~4 KiB of memory (the new
-    // IDT + descriptor) on every call — re-running them per
-    // invocation leaked 4106 B/iter (confirmed via `talc::counters`).
-    // The installed IDT is shared across all invocations; nothing
-    // about it depends on per-call state.
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if !INSTALLED.swap(true, Ordering::AcqRel) {
-        // SAFETY: ring-0 GDT/IDT mutation; see module-level docs.
-        unsafe {
-            crate::segments::install_user_segments();
-            let _ = crate::segments::install_dpl3_handler(
+    // The IDT storage allocation is process-global, but GDTR/IDTR are vCPU
+    // registers. Every lane must reload its GDT limit (for USER_CS/USER_DS)
+    // and IDT base (for vector 0x81), while the ~4 KiB IDT buffer is created
+    // only once.
+    static RING3_IDT: Once<&'static crate::segments::IdtDescriptor> = Once::new();
+
+    // SAFETY: ring-0 GDT/IDT mutation; see module-level docs.
+    unsafe {
+        crate::segments::install_user_segments();
+        let descriptor = RING3_IDT.call_once(|| {
+            crate::segments::install_dpl3_handler(
                 RING3_EXIT_VECTOR,
                 nub_ring3_exit_stub as *const () as u64,
-                1, // IST=1, run on the pre-existing exception stack
-            );
-        }
+                1, // IST=1, run on the lane-local exception stack
+            )
+        });
+        crate::segments::lidt(descriptor);
     }
 }

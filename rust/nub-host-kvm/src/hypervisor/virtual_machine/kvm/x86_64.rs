@@ -73,7 +73,7 @@ pub(crate) fn is_hypervisor_present() -> bool {
 ///
 /// The legacy control path still drives only lane 0. Creating the
 /// whole pool up front mirrors the fixed KVM memory-region model and gives the
-/// parallel invoke worker ABI stable vCPU identities to attach to later.
+/// parallel invoke workers stable vCPU identities for the sandbox lifetime.
 #[derive(Debug)]
 pub(crate) struct KvmVm {
     vm_fd: VmFd,
@@ -230,5 +230,16 @@ impl VirtualMachine for KvmVm {
             .set_sregs(&kvm_sregs)
             .map_err(|e| RegisterError::SetSregs(e.into()))?;
         Ok(())
+    }
+
+    fn sregs_on(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<CommonSpecialRegisters, RegisterError> {
+        let kvm_sregs = self
+            .vcpu_for_register(lane)?
+            .get_sregs()
+            .map_err(|e| RegisterError::GetRegs(e.into()))?;
+        Ok((&kvm_sregs).into())
     }
 }

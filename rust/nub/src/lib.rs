@@ -118,9 +118,9 @@ struct NubInner {
 /// Options used when constructing the process-wide Hyperlight Nub singleton.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NubOptions {
-    /// Fixed vCPU pool size for the backing sandbox. The current hot path still
-    /// enters lane 0; the value is plumbed through the host substrate so the
-    /// multi-lane worker ABI can attach to the same stable pool.
+    /// Fixed vCPU pool size for the backing sandbox. Multi-vCPU Hyperlight
+    /// sandboxes keep one hot worker per lane and route top-level invokes
+    /// through those workers.
     pub vcpu_count: usize,
 }
 
@@ -237,7 +237,7 @@ enum Backend {
     /// hashes host-side to short-circuit idempotent re-puts (it does
     /// *not* dereference the guest's hashbrown — see
     /// `MultiUseSandbox::published_blobs` for why that is unsound).
-    Hyperlight(Box<HyperlightDriver>),
+    Hyperlight(Arc<HyperlightDriver>),
 }
 
 /// Host-side RPC stub for the Hyperlight backend. The real kernel
@@ -251,7 +251,7 @@ struct HyperlightDriver {
     /// authoritative cap directory lives guest-side). This is the host's own
     /// `CacheDirectory` — not a deref of the guest's hashbrown (which is
     /// unsound across the SIMD-width boundary; see `MultiUseSandbox`).
-    host_cache: CacheDirectory,
+    host_cache: Mutex<CacheDirectory>,
 }
 
 impl Nub {
@@ -339,10 +339,10 @@ impl Nub {
         let sandbox = uninit.evolve()?;
         Ok(Self {
             inner: Arc::new(NubInner {
-                backend: Mutex::new(Backend::Hyperlight(Box::new(HyperlightDriver {
+                backend: Mutex::new(Backend::Hyperlight(Arc::new(HyperlightDriver {
                     sandbox,
                     state_root_cache: [0; 32],
-                    host_cache: CacheDirectory::new(),
+                    host_cache: Mutex::new(CacheDirectory::new()),
                 }))),
                 meters: Mutex::new(HashMap::new()),
                 quotas: Mutex::new(HashMap::new()),
@@ -435,7 +435,11 @@ impl Nub {
                 // Mirror into the host-side cache so `invoke_cached` can resolve
                 // gas_slots → meter_key host-side (best-effort; the guest cache
                 // is authoritative for execution).
-                let _ = h.host_cache.put_cap(cap);
+                let _ = h
+                    .host_cache
+                    .lock()
+                    .expect("Hyperlight host cache mutex poisoned")
+                    .put_cap(cap);
                 h.sandbox
                     .put_cap(cap)
                     .map_err(|e| anyhow::anyhow!("put_cap: {e}"))
@@ -469,7 +473,11 @@ impl Nub {
                 .put_cap_with_hash(hash, cap)
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
             Backend::Hyperlight(h) => {
-                let _ = h.host_cache.put_cap_with_hash(hash, cap);
+                let _ = h
+                    .host_cache
+                    .lock()
+                    .expect("Hyperlight host cache mutex poisoned")
+                    .put_cap_with_hash(hash, cap);
                 h.sandbox
                     .put_cap_with_hash(hash, cap)
                     .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}"))
@@ -535,15 +543,20 @@ impl Nub {
             .expect("Nub backend mutex poisoned");
         let cache = match &*backend {
             Backend::Local { cache, .. } => cache,
-            Backend::Hyperlight(h) => &h.host_cache,
+            Backend::Hyperlight(h) => {
+                let cache = h
+                    .host_cache
+                    .lock()
+                    .expect("Hyperlight host cache mutex poisoned");
+                return resolve_meter_key_from(&cache, instance_hash);
+            }
         };
         resolve_meter_key_from(cache, instance_hash)
     }
 
-    /// Submit an invocation to the singleton Nub and return a job handle. This
-    /// compatibility implementation uses a host worker thread per submitted
-    /// job; the KVM backend still serializes at the sandbox boundary until the
-    /// guest multi-lane worker ABI lands.
+    /// Submit an invocation to the singleton Nub and return a job handle. The
+    /// Hyperlight backend uses a host-side waiter thread for the job while the
+    /// actual guest execution runs on the sandbox's fixed vCPU worker lanes.
     pub fn submit_invoke(&self, request: InvokeRequest) -> Result<InvokeJob> {
         let id = InvokeJobId(self.inner.next_job_id.fetch_add(1, Ordering::Relaxed));
         let state = Arc::new(InvokeJobState::new());
@@ -553,7 +566,7 @@ impl Nub {
             .name(format!("nub-invoke-{}", id.0))
             .spawn(move || {
                 let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    nub.invoke_request_blocking(request)
+                    nub.invoke_request_blocking(request, id.0)
                 }))
                 .map_err(|_| "invoke worker panicked".to_string())
                 .and_then(|r| r.map_err(|e| format!("{e:#}")));
@@ -579,15 +592,23 @@ impl Nub {
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        self.invoke_request_blocking(InvokeRequest {
-            instance_hash,
-            endpoint_idx,
-            args,
-            initial_gas,
-        })
+        let job_id = self.inner.next_job_id.fetch_add(1, Ordering::Relaxed);
+        self.invoke_request_blocking(
+            InvokeRequest {
+                instance_hash,
+                endpoint_idx,
+                args,
+                initial_gas,
+            },
+            job_id,
+        )
     }
 
-    fn invoke_request_blocking(&self, request: InvokeRequest) -> Result<InvocationResult> {
+    fn invoke_request_blocking(
+        &self,
+        request: InvokeRequest,
+        job_id: u64,
+    ) -> Result<InvocationResult> {
         let meter_key = self.resolve_gas_meter_key(request.instance_hash);
         let meter_balance = meter_key.as_ref().map(|k| self.get_meter(k)).unwrap_or(0);
         let (budget, used_meter) = match &meter_key {
@@ -610,6 +631,7 @@ impl Nub {
         }
 
         let result = self.invoke_cached_raw(
+            job_id,
             request.instance_hash,
             request.endpoint_idx,
             request.args,
@@ -637,81 +659,93 @@ impl Nub {
     /// already resolved (meter-seeded or call-supplied).
     fn invoke_cached_raw(
         &self,
+        job_id: u64,
         instance_hash: AbiCapHash,
         endpoint_idx: u8,
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        let mut backend = self
-            .inner
-            .backend
-            .lock()
-            .expect("Nub backend mutex poisoned");
-        match &mut *backend {
-            Backend::Local { cache, .. } => {
-                // Resolve the instance + image from the in-process
-                // cache and drive the PVM2 (RISC-V) interpreter.
-                let instance_cap = cache
-                    .get(CapHashOrRef::Hash(instance_hash))
-                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
-                let inst = match &*instance_cap {
-                    Cap::Instance(i) => i.clone(),
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "invoke_cached: cap at hash is not an Instance"
-                        ));
-                    }
-                };
-                let image_cap = cache
-                    .get(CapHashOrRef::Hash(inst.image_hash))
-                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
-                let img = match &*image_cap {
-                    Cap::Image(i) => i.clone(),
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "invoke_cached: cap at image_hash is not an Image"
-                        ));
-                    }
-                };
-                Ok(nub_arch_local::run_instance(
-                    &inst,
-                    &img,
-                    endpoint_idx,
-                    args,
-                    initial_gas,
-                ))
+        let hyperlight = {
+            let mut backend = self
+                .inner
+                .backend
+                .lock()
+                .expect("Nub backend mutex poisoned");
+            match &mut *backend {
+                Backend::Local { cache, .. } => {
+                    // Resolve the instance + image from the in-process
+                    // cache and drive the PVM2 (RISC-V) interpreter.
+                    let instance_cap = cache
+                        .get(CapHashOrRef::Hash(instance_hash))
+                        .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
+                    let inst = match &*instance_cap {
+                        Cap::Instance(i) => i.clone(),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "invoke_cached: cap at hash is not an Instance"
+                            ));
+                        }
+                    };
+                    let image_cap = cache
+                        .get(CapHashOrRef::Hash(inst.image_hash))
+                        .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
+                    let img = match &*image_cap {
+                        Cap::Image(i) => i.clone(),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "invoke_cached: cap at image_hash is not an Image"
+                            ));
+                        }
+                    };
+                    return Ok(nub_arch_local::run_instance(
+                        &inst,
+                        &img,
+                        endpoint_idx,
+                        args,
+                        initial_gas,
+                    ));
+                }
+                Backend::Hyperlight(h) => h.clone(),
             }
-            Backend::Hyperlight(h) => {
-                // No host-side pin/unpin — the cap is owned by the
-                // guest's heap-resident DIRECTORY; there's nothing for
-                // the host to lock against (the guest doesn't evict).
-                let packet = InvokePacket {
-                    instance_hash,
-                    endpoint_idx: endpoint_idx as u32,
-                    _pad: 0,
-                    args,
-                    initial_gas,
-                };
-                let result_bytes = h
-                    .sandbox
-                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes())?;
+        };
 
-                let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
-                aligned.extend_from_slice(&result_bytes);
-                let archived = rkyv::access::<ArchivedInvocationResult, rkyv::rancor::Error>(
-                    aligned.as_slice(),
-                )
-                .map_err(|e| anyhow::anyhow!("rkyv-access InvocationResult: {e}"))?;
-                Ok(InvocationResult {
-                    exit_reason: archived.exit_reason.to_native(),
-                    exit_arg: archived.exit_arg.to_native(),
-                    return_value: archived.return_value.to_native(),
-                    gas_remaining: archived.gas_remaining.to_native(),
-                    // `[u8; N]` archives byte-identically (u8 has no endianness).
-                    scratchpad_head: archived.scratchpad_head,
-                })
-            }
+        // No host-side pin/unpin — the cap is owned by the guest's
+        // heap-resident DIRECTORY; there's nothing for the host to lock against
+        // (the guest doesn't evict). Multi-vCPU sandboxes use the per-lane worker
+        // slots; the single-vCPU case keeps the legacy RPC path so control-only
+        // tests do not start a permanent worker on lane 0.
+        let packet = InvokePacket {
+            instance_hash,
+            endpoint_idx: endpoint_idx as u32,
+            _pad: 0,
+            args,
+            initial_gas,
+        };
+
+        if hyperlight.sandbox.vcpu_count()? > 1 {
+            return hyperlight
+                .sandbox
+                .invoke_cached_parallel(job_id, &packet)
+                .map_err(|e| anyhow::anyhow!("invoke_cached_parallel: {e}"));
         }
+
+        let result_bytes = hyperlight
+            .sandbox
+            .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes())?;
+
+        let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
+        aligned.extend_from_slice(&result_bytes);
+        let archived =
+            rkyv::access::<ArchivedInvocationResult, rkyv::rancor::Error>(aligned.as_slice())
+                .map_err(|e| anyhow::anyhow!("rkyv-access InvocationResult: {e}"))?;
+        Ok(InvocationResult {
+            exit_reason: archived.exit_reason.to_native(),
+            exit_arg: archived.exit_arg.to_native(),
+            return_value: archived.return_value.to_native(),
+            gas_remaining: archived.gas_remaining.to_native(),
+            // `[u8; N]` archives byte-identically (u8 has no endianness).
+            scratchpad_head: archived.scratchpad_head,
+        })
     }
 }
 

@@ -1151,11 +1151,11 @@ impl KernelTask {
     }
 }
 
-/// Cooperative phase-1 scheduler: many task stacks can be resident, but exactly
-/// one is active on the single vCPU at any instant. Switching only happens at
-/// existing ring-3 exits. Later phases should keep the singleton host Nub, add a
-/// production batch/async submission API, and then split the ring3/JIT globals
-/// into per-vCPU execution lanes before true parallel scheduling.
+/// Cooperative per-lane scheduler: many task stacks can be resident for one
+/// execution lane, but exactly one task is active on that lane at any instant.
+/// Switching only happens at existing ring-3 exits. Multi-vCPU Hyperlight runs
+/// one worker per lane; cross-lane task migration and work stealing remain
+/// future scheduler work.
 struct KernelScheduler {
     lane: ExecutionLane,
     next_task_id: TaskId,

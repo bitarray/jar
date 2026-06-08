@@ -163,6 +163,10 @@ impl HyperlightVm {
         }
         self.rsp_gva = regs.rsp;
         self.entrypoint = NextAction::Call(regs.rax);
+        let sregs = self.vm.sregs()?;
+        for lane in 1..self.vm.vcpu_count() {
+            self.vm.set_sregs_on(VcpuLane::new(lane), &sregs)?;
+        }
 
         Ok(())
     }
@@ -184,9 +188,8 @@ impl HyperlightVm {
     }
 
     /// Dispatch a host call on a selected vCPU lane. The old shared input/output
-    /// ring is still serialized by the caller, so this is not a concurrent hot
-    /// path yet; it proves that non-primary vCPUs can enter the guest and gives
-    /// the future worker queue a lane-addressed entry primitive.
+    /// ring is still serialized by the caller; the concurrent invoke workers
+    /// use this only as their long-lived entry into the guest.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn dispatch_call_from_host_on(
         &self,
@@ -194,9 +197,55 @@ impl HyperlightVm {
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
     ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.prepare_dispatch_call_from_host(lane)?;
+        let result = self
+            .run_on(lane, mem_mgr, host_funcs)
+            .map_err(DispatchGuestCallError::Run);
+
+        // Clear the TLB flush flag only after run() returns. The guest
+        // may have been cancelled before it executed the flush.
+        self.pending_tlb_flush.store(false, Ordering::Release);
+
+        result
+    }
+
+    /// Dispatch a host call while sharing the sandbox memory manager with
+    /// other host threads. The run loop takes the memory-manager mutex only
+    /// around IO exits; slot-based invoke workers use this so KVM can keep
+    /// running while callers post jobs into scratch.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn dispatch_call_from_host_on_shared(
+        &self,
+        lane: VcpuLane,
+        mem_mgr: &Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.prepare_dispatch_call_from_host(lane)?;
+        let result = self
+            .run_on_shared(lane, mem_mgr, host_funcs)
+            .map_err(DispatchGuestCallError::Run);
+
+        // Clear the TLB flush flag only after run() returns. The guest
+        // may have been cancelled before it executed the flush.
+        self.pending_tlb_flush.store(false, Ordering::Release);
+
+        result
+    }
+
+    fn prepare_dispatch_call_from_host(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
         let NextAction::Call(dispatch_func_addr) = self.entrypoint else {
             return Err(DispatchGuestCallError::Uninitialized);
         };
+        let rsp_gva = self
+            .rsp_gva
+            .checked_sub(lane.index() as u64 * nub_host_common::layout::VCPU_DISPATCH_STACK_STRIDE)
+            .ok_or(DispatchGuestCallError::InvalidLaneStack {
+                lane: lane.index(),
+                rsp: self.rsp_gva,
+            })?;
         let mut rflags = 1 << 1; // RFLAGS.1 is RES1
         if self.pending_tlb_flush.load(Ordering::Acquire) {
             rflags |= 1 << 6; // set ZF if we need a tlb flush done before anything else executes
@@ -213,7 +262,7 @@ impl HyperlightVm {
             // address).  However, the x64 entry stub in
             // hyperlight_guest::arch::dispatch handles this itself,
             // so we do use the aligned address here.
-            rsp: self.rsp_gva,
+            rsp: rsp_gva,
             rflags,
             ..Default::default()
         };
@@ -232,14 +281,6 @@ impl HyperlightVm {
                 .map_err(DispatchGuestCallError::SetupRegs)?;
         }
 
-        let result = self
-            .run_on(lane, mem_mgr, host_funcs)
-            .map_err(DispatchGuestCallError::Run);
-
-        // Clear the TLB flush flag only after run() returns. The guest
-        // may have been cancelled before it executed the flush.
-        self.pending_tlb_flush.store(false, Ordering::Release);
-
-        result
+        Ok(())
     }
 }

@@ -13,8 +13,8 @@ use nub_arch_x86_abi::{
     BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
     FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
     PARALLEL_INVOKE_SLOT_BYTES, PARALLEL_INVOKE_STATUS_DONE, PARALLEL_INVOKE_STATUS_EMPTY,
-    PARALLEL_INVOKE_STATUS_READY, PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STOP,
-    ParallelInvokeSlot, SCRATCHPAD_HEAD_LEN,
+    PARALLEL_INVOKE_STATUS_READY, PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING,
+    PARALLEL_INVOKE_STATUS_STOP, ParallelInvokeSlot, SCRATCHPAD_HEAD_LEN,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -129,6 +129,13 @@ pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
         return Vec::new();
     };
     let lane = crate::execution_lane::ExecutionLane::new(lane);
+    unsafe {
+        if (*slot).status.load(Ordering::Acquire) == PARALLEL_INVOKE_STATUS_STARTING {
+            (*slot)
+                .status
+                .store(PARALLEL_INVOKE_STATUS_EMPTY, Ordering::Release);
+        }
+    }
 
     loop {
         let status = unsafe { (*slot).status.load(Ordering::Acquire) };

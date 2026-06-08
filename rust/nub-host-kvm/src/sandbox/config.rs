@@ -55,9 +55,9 @@ pub struct SandboxConfiguration {
     interrupt_vcpu_sigrtmin_offset: u8,
     /// How much writable memory to offer the guest
     scratch_size: usize,
-    /// Fixed vCPU pool size for this sandbox. The current call_raw control path
-    /// uses vCPU 0; future parallel invoke lanes consume the remaining stable
-    /// pool without resizing the VM.
+    /// Fixed vCPU pool size for this sandbox. The serialized control plane uses
+    /// one selected lane at a time; parallel invokes attach one hot worker to
+    /// each stable vCPU lane.
     vcpu_count: usize,
 }
 

@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use nub_arch_x86_abi::{InvocationResult, InvokePacket, ParallelInvokeSlot};
 use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
+use std::mem::{MaybeUninit, offset_of, size_of};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
@@ -255,10 +257,65 @@ impl SandboxMemoryManager<HostSharedMemory> {
         self.layout.get_parallel_invoke_slots_gva()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn parallel_invoke_slot_scratch_host_offset(&self, lane: usize) -> usize {
         self.layout
             .get_parallel_invoke_slot_scratch_host_offset(lane)
+    }
+
+    fn parallel_invoke_slot_field_offset(&self, lane: usize, field_offset: usize) -> usize {
+        self.parallel_invoke_slot_scratch_host_offset(lane) + field_offset
+    }
+
+    pub(crate) fn read_parallel_invoke_status(&self, lane: usize) -> Result<u32> {
+        self.scratch_mem.read::<u32>(
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, status)),
+        )
+    }
+
+    pub(crate) fn write_parallel_invoke_status(&self, lane: usize, status: u32) -> Result<()> {
+        self.scratch_mem.write::<u32>(
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, status)),
+            status,
+        )
+    }
+
+    pub(crate) fn write_parallel_invoke_job_id(&self, lane: usize, job_id: u64) -> Result<()> {
+        self.scratch_mem.write::<u64>(
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, job_id)),
+            job_id,
+        )
+    }
+
+    pub(crate) fn write_parallel_invoke_packet(
+        &self,
+        lane: usize,
+        packet: &InvokePacket,
+    ) -> Result<()> {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                packet as *const InvokePacket as *const u8,
+                size_of::<InvokePacket>(),
+            )
+        };
+        self.scratch_mem.copy_from_slice(
+            bytes,
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, packet)),
+        )
+    }
+
+    pub(crate) fn read_parallel_invoke_result(&self, lane: usize) -> Result<InvocationResult> {
+        let mut result = MaybeUninit::<InvocationResult>::uninit();
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                result.as_mut_ptr() as *mut u8,
+                size_of::<InvocationResult>(),
+            )
+        };
+        self.scratch_mem.copy_to_slice(
+            bytes,
+            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, result)),
+        )?;
+        Ok(unsafe { result.assume_init() })
     }
 
     /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto

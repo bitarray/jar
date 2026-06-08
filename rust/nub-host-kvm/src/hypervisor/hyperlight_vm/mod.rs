@@ -107,6 +107,8 @@ pub enum DispatchGuestCallError {
     Run(#[from] RunVmError),
     #[error("Failed to setup registers: {0}")]
     SetupRegs(RegisterError),
+    #[error("Invalid dispatch stack for vCPU lane {lane}: base rsp={rsp:#x}")]
+    InvalidLaneStack { lane: usize, rsp: u64 },
     #[error("VM was uninitialized")]
     Uninitialized,
 }
@@ -118,7 +120,9 @@ impl DispatchGuestCallError {
             // These errors poison the sandbox because they can leave it in an inconsistent state
             // by returning before the guest can unwind properly
             DispatchGuestCallError::Run(_) => true,
-            DispatchGuestCallError::SetupRegs(_) | DispatchGuestCallError::Uninitialized => false,
+            DispatchGuestCallError::SetupRegs(_)
+            | DispatchGuestCallError::InvalidLaneStack { .. }
+            | DispatchGuestCallError::Uninitialized => false,
         }
     }
 
@@ -196,6 +200,8 @@ pub enum RunVmError {
 pub enum HandleIoError {
     #[error("No data was given in IO interrupt")]
     NoData,
+    #[error("sandbox memory manager mutex poisoned")]
+    MemoryManagerPoisoned,
     #[error("{0}")]
     Outb(#[from] HandleOutbError),
 }
@@ -479,6 +485,30 @@ impl HyperlightVm {
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
     ) -> std::result::Result<(), RunVmError> {
+        self.run_on_with_io(lane, |port, data| {
+            self.handle_io(mem_mgr, host_funcs, port, data)
+        })
+    }
+
+    pub(super) fn run_on_shared(
+        &self,
+        lane: VcpuLane,
+        mem_mgr: &Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), RunVmError> {
+        self.run_on_with_io(lane, |port, data| {
+            let mut mem_mgr = mem_mgr
+                .lock()
+                .map_err(|_| HandleIoError::MemoryManagerPoisoned)?;
+            self.handle_io(&mut mem_mgr, host_funcs, port, data)
+        })
+    }
+
+    fn run_on_with_io(
+        &self,
+        lane: VcpuLane,
+        mut handle_io: impl FnMut(u16, Vec<u8>) -> std::result::Result<(), HandleIoError>,
+    ) -> std::result::Result<(), RunVmError> {
         let interrupt_handle = self
             .interrupt_handles
             .get(lane.index())
@@ -532,7 +562,7 @@ impl HyperlightVm {
                     break Ok(());
                 }
                 Ok(VmExit::IoOut(port, data)) => {
-                    self.handle_io(mem_mgr, host_funcs, port, data)?;
+                    handle_io(port, data)?;
                 }
                 Ok(VmExit::MmioRead(addr)) => {
                     let all_regions = self.get_mapped_regions();

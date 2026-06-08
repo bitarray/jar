@@ -255,6 +255,17 @@ pub(crate) trait VirtualMachine: Debug + Send + Sync {
     fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError> {
         self.set_sregs_on(VcpuLane::PRIMARY, sregs)
     }
+
+    /// Get special regs
+    fn sregs_on(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<CommonSpecialRegisters, RegisterError>;
+
+    /// Get special regs on the primary control vCPU.
+    fn sregs(&self) -> std::result::Result<CommonSpecialRegisters, RegisterError> {
+        self.sregs_on(VcpuLane::PRIMARY)
+    }
 }
 
 #[cfg(test)]
