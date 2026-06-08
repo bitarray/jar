@@ -23,7 +23,7 @@ use alloc::boxed::Box;
 
 use javm_cap::cap::Cap;
 use javm_cap::cap::instance::InstanceCap;
-use javm_cap::{CNodeCap, ResidentCap};
+use javm_cap::{CNodeCap, CapHashOrRef, MissingOr, ResidentCap};
 use spin::Mutex as SpinMutex;
 
 use crate::jit_cache::CompiledImage;
@@ -70,10 +70,26 @@ pub enum CapCache {
     CNode(Box<ResidentCNode>),
     /// A published Image's compiled code arena and page-table template.
     Image(Box<CompiledImage>),
-    /// A resident sub-VM instance's ring-3 page table, parked (re-armed for
-    /// CoW) between CALLs so the next CALL of this same instance reuses the
-    /// whole page table instead of rebuilding it.
-    Instance(FrameRuntime),
+    /// A resident sub-VM instance's parked execution state. The root CNode is
+    /// kept resident between internal CALL/HALT edges so unwinding a deep
+    /// sub-VM tree does not repeatedly fold it into wire form; the optional
+    /// page table is re-armed for CoW and reused on the next CALL of the same
+    /// instance.
+    Instance(InstanceCache),
+}
+
+pub struct InstanceCache {
+    pub runtime: Option<FrameRuntime>,
+    pub root_cnode: Option<Box<ResidentCNode>>,
+}
+
+impl InstanceCache {
+    pub fn new(runtime: Option<FrameRuntime>, root_cnode: Option<Box<ResidentCNode>>) -> Self {
+        Self {
+            runtime,
+            root_cnode,
+        }
+    }
 }
 
 impl CachedCap {
@@ -104,6 +120,58 @@ impl CachedCap {
     pub fn boxed_cnode(cnode: ResidentCNode) -> Box<Self> {
         Box::new(Self::cnode(cnode))
     }
+
+    /// Fold this resident cached cap back to the public wire shape. Internal
+    /// CALL/HALT edges keep root CNodes resident in [`CapCache::Instance`] and
+    /// only pay this recursive fold at a real wire/persistence boundary.
+    pub fn to_wire_cap(&self) -> Cap {
+        match &self.cap {
+            Cap::CNode(_) => {
+                let cache = self.cache.lock();
+                match &*cache {
+                    CapCache::CNode(cnode) => Cap::CNode(fold_cnode_to_wire(cnode)),
+                    CapCache::None | CapCache::Image(_) | CapCache::Instance(_) => self.cap.clone(),
+                }
+            }
+            Cap::Instance(inst) => {
+                let cache = self.cache.lock();
+                match &*cache {
+                    CapCache::Instance(instance_cache) => {
+                        if let Some(root_cnode) = &instance_cache.root_cnode {
+                            let mut inst = inst.clone();
+                            inst.root_cnode = CapHashOrRef::Owned(Box::new(Cap::CNode(
+                                fold_cnode_to_wire(root_cnode),
+                            )));
+                            Cap::Instance(inst)
+                        } else {
+                            self.cap.clone()
+                        }
+                    }
+                    CapCache::None | CapCache::CNode(_) | CapCache::Image(_) => self.cap.clone(),
+                }
+            }
+            _ => self.cap.clone(),
+        }
+    }
+}
+
+fn target_to_wire(target: &CapHashOrRef<Box<CachedCap>>) -> CapHashOrRef<Box<Cap>> {
+    match target {
+        CapHashOrRef::Hash(h) => CapHashOrRef::Hash(*h),
+        CapHashOrRef::Owned(boxed) => CapHashOrRef::Owned(Box::new(boxed.to_wire_cap())),
+    }
+}
+
+fn fold_cnode_to_wire(cnode: &ResidentCNode) -> CNodeCap<Box<Cap>> {
+    let mut out = CNodeCap::new();
+    for (k, mo) in cnode.slots.iter() {
+        let conv = match mo {
+            MissingOr::Materialized(t) => MissingOr::Materialized(target_to_wire(t)),
+            MissingOr::Missing(h) => MissingOr::Missing(*h),
+        };
+        out.slots.insert(k.clone(), conv);
+    }
+    out
 }
 
 impl Clone for CachedCap {
@@ -126,7 +194,7 @@ impl ResidentCap for CachedCap {
     }
 
     fn into_cap(self) -> Cap {
-        self.cap
+        self.to_wire_cap()
     }
 }
 

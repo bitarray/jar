@@ -6,14 +6,13 @@
 //! see the kernel-assisted Gas/Quota handles). A [`SlotPath`] walks from the
 //! root cnode through nested `Cap::CNode` slots down to a target slot.
 //!
-//! A cnode is a hash-keyed kv-map (`Hasher(k) -> Cap`, see
-//! [`crate::cap::cnode::CNodeCap`]) whose logical key `k` is a **byte
-//! string**, not an integer index — so a slot name is a `Key` (a short
-//! byte string), and a path is a `SlotPath` (a sequence of `Key`s). There
-//! is no fixed slot count: a cnode is bounded by storage quota, not a
-//! compile-time capacity. The V1 ABI uses single-byte keys (`Key::from(b)`),
-//! but the type admits arbitrary-length keys for future ABI extensions
-//! (e.g. `address -> Cap::Instance`).
+//! A cnode is a sparse direct map keyed by logical byte strings, not an
+//! integer-indexed array — so a slot name is a `Key` (a short byte string),
+//! and a path is a `SlotPath` (a sequence of `Key`s). There is no fixed slot
+//! count: a cnode is bounded by storage quota, not a compile-time capacity.
+//! The V1 ABI uses single-byte keys (`Key::from(b)`), but the type admits
+//! arbitrary-length keys for future ABI extensions (e.g.
+//! `address -> Cap::Instance`).
 
 use crate::cap::MAX_SOURCE_DEPTH;
 use crate::error::CapError;
@@ -28,11 +27,10 @@ pub const MAX_KEY_LEN: usize = 8;
 
 /// The logical key naming one slot in a single cnode.
 ///
-/// A short byte string hashed (`Hasher(key)`) to the cnode's physical radix
-/// key. Backed by a [`SmallVec`] so the common single-byte key stays inline.
-/// The SSZ wire/hash form is **identical to `Vec<u8>`** (forwarded via
-/// `#[ssz(transparent)]`), so embedding a `Key` is byte-equivalent to
-/// embedding the raw key bytes.
+/// A short byte string used directly as a cnode slot key. Backed by a
+/// [`SmallVec`] so the common single-byte key stays inline. The SSZ wire/hash
+/// form is **identical to `Vec<u8>`** (forwarded via `#[ssz(transparent)]`), so
+/// embedding a `Key` is byte-equivalent to embedding the raw key bytes.
 #[derive(
     Debug,
     Clone,
@@ -48,6 +46,7 @@ pub const MAX_KEY_LEN: usize = 8;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord))]
 pub struct Key(#[ssz(transparent)] pub SmallVec<[u8; MAX_KEY_LEN]>);
 
 impl Key {
@@ -57,8 +56,7 @@ impl Key {
     }
 
     /// True iff this is the empty key (zero bytes). The empty key is a valid
-    /// logical key (`Hasher([])`), distinct from `Key::from(0u8)`
-    /// (`Hasher([0])`).
+    /// logical key (`[]`), distinct from `Key::from(0u8)` (`[0]`).
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

@@ -55,7 +55,7 @@ pub use yield_cap::{
     gas_handle, gas_meter_key, is_kernel_yield_key, merge_yield_receivers, quota_handle, quota_key,
     yield_receiver, yield_receiver_keys, yield_sender, yield_sender_key,
 };
-// `CNodeCap::slots` (`CNodeSlots = RadixMap<CapHashOrRef, _>`) exposes
-// `MissingOr` through `iter()`; re-export it so cnode-slot walkers (e.g. the
-// recompiler's cnode-inherit loop) don't need a direct `ssz` dependency.
+// `CNodeCap::slots` stores `MissingOr<CapHashOrRef>` values; re-export it so
+// cnode-slot walkers (e.g. the recompiler's cnode-inherit loop) don't need a
+// direct `ssz` dependency.
 pub use ssz::MissingOr;

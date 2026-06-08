@@ -194,9 +194,9 @@ impl WireOwned for Box<Cap> {}
 /// **`PartialEq`/`Eq`/`Hash` are hand-written**: a `Box<Cap>` payload
 /// blocks the derive (`Cap` is not `Eq`/`Hash`). The `Hash` arm
 /// compares/hashes its 32-byte digest by value; the `Owned` arm uses
-/// pointer identity of the inline payload (sound — the only holder,
-/// `CNodeSlots = RadixMap<_, KEY_BYTES>`, keys by the 32-byte physical
-/// key, never by value — and `O`-agnostic, so it needs no bound).
+/// pointer identity of the inline payload (sound — `Owned` is single-owner
+/// runtime state, never content-compared — and `O`-agnostic, so it needs no
+/// bound).
 #[derive(Clone, Debug)]
 pub enum CapHashOrRef<O = Box<Cap>> {
     Hash(CapHash),
