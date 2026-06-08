@@ -592,16 +592,13 @@ impl Nub {
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        let job_id = self.inner.next_job_id.fetch_add(1, Ordering::Relaxed);
-        self.invoke_request_blocking(
-            InvokeRequest {
-                instance_hash,
-                endpoint_idx,
-                args,
-                initial_gas,
-            },
-            job_id,
-        )
+        self.submit_invoke(InvokeRequest {
+            instance_hash,
+            endpoint_idx,
+            args,
+            initial_gas,
+        })?
+        .wait()
     }
 
     fn invoke_request_blocking(
