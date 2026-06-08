@@ -4,6 +4,7 @@ use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, DataCap, Key, NUM_REGS};
 use nub::{InvokeRequest, Nub, NubOptions};
 use std::collections::BTreeMap;
+use std::thread;
 
 fn ecalli_imm_image(imm: u32) -> Image {
     let mut img = Image::empty();
@@ -72,4 +73,24 @@ fn hyperlight_parallel_workers_complete_two_simple_invokes() {
         .invoke_cached(c, 0, [0; 4], 1_000)
         .expect("invoke C after worker stop/restart");
     assert_eq!((result_c.exit_reason, result_c.exit_arg), (4, 73));
+
+    let threaded: Vec<_> = (0..4).map(|i| publish(&nub, 80 + i)).collect();
+    let handles: Vec<_> = threaded
+        .into_iter()
+        .enumerate()
+        .map(|(i, inst)| {
+            let nub = nub.clone();
+            thread::spawn(move || {
+                let result = nub
+                    .invoke_cached(inst, 0, [0; 4], 1_000)
+                    .expect("threaded invoke_cached");
+                (i as u32, result)
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let (i, result) = handle.join().expect("invoke thread");
+        assert_eq!((result.exit_reason, result.exit_arg), (4, 80 + i));
+    }
 }
