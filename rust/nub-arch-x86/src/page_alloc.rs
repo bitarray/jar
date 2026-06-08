@@ -80,9 +80,9 @@ impl Drop for PageBuf {
 /// nesting; each `host_call` fully exits to ring 0), so a single physical page
 /// backs them all without any per-frame state leaking between frames.
 ///
-/// The guest is single-threaded (Hyperlight serialises calls), so the
-/// lazy-init load/store needs no compare-exchange; the [`AtomicU64`] is only to
-/// avoid `&'static mut`.
+/// Lazy init uses a compare-exchange so future multi-vCPU workers can race on
+/// first touch safely; the winning page is leaked, and any losing allocation is
+/// dropped immediately.
 pub struct GlobalPage {
     /// Kernel VA of the leaked page, or 0 before first init.
     kva: AtomicU64,
@@ -107,13 +107,21 @@ impl GlobalPage {
         if cur != 0 {
             return cur;
         }
-        // First touch: allocate a zeroed page and leak it (never freed).
-        // Single-threaded guest → no race on the store.
+        // First touch: allocate a zeroed page and try to publish it. If another
+        // lane wins the race, this `PageBuf` drops normally at the end of the
+        // function and frees the unused page.
         let buf = PageBuf::new(PAGE_SIZE).expect("global page alloc");
         let kva = buf.kva();
-        core::mem::forget(buf);
-        self.kva.store(kva, Ordering::Release);
-        kva
+        match self
+            .kva
+            .compare_exchange(0, kva, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => {
+                core::mem::forget(buf);
+                kva
+            }
+            Err(existing) => existing,
+        }
     }
 
     /// Physical address of the page (allocating it on first call).
