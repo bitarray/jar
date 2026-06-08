@@ -7,7 +7,7 @@ use javm_cap::{
     CNodeCap, Cap, CapHashOrRef, DataCap, KernelImage, Key, NUM_REGS, kernel_image_hash,
     key_to_regs,
 };
-use nub::{InvokeRequest, Nub};
+use nub::{InvokeRequest, Nub, NubOptions};
 use std::collections::BTreeMap;
 
 const GAS_SLOT: u8 = 5;
@@ -161,7 +161,8 @@ fn meter_drives_gas_local() {
 
 #[test]
 fn meter_drives_gas_hyperlight() {
-    let mut nub = Nub::hyperlight().expect("hyperlight");
+    let mut nub =
+        Nub::hyperlight_with_options(NubOptions::new().with_vcpu_count(2)).expect("hyperlight");
     meter_drives_gas(&mut nub);
 }
 
@@ -177,9 +178,20 @@ fn no_gas_slot_uses_call_budget() {
 #[test]
 fn concurrent_invokes_sharing_meter_are_rejected() {
     let nub = Nub::new_local();
+    concurrent_invokes_sharing_meter_are_rejected_for(&nub);
+}
+
+#[test]
+fn hyperlight_concurrent_invokes_sharing_meter_are_rejected() {
+    let nub =
+        Nub::hyperlight_with_options(NubOptions::new().with_vcpu_count(2)).expect("hyperlight");
+    concurrent_invokes_sharing_meter_are_rejected_for(&nub);
+}
+
+fn concurrent_invokes_sharing_meter_are_rejected_for(nub: &Nub) {
     let meter_key = Key::from(&[0xAA, 0xBB, 0xCC][..]);
     nub.set_meter(meter_key.clone(), 20_000_000);
-    let metered = publish_metered_image(&nub, looping_image(true), &meter_key);
+    let metered = publish_metered_image(nub, looping_image(true), &meter_key);
 
     let jobs: Vec<_> = (0..16)
         .map(|_| {
