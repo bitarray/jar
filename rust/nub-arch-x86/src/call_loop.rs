@@ -1294,22 +1294,23 @@ pub fn run_two_for_test(
     first: &nub_arch_x86_abi::InvokePacket,
     second: &nub_arch_x86_abi::InvokePacket,
 ) -> Result<(LoopOutcome, LoopOutcome), u32> {
-    let mut scheduler = KernelScheduler::new(ExecutionLane::PRIMARY);
-    let first_id = scheduler.submit_invoke(
-        &first.instance_hash,
-        first.endpoint_idx,
-        first.args,
-        first.initial_gas as i64,
-    )?;
-    let second_id = scheduler.submit_invoke(
-        &second.instance_hash,
-        second.endpoint_idx,
-        second.args,
-        second.initial_gas as i64,
-    )?;
-    let first_outcome = scheduler.run_until_result(first_id)?;
-    let second_outcome = scheduler.run_until_result(second_id)?;
-    Ok((first_outcome, second_outcome))
+    with_lane_scheduler(ExecutionLane::PRIMARY, |scheduler| {
+        let first_id = scheduler.submit_invoke(
+            &first.instance_hash,
+            first.endpoint_idx,
+            first.args,
+            first.initial_gas as i64,
+        )?;
+        let second_id = scheduler.submit_invoke(
+            &second.instance_hash,
+            second.endpoint_idx,
+            second.args,
+            second.initial_gas as i64,
+        )?;
+        let first_outcome = scheduler.run_until_result(first_id)?;
+        let second_outcome = scheduler.run_until_result(second_id)?;
+        Ok((first_outcome, second_outcome))
+    })
 }
 
 /// Run exactly one ring-3 cycle for `frame`. The first call on a
