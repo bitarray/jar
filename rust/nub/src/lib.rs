@@ -37,8 +37,8 @@ use nub_kernel::Kernel;
 
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
+use nub_arch_x86_abi::InvokePacket;
 pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult, SCRATCHPAD_HEAD_LEN};
-use nub_arch_x86_abi::{FN_ID_NUB_EVICT_JIT_ALL, InvokePacket};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 pub const MAX_HYPERLIGHT_VCPUS: usize = nub_arch_x86_abi::MAX_EXECUTION_LANES;
@@ -509,7 +509,7 @@ impl Nub {
         match &mut *backend {
             Backend::Local { .. } => Ok(()),
             Backend::Hyperlight(h) => {
-                let _ = h.sandbox.call_raw(FN_ID_NUB_EVICT_JIT_ALL, &[])?;
+                h.sandbox.evict_jit_all_parallel()?;
                 Ok(())
             }
         }

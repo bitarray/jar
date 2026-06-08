@@ -189,6 +189,7 @@ pub const PARALLEL_INVOKE_STATUS_RUNNING: u32 = 2;
 pub const PARALLEL_INVOKE_STATUS_DONE: u32 = 3;
 pub const PARALLEL_INVOKE_STATUS_STOP: u32 = 4;
 pub const PARALLEL_INVOKE_STATUS_STARTING: u32 = 5;
+pub const PARALLEL_INVOKE_STATUS_EVICT_JIT_READY: u32 = 6;
 
 /// One host<->guest invoke slot. Slots are addressed by lane index at
 /// `parallel_slot_base + lane * PARALLEL_INVOKE_SLOT_BYTES`.
@@ -198,6 +199,10 @@ pub const PARALLEL_INVOKE_STATUS_STARTING: u32 = 5;
 /// - guest CASes `READY -> RUNNING`, runs the invoke, writes `result`, then
 ///   stores `DONE` with release;
 /// - host reads `DONE` with acquire, copies `result`, then stores `EMPTY`.
+///
+/// Bench-only control commands, such as `EVICT_JIT_READY`, use the same
+/// `RUNNING -> DONE -> EMPTY` completion protocol after the host reserves all
+/// lanes.
 #[repr(C, align(64))]
 pub struct ParallelInvokeSlot {
     pub status: AtomicU32,

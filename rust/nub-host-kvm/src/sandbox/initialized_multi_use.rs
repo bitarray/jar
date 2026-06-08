@@ -23,8 +23,8 @@ use javm_cap::cap::Cap;
 use nub_arch_x86_abi::{
     CapHash as AbiCapHash, FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP, InvocationResult,
     InvokePacket, PARALLEL_INVOKE_STATUS_DONE, PARALLEL_INVOKE_STATUS_EMPTY,
-    PARALLEL_INVOKE_STATUS_READY, PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING,
-    PARALLEL_INVOKE_STATUS_STOP,
+    PARALLEL_INVOKE_STATUS_EVICT_JIT_READY, PARALLEL_INVOKE_STATUS_READY,
+    PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING, PARALLEL_INVOKE_STATUS_STOP,
 };
 use nub_host_common::rpc::{ArchivedResponse, Request};
 use rkyv::util::AlignedVec;
@@ -338,6 +338,87 @@ impl MultiUseSandbox {
         }
     }
 
+    /// Bench-only: evict guest JIT caches while keeping the hot invoke worker
+    /// pool alive. The legacy raw RPC path stops workers before entering the
+    /// shared control ring; cold benchmarks call this every iteration, so using
+    /// the worker slot protocol avoids measuring worker teardown/startup.
+    ///
+    /// All lanes are reserved first. That preserves the eviction invariant: no
+    /// frame runtime can be live while image arenas and templates are dropped.
+    pub fn evict_jit_all_parallel(&self) -> Result<()> {
+        maybe_time_and_emit_guest_call("evict_jit_all_parallel", || {
+            let workers = self.ensure_invoke_workers()?;
+            let lanes = workers.acquire_all_lanes()?;
+            let Some(control_lane) = lanes.first().map(LaneLease::index) else {
+                return Ok(());
+            };
+
+            {
+                let mem_mgr = self
+                    .mem_mgr
+                    .lock()
+                    .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
+                let status = mem_mgr.read_parallel_invoke_status(control_lane)?;
+                if status != PARALLEL_INVOKE_STATUS_EMPTY {
+                    return Err(crate::new_error!(
+                        "parallel control lane {} was not empty before evict (status={})",
+                        control_lane,
+                        status
+                    ));
+                }
+                mem_mgr.write_parallel_invoke_job_id(control_lane, 0)?;
+                fence(Ordering::Release);
+                mem_mgr.write_parallel_invoke_status(
+                    control_lane,
+                    PARALLEL_INVOKE_STATUS_EVICT_JIT_READY,
+                )?;
+            }
+
+            loop {
+                let done =
+                    {
+                        let mem_mgr = self.mem_mgr.lock().map_err(|_| {
+                            crate::new_error!("sandbox memory manager mutex poisoned")
+                        })?;
+                        match mem_mgr.read_parallel_invoke_status(control_lane)? {
+                            PARALLEL_INVOKE_STATUS_DONE => {
+                                fence(Ordering::Acquire);
+                                mem_mgr.write_parallel_invoke_status(
+                                    control_lane,
+                                    PARALLEL_INVOKE_STATUS_EMPTY,
+                                )?;
+                                true
+                            }
+                            PARALLEL_INVOKE_STATUS_EVICT_JIT_READY
+                            | PARALLEL_INVOKE_STATUS_RUNNING => false,
+                            other => {
+                                return Err(crate::new_error!(
+                                    "parallel control lane {} entered unexpected status {}",
+                                    control_lane,
+                                    other
+                                ));
+                            }
+                        }
+                    };
+                if done {
+                    return Ok(());
+                }
+                if let Some(worker_result) = workers.take_finished_result(control_lane) {
+                    let detail = match worker_result {
+                        Ok(()) => "clean worker exit".to_string(),
+                        Err(e) => e,
+                    };
+                    return Err(crate::new_error!(
+                        "parallel invoke worker lane {} exited during evict_jit_all: {}",
+                        control_lane,
+                        detail
+                    ));
+                }
+                thread::yield_now();
+            }
+        })
+    }
+
     fn ensure_invoke_workers(&self) -> Result<Arc<ParallelInvokeWorkers>> {
         let mut guard = self
             .invoke_workers
@@ -626,6 +707,32 @@ impl ParallelInvokeWorkers {
                 .ready
                 .wait(state)
                 .expect("parallel worker mutex poisoned");
+        }
+    }
+
+    fn acquire_all_lanes(self: &Arc<Self>) -> Result<Vec<LaneLease>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
+        loop {
+            if state.stopping {
+                return Err(crate::new_error!("parallel invoke workers are stopping"));
+            }
+            if state.available.len() == self.lane_count {
+                return Ok(state
+                    .available
+                    .drain(..)
+                    .map(|lane| LaneLease {
+                        lane,
+                        workers: self.clone(),
+                    })
+                    .collect());
+            }
+            state = self
+                .ready
+                .wait(state)
+                .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         }
     }
 

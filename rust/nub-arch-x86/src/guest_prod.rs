@@ -13,8 +13,9 @@ use nub_arch_x86_abi::{
     BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
     FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
     PARALLEL_INVOKE_SLOT_BYTES, PARALLEL_INVOKE_STATUS_DONE, PARALLEL_INVOKE_STATUS_EMPTY,
-    PARALLEL_INVOKE_STATUS_READY, PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING,
-    PARALLEL_INVOKE_STATUS_STOP, ParallelInvokeSlot, SCRATCHPAD_HEAD_LEN,
+    PARALLEL_INVOKE_STATUS_EVICT_JIT_READY, PARALLEL_INVOKE_STATUS_READY,
+    PARALLEL_INVOKE_STATUS_RUNNING, PARALLEL_INVOKE_STATUS_STARTING, PARALLEL_INVOKE_STATUS_STOP,
+    ParallelInvokeSlot, SCRATCHPAD_HEAD_LEN,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -164,6 +165,34 @@ pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
                 let result = invocation_result_from_outcome(outcome);
                 unsafe {
                     core::ptr::addr_of_mut!((*slot).result).write_volatile(result);
+                    (*slot)
+                        .status
+                        .store(PARALLEL_INVOKE_STATUS_DONE, Ordering::Release);
+                }
+            }
+            PARALLEL_INVOKE_STATUS_EVICT_JIT_READY => {
+                let claimed = unsafe {
+                    (*slot).status.compare_exchange(
+                        PARALLEL_INVOKE_STATUS_EVICT_JIT_READY,
+                        PARALLEL_INVOKE_STATUS_RUNNING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                };
+                if claimed.is_err() {
+                    continue;
+                }
+                crate::jit_cache::evict_all();
+                crate::call_loop::evict_mem_cache();
+                crate::state_cache::CACHE.sweep_instances();
+                unsafe {
+                    core::ptr::addr_of_mut!((*slot).result).write_volatile(InvocationResult {
+                        exit_reason: 0,
+                        exit_arg: 0,
+                        return_value: 0,
+                        gas_remaining: 0,
+                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                    });
                     (*slot)
                         .status
                         .store(PARALLEL_INVOKE_STATUS_DONE, Ordering::Release);
