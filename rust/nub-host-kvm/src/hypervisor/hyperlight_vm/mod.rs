@@ -17,6 +17,7 @@ limitations under the License.
 mod x86_64;
 
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use nub_host_common::log_level::GuestLogFilter;
@@ -374,7 +375,7 @@ pub(crate) struct HyperlightVm {
 
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
-    pub(super) pending_tlb_flush: bool,
+    pub(super) pending_tlb_flush: AtomicBool,
 }
 
 impl HyperlightVm {

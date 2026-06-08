@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracing::{Span, instrument};
@@ -106,7 +106,7 @@ impl HyperlightVm {
 
             mmap_regions: Vec::new(),
 
-            pending_tlb_flush: false,
+            pending_tlb_flush: AtomicBool::new(false),
         };
 
         ret.install_snapshot_mapping(snapshot_mem)?;
@@ -176,7 +176,7 @@ impl HyperlightVm {
     /// Returns `Ok` if the call succeeded, and an `Err` if it failed
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn dispatch_call_from_host(
-        &mut self,
+        &self,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
     ) -> std::result::Result<(), DispatchGuestCallError> {
@@ -189,7 +189,7 @@ impl HyperlightVm {
     /// the future worker queue a lane-addressed entry primitive.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn dispatch_call_from_host_on(
-        &mut self,
+        &self,
         lane: VcpuLane,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
@@ -198,7 +198,7 @@ impl HyperlightVm {
             return Err(DispatchGuestCallError::Uninitialized);
         };
         let mut rflags = 1 << 1; // RFLAGS.1 is RES1
-        if self.pending_tlb_flush {
+        if self.pending_tlb_flush.load(Ordering::Acquire) {
             rflags |= 1 << 6; // set ZF if we need a tlb flush done before anything else executes
         }
         // set RIP and RSP, reset others
@@ -238,7 +238,7 @@ impl HyperlightVm {
 
         // Clear the TLB flush flag only after run() returns. The guest
         // may have been cancelled before it executed the flush.
-        self.pending_tlb_flush = false;
+        self.pending_tlb_flush.store(false, Ordering::Release);
 
         result
     }
