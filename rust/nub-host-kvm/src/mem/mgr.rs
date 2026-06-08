@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use nub_arch_x86_abi::{InvocationResult, InvokePacket, ParallelInvokeSlot};
+use nub_arch_x86_abi::ParallelInvokeSlot;
 use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
-use std::mem::{MaybeUninit, offset_of, size_of};
+use std::mem::{align_of, offset_of, size_of};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
@@ -262,6 +262,30 @@ impl SandboxMemoryManager<HostSharedMemory> {
             .get_parallel_invoke_slot_scratch_host_offset(lane)
     }
 
+    pub(crate) fn parallel_invoke_slot_host_ptr(
+        &self,
+        lane: usize,
+    ) -> Result<*mut ParallelInvokeSlot> {
+        let offset = self.parallel_invoke_slot_scratch_host_offset(lane);
+        let len = size_of::<ParallelInvokeSlot>();
+        if offset
+            .checked_add(len)
+            .is_none_or(|end| end > self.scratch_mem.mem_size())
+        {
+            return Err(crate::new_error!(
+                "parallel invoke slot {} is outside scratch memory",
+                lane
+            ));
+        }
+        let ptr = self.scratch_mem.base_ptr().wrapping_add(offset) as *mut ParallelInvokeSlot;
+        debug_assert_eq!(
+            (ptr as usize) % align_of::<ParallelInvokeSlot>(),
+            0,
+            "parallel invoke slot is not ABI-aligned"
+        );
+        Ok(ptr)
+    }
+
     fn parallel_invoke_slot_field_offset(&self, lane: usize, field_offset: usize) -> usize {
         self.parallel_invoke_slot_scratch_host_offset(lane) + field_offset
     }
@@ -277,45 +301,6 @@ impl SandboxMemoryManager<HostSharedMemory> {
             self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, status)),
             status,
         )
-    }
-
-    pub(crate) fn write_parallel_invoke_job_id(&self, lane: usize, job_id: u64) -> Result<()> {
-        self.scratch_mem.write::<u64>(
-            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, job_id)),
-            job_id,
-        )
-    }
-
-    pub(crate) fn write_parallel_invoke_packet(
-        &self,
-        lane: usize,
-        packet: &InvokePacket,
-    ) -> Result<()> {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                packet as *const InvokePacket as *const u8,
-                size_of::<InvokePacket>(),
-            )
-        };
-        self.scratch_mem.copy_from_slice(
-            bytes,
-            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, packet)),
-        )
-    }
-
-    pub(crate) fn read_parallel_invoke_result(&self, lane: usize) -> Result<InvocationResult> {
-        let mut result = MaybeUninit::<InvocationResult>::uninit();
-        let bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                result.as_mut_ptr() as *mut u8,
-                size_of::<InvocationResult>(),
-            )
-        };
-        self.scratch_mem.copy_to_slice(
-            bytes,
-            self.parallel_invoke_slot_field_offset(lane, offset_of!(ParallelInvokeSlot, result)),
-        )?;
-        Ok(unsafe { result.assume_init() })
     }
 
     /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto

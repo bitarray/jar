@@ -288,12 +288,19 @@ impl MultiUseSandbox {
         };
         let lane_idx = lane.index();
 
-        {
+        let slot = {
             let mem_mgr = self
                 .mem_mgr
                 .lock()
                 .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
-            let status = mem_mgr.read_parallel_invoke_status(lane_idx)?;
+            mem_mgr.parallel_invoke_slot_host_ptr(lane_idx)?
+        };
+
+        // SAFETY: `lane` is a live `LaneLease`, so this host thread has
+        // exclusive host ownership of the slot until the function returns. The
+        // guest worker communicates through the ABI atomics in the same slot.
+        unsafe {
+            let status = (*slot).status.load(Ordering::Acquire);
             if status != PARALLEL_INVOKE_STATUS_EMPTY {
                 return Err(crate::new_error!(
                     "parallel invoke lane {} was not empty before submit (status={})",
@@ -301,24 +308,23 @@ impl MultiUseSandbox {
                     status
                 ));
             }
-            mem_mgr.write_parallel_invoke_job_id(lane_idx, job_id)?;
-            mem_mgr.write_parallel_invoke_packet(lane_idx, packet)?;
+            (*slot).job_id.store(job_id, Ordering::Relaxed);
+            core::ptr::addr_of_mut!((*slot).packet).write_volatile(*packet);
             fence(Ordering::Release);
-            mem_mgr.write_parallel_invoke_status(lane_idx, PARALLEL_INVOKE_STATUS_READY)?;
+            (*slot)
+                .status
+                .store(PARALLEL_INVOKE_STATUS_READY, Ordering::Release);
         }
 
         loop {
-            let done = {
-                let mem_mgr = self
-                    .mem_mgr
-                    .lock()
-                    .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
-                match mem_mgr.read_parallel_invoke_status(lane_idx)? {
+            let done = unsafe {
+                match (*slot).status.load(Ordering::Acquire) {
                     PARALLEL_INVOKE_STATUS_DONE => {
                         fence(Ordering::Acquire);
-                        let result = mem_mgr.read_parallel_invoke_result(lane_idx)?;
-                        mem_mgr
-                            .write_parallel_invoke_status(lane_idx, PARALLEL_INVOKE_STATUS_EMPTY)?;
+                        let result = core::ptr::addr_of!((*slot).result).read_volatile();
+                        (*slot)
+                            .status
+                            .store(PARALLEL_INVOKE_STATUS_EMPTY, Ordering::Release);
                         Some(result)
                     }
                     PARALLEL_INVOKE_STATUS_READY | PARALLEL_INVOKE_STATUS_RUNNING => None,
@@ -365,12 +371,19 @@ impl MultiUseSandbox {
                 return Ok(());
             };
 
-            {
+            let slot = {
                 let mem_mgr = self
                     .mem_mgr
                     .lock()
                     .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
-                let status = mem_mgr.read_parallel_invoke_status(control_lane)?;
+                mem_mgr.parallel_invoke_slot_host_ptr(control_lane)?
+            };
+
+            // SAFETY: `lanes` contains a live lease for every started lane, so
+            // no host invoke can use `control_lane` while this control command
+            // is in flight. The guest worker observes the ABI atomic status.
+            unsafe {
+                let status = (*slot).status.load(Ordering::Acquire);
                 if status != PARALLEL_INVOKE_STATUS_EMPTY {
                     return Err(crate::new_error!(
                         "parallel control lane {} was not empty before evict (status={})",
@@ -378,40 +391,35 @@ impl MultiUseSandbox {
                         status
                     ));
                 }
-                mem_mgr.write_parallel_invoke_job_id(control_lane, 0)?;
+                (*slot).job_id.store(0, Ordering::Relaxed);
                 fence(Ordering::Release);
-                mem_mgr.write_parallel_invoke_status(
-                    control_lane,
-                    PARALLEL_INVOKE_STATUS_EVICT_JIT_READY,
-                )?;
+                (*slot)
+                    .status
+                    .store(PARALLEL_INVOKE_STATUS_EVICT_JIT_READY, Ordering::Release);
             }
 
             loop {
-                let done =
-                    {
-                        let mem_mgr = self.mem_mgr.lock().map_err(|_| {
-                            crate::new_error!("sandbox memory manager mutex poisoned")
-                        })?;
-                        match mem_mgr.read_parallel_invoke_status(control_lane)? {
-                            PARALLEL_INVOKE_STATUS_DONE => {
-                                fence(Ordering::Acquire);
-                                mem_mgr.write_parallel_invoke_status(
-                                    control_lane,
-                                    PARALLEL_INVOKE_STATUS_EMPTY,
-                                )?;
-                                true
-                            }
-                            PARALLEL_INVOKE_STATUS_EVICT_JIT_READY
-                            | PARALLEL_INVOKE_STATUS_RUNNING => false,
-                            other => {
-                                return Err(crate::new_error!(
-                                    "parallel control lane {} entered unexpected status {}",
-                                    control_lane,
-                                    other
-                                ));
-                            }
+                let done = unsafe {
+                    match (*slot).status.load(Ordering::Acquire) {
+                        PARALLEL_INVOKE_STATUS_DONE => {
+                            fence(Ordering::Acquire);
+                            (*slot)
+                                .status
+                                .store(PARALLEL_INVOKE_STATUS_EMPTY, Ordering::Release);
+                            true
                         }
-                    };
+                        PARALLEL_INVOKE_STATUS_EVICT_JIT_READY | PARALLEL_INVOKE_STATUS_RUNNING => {
+                            false
+                        }
+                        other => {
+                            return Err(crate::new_error!(
+                                "parallel control lane {} entered unexpected status {}",
+                                control_lane,
+                                other
+                            ));
+                        }
+                    }
+                };
                 if done {
                     return Ok(());
                 }

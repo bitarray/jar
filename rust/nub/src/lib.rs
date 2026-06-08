@@ -630,13 +630,19 @@ impl Nub {
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        self.submit_invoke(InvokeRequest {
-            instance_hash,
-            endpoint_idx,
-            args,
-            initial_gas,
-        })?
-        .wait()
+        // The blocking API can go straight to the KVM lane pool: each caller
+        // blocks on its own lane lease. `submit_invoke` keeps the host-side job
+        // queue for callers that explicitly want an async handle.
+        let id = self.inner.next_job_id.fetch_add(1, Ordering::Relaxed);
+        self.invoke_request_blocking(
+            InvokeRequest {
+                instance_hash,
+                endpoint_idx,
+                args,
+                initial_gas,
+            },
+            id,
+        )
     }
 
     fn invoke_request_blocking(

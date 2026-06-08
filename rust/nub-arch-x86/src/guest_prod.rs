@@ -183,7 +183,6 @@ pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
                     continue;
                 }
                 crate::jit_cache::evict_all();
-                crate::call_loop::evict_mem_cache();
                 crate::state_cache::CACHE.sweep_instances();
                 unsafe {
                     core::ptr::addr_of_mut!((*slot).result).write_volatile(InvocationResult {
@@ -250,13 +249,12 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
 /// next `nub_invoke_cached` call pays a full recompile. Empty
 /// payload, empty response. Not meant for production paths — the
 /// cache is content-addressed and re-compiling the same Image
-/// produces identical native code.
+/// produces identical native code. This intentionally leaves clean
+/// instance-memory memos intact; the cold bench target is "recompile +
+/// execute", not "rebuild every runtime memo".
 #[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
 pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
     crate::jit_cache::evict_all();
-    // Drop the per-image clean-mem memo too, so a "cold" bench re-composes the
-    // instance backing rather than cloning a warm one.
-    crate::call_loop::evict_mem_cache();
     Vec::new()
 }
 

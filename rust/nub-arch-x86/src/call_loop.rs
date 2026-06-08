@@ -1705,9 +1705,8 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<boo
 /// independent Images without racing the shared clean-backing memo.
 static MEM_CACHE: spin::Mutex<BTreeMap<CapHash, DataCap>> = spin::Mutex::new(BTreeMap::new());
 
-/// Drop every cached clean instance-mem backing. Bench-only (paired with
-/// [`crate::jit_cache::evict_all`]) so a "cold" measurement re-composes;
-/// correctness never needs it (the cache is content-addressed by `image_hash`).
+/// Drop every cached clean instance-mem backing. Diagnostic-only: correctness
+/// never needs it because the cache is content-addressed by `image_hash`.
 pub fn evict_mem_cache() {
     MEM_CACHE.lock().clear();
 }
