@@ -48,8 +48,8 @@ pub struct MultiUseSandbox {
     /// Unique identifier for this sandbox instance
     id: u64,
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
-    pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
-    vm: HyperlightVm,
+    pub(crate) mem_mgr: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+    vm: Arc<HyperlightVm>,
     /// Host-side record of every blob hash this sandbox has successfully
     /// published, so `put_cap_with_hash` can short-circuit an idempotent
     /// re-put without a roundtrip + merkle walk through the guest.
@@ -71,7 +71,7 @@ pub struct MultiUseSandbox {
     /// tier is swept). A miss falls through to the idempotent `put_cap` RPC,
     /// so even blobs the guest published on its own (e.g. via `derive_spawn`)
     /// are handled correctly — just without the short-circuit.
-    published_blobs: HashSet<AbiCapHash>,
+    published_blobs: Mutex<HashSet<AbiCapHash>>,
 }
 
 impl MultiUseSandbox {
@@ -89,9 +89,9 @@ impl MultiUseSandbox {
         Self {
             id: super::snapshot::SANDBOX_CONFIGURATION_COUNTER.fetch_add(1, Ordering::Relaxed),
             host_funcs,
-            mem_mgr: mgr,
-            vm,
-            published_blobs: HashSet::new(),
+            mem_mgr: Arc::new(Mutex::new(mgr)),
+            vm: Arc::new(vm),
+            published_blobs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -112,7 +112,7 @@ impl MultiUseSandbox {
     /// Changes made to the sandbox during execution are persisted.
     /// On failure the sandbox should be dropped and rebuilt.
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
-    pub fn call_raw(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
+    pub fn call_raw(&self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
         maybe_time_and_emit_guest_call("call_raw", || {
             self.call_guest_function_by_id_on(VcpuLane::PRIMARY, fn_id, payload)
         })
@@ -124,7 +124,7 @@ impl MultiUseSandbox {
     /// non-primary lanes before the shared job queue lands.
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
     pub fn call_raw_on_vcpu(
-        &mut self,
+        &self,
         vcpu_index: usize,
         fn_id: u32,
         payload: &[u8],
@@ -136,7 +136,7 @@ impl MultiUseSandbox {
     }
 
     fn call_guest_function_by_id_on(
-        &mut self,
+        &self,
         lane: VcpuLane,
         fn_id: u32,
         payload: &[u8],
@@ -154,15 +154,19 @@ impl MultiUseSandbox {
             let req_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&req)
                 .map_err(|e| crate::new_error!("rkyv-serialize Request: {e}"))?;
 
-            self.mem_mgr
-                .write_guest_function_call_raw(req_bytes.as_slice())?;
+            let mut mem_mgr = self
+                .mem_mgr
+                .lock()
+                .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
+
+            mem_mgr.write_guest_function_call_raw(req_bytes.as_slice())?;
 
             let dispatch_res = if lane == VcpuLane::PRIMARY {
                 self.vm
-                    .dispatch_call_from_host(&mut self.mem_mgr, &self.host_funcs)
+                    .dispatch_call_from_host(&mut mem_mgr, &self.host_funcs)
             } else {
                 self.vm
-                    .dispatch_call_from_host_on(lane, &mut self.mem_mgr, &self.host_funcs)
+                    .dispatch_call_from_host_on(lane, &mut mem_mgr, &self.host_funcs)
             };
 
             if let Err(e) = dispatch_res {
@@ -170,7 +174,7 @@ impl MultiUseSandbox {
                 return Err(error);
             }
 
-            let raw_resp = self.mem_mgr.read_guest_function_call_result_raw()?;
+            let raw_resp = mem_mgr.read_guest_function_call_result_raw()?;
 
             let mut aligned = AlignedVec::<16>::with_capacity(raw_resp.len());
             aligned.extend_from_slice(&raw_resp);
@@ -200,10 +204,14 @@ impl MultiUseSandbox {
         })();
 
         // Clear partial abort bytes so they don't leak across calls.
-        self.mem_mgr.abort_buffer.clear();
+        let mut mem_mgr = self
+            .mem_mgr
+            .lock()
+            .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
+        mem_mgr.abort_buffer.clear();
 
         if res.is_err() {
-            self.mem_mgr.clear_io_buffers();
+            mem_mgr.clear_io_buffers();
         }
 
         res
@@ -225,7 +233,7 @@ impl MultiUseSandbox {
     /// rancor error chain. Other encode/decode failures are surfaced
     /// as `HyperlightError::Error`. A sentinel response (all-`0xFF`
     /// hash) from the guest is also turned into an error.
-    pub fn put_cap(&mut self, cap: &Cap) -> Result<AbiCapHash> {
+    pub fn put_cap(&self, cap: &Cap) -> Result<AbiCapHash> {
         let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cap)
             .map_err(|e| crate::new_error!("put_cap: rkyv encode (or Ref present): {e}"))?;
         let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
@@ -267,16 +275,27 @@ impl MultiUseSandbox {
     /// the guest's `CacheDirectory` is a hashbrown table built with a
     /// different SIMD `Group` width than the host's hashbrown (see
     /// `published_blobs`), so a host-side deref of it is unsound.
-    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
-        if self.published_blobs.contains(&hash) {
-            return Ok(());
+    pub fn put_cap_with_hash(&self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
+        {
+            let published_blobs = self
+                .published_blobs
+                .lock()
+                .map_err(|_| crate::new_error!("published blob set mutex poisoned"))?;
+            if published_blobs.contains(&hash) {
+                return Ok(());
+            }
         }
+
         let got = self.put_cap(cap)?;
         debug_assert_eq!(
             got, hash,
             "put_cap_with_hash: guest-computed hash differs from claimed hash"
         );
-        self.published_blobs.insert(hash);
+
+        self.published_blobs
+            .lock()
+            .map_err(|_| crate::new_error!("published blob set mutex poisoned"))?
+            .insert(hash);
         Ok(())
     }
 

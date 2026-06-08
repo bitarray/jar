@@ -127,7 +127,15 @@ pub struct GuestSharedMemory {
     /// is mapped in to the VM at VM creation time.
     pub lock: Arc<RwLock<()>>,
 }
+// SAFETY: `GuestSharedMemory` is the KVM-facing handle for a mapping whose
+// lifetime is owned by `Arc<HostMapping>`. The wrapper exposes no direct Rust
+// slice access except through `SharedMemory::with_exclusivity`, which takes the
+// shared RwLock's write side and therefore excludes host-side volatile access
+// while exclusive remapping/snapshotting is in progress. Sharing this handle
+// between host worker threads only shares the registered mapping/lifetime
+// handle; synchronized host reads/writes still go through `HostSharedMemory`.
 unsafe impl Send for GuestSharedMemory {}
+unsafe impl Sync for GuestSharedMemory {}
 
 /// A HostSharedMemory allows synchronized accesses to guest
 /// communication buffers, allowing it to be used concurrently with a
