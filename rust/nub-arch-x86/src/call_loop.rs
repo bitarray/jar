@@ -1149,6 +1149,15 @@ impl KernelTask {
 
         Ok(TaskPoll::Pending)
     }
+
+    fn run_to_completion(&mut self) -> Result<LoopOutcome, u32> {
+        loop {
+            match self.poll_once()? {
+                TaskPoll::Pending => {}
+                TaskPoll::Done(outcome) => return Ok(outcome),
+            }
+        }
+    }
 }
 
 /// Cooperative per-lane scheduler: many task stacks can be resident for one
@@ -1283,10 +1292,13 @@ pub fn run_top_on_lane(
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    with_lane_scheduler(lane, |scheduler| {
-        let task = scheduler.submit_invoke(instance_hash, endpoint_idx, args, initial_gas)?;
-        scheduler.run_until_result(task)
-    })
+    // The production ABI submits exactly one top-level invoke per worker/lane
+    // call. Drive that task directly so the hot CALL/HALT path does not pay the
+    // cooperative scheduler's map/queue churn on every ring-3 exit. The
+    // scheduler stays available for the test-only two-task probe below and for
+    // future batch/async guest entry points.
+    let mut task = KernelTask::new(0, lane, instance_hash, endpoint_idx, args, initial_gas)?;
+    task.run_to_completion()
 }
 
 #[doc(hidden)]

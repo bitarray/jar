@@ -239,6 +239,8 @@ static LANE_CPU: [LaneCpuControlCell; MAX_EXECUTION_LANES] =
     [const { LaneCpuControlCell::new() }; MAX_EXECUTION_LANES];
 static LANE_CPU_READY: [AtomicBool; MAX_EXECUTION_LANES] =
     [const { AtomicBool::new(false) }; MAX_EXECUTION_LANES];
+static RING3_LANE_READY: [AtomicBool; MAX_EXECUTION_LANES] =
+    [const { AtomicBool::new(false) }; MAX_EXECUTION_LANES];
 
 const TSS_SEL: u16 = 0x18;
 
@@ -443,13 +445,20 @@ core::arch::global_asm!(
 /// by the currently running vCPU.
 pub unsafe fn prepare_ring3_entry(lane: ExecutionLane) {
     lane.assert_in_range();
-    unsafe {
-        install_lane_cpu_control(lane);
-        install_ring3_exit_gate();
-    }
     let state = &RING3_LANES[lane.index()];
+    if !RING3_LANE_READY[lane.index()].load(Ordering::Acquire) {
+        unsafe {
+            install_lane_cpu_control(lane);
+            install_ring3_exit_gate();
+            write_gs_bases(state.ptr() as u64);
+        }
+        RING3_LANE_READY[lane.index()].store(true, Ordering::Release);
+    }
     unsafe {
         state.reset_for_entry(lane);
+        // GS base is not persistent across top-level guest entries in the
+        // Hyperlight/KVM path, so refresh it every time even though the
+        // lane-local GDT/TSS/IDT setup above is stable.
         write_gs_bases(state.ptr() as u64);
     }
 }

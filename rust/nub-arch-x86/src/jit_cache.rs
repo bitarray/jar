@@ -38,8 +38,9 @@ use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 use javm_cap::CapHash;
 
 use crate::cached_cap::{CachedCap, CapCache};
+use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::page_alloc::PageBuf;
-use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
+use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
 
 /// One cached Image's worth of compiled artifacts.
 ///
@@ -88,6 +89,38 @@ pub struct CompiledImage {
     /// Physical address of `template`'s PD page, cached for fast composition
     /// into a frame runtime's CTX | META | STACK slot template.
     pub template_pd_pa: u64,
+    /// Per-lane PML4 slot-1 templates joining that lane's CTX/STACK PDs with
+    /// this Image's META arena PD. Frame runtimes borrow the PDPT from here,
+    /// restoring the old one-PML4-write hot path without sharing CTX/STACK
+    /// scratch pages across vCPUs.
+    lane_slot_templates: Vec<Option<Pml4SlotTemplate>>,
+}
+
+impl CompiledImage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn template_pdpt_pa_for_lane(
+        &mut self,
+        lane: ExecutionLane,
+        ctx_va: u64,
+        ctx_pd_pa: u64,
+        arena_base_va: u64,
+        stack_va: u64,
+        stack_pd_pa: u64,
+    ) -> Option<u64> {
+        lane.assert_in_range();
+        let slot = &mut self.lane_slot_templates[lane.index()];
+        if slot.is_none() {
+            *slot = Some(Pml4SlotTemplate::new(
+                ctx_va,
+                ctx_pd_pa,
+                arena_base_va,
+                self.template_pd_pa,
+                stack_va,
+                stack_pd_pa,
+            )?);
+        }
+        slot.as_ref()?.pdpt_pa()
+    }
 }
 
 static NEXT_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -140,7 +173,7 @@ pub fn with_compiled_image<R>(
     ctx_va: u64,
     mem_cycles: u8,
     helpers: HelperFns,
-    f: impl FnOnce(&CompiledImage) -> R,
+    f: impl FnOnce(&mut CompiledImage) -> R,
 ) -> R {
     let mut cache = image_cap.cache.lock();
     if !matches!(&*cache, CapCache::Image(_)) {
@@ -154,7 +187,7 @@ pub fn with_compiled_image<R>(
             helpers,
         )));
     }
-    let CapCache::Image(compiled) = &*cache else {
+    let CapCache::Image(compiled) = &mut *cache else {
         unreachable!("image cache variant installed above")
     };
     f(compiled)
@@ -267,6 +300,8 @@ fn compile_image(
     let template_pd_pa = template
         .pd_pa()
         .expect("template PD must be in kernel half");
+    let mut lane_slot_templates = Vec::with_capacity(MAX_EXECUTION_LANES);
+    lane_slot_templates.resize_with(MAX_EXECUTION_LANES, || None);
 
     CompiledImage {
         arena,
@@ -280,5 +315,6 @@ fn compile_image(
         trap_table,
         template,
         template_pd_pa,
+        lane_slot_templates,
     }
 }

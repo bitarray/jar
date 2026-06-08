@@ -54,7 +54,7 @@ use crate::cached_cap::CachedCap;
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
 use crate::page_alloc::GlobalPage;
-use crate::paging::{PAGE_SIZE, PageTable, Pml4SlotTemplate};
+use crate::paging::{PAGE_SIZE, PageTable};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -120,31 +120,17 @@ impl LaneJitState {
     }
 
     fn clear(&self) {
-        self.active_cr3.store(0, Ordering::SeqCst);
-        self.trap_table_ptr
-            .store(core::ptr::null_mut(), Ordering::SeqCst);
-        self.trap_table_len.store(0, Ordering::SeqCst);
-        self.jit_code_len.store(0, Ordering::SeqCst);
-        self.mat_ranges_ptr
-            .store(core::ptr::null_mut(), Ordering::SeqCst);
-        self.mat_ranges_len.store(0, Ordering::SeqCst);
-        self.mat_zero_pa.store(0, Ordering::SeqCst);
-        self.mat_state_ptr
-            .store(core::ptr::null_mut(), Ordering::SeqCst);
-        self.mat_state_len.store(0, Ordering::SeqCst);
-        self.mat_mem_top.store(0, Ordering::SeqCst);
-        self.mat_code_top.store(0, Ordering::SeqCst);
-        self.mat_ro_units_sink
-            .store(core::ptr::null_mut(), Ordering::SeqCst);
-        self.overlay_sink
-            .store(core::ptr::null_mut(), Ordering::SeqCst);
-        self.active_pt_pml4_kva.store(0, Ordering::SeqCst);
-        self.owned_vec_ptr.store(0, Ordering::SeqCst);
+        // `active_cr3` is the publication sentinel. Once it is zero, the #PF
+        // handler will not use this lane state; the remaining fields may stay
+        // stale until the next `enter_frame` overwrites them before publishing a
+        // new CR3.
+        self.active_cr3.store(0, Ordering::Release);
     }
 }
 
 static LANE_JIT_STATE: [LaneJitState; MAX_EXECUTION_LANES] =
     [const { LaneJitState::new() }; MAX_EXECUTION_LANES];
+static LAST_ACTIVE_JIT_LANE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn lane_jit_state(lane: ExecutionLane) -> &'static LaneJitState {
     lane.assert_in_range();
@@ -153,9 +139,16 @@ fn lane_jit_state(lane: ExecutionLane) -> &'static LaneJitState {
 
 fn current_cr3_jit_state() -> Option<&'static LaneJitState> {
     let cr3 = crate::paging::read_cr3();
+    let hint = LAST_ACTIVE_JIT_LANE.load(Ordering::Relaxed) as usize;
+    if hint < MAX_EXECUTION_LANES {
+        let state = &LANE_JIT_STATE[hint];
+        if state.active_cr3.load(Ordering::Acquire) == cr3 {
+            return Some(state);
+        }
+    }
     LANE_JIT_STATE
         .iter()
-        .find(|state| state.active_cr3.load(Ordering::SeqCst) == cr3)
+        .find(|state| state.active_cr3.load(Ordering::Acquire) == cr3)
 }
 static LAST_GLOBAL_ARENA_TOKEN: [AtomicU64; MAX_EXECUTION_LANES] =
     [const { AtomicU64::new(0) }; MAX_EXECUTION_LANES];
@@ -266,8 +259,8 @@ fn jit_pf_handler(
     };
     // SAFETY: Hyperlight passes a valid pointer to the iretq frame.
     let saved_rip = unsafe { (&raw const (*info).rip).read_volatile() };
-    let code_base = state.jit_code_base.load(Ordering::SeqCst);
-    let code_len = state.jit_code_len.load(Ordering::SeqCst);
+    let code_base = state.jit_code_base.load(Ordering::Relaxed);
+    let code_len = state.jit_code_len.load(Ordering::Relaxed);
     if code_len == 0 || saved_rip < code_base || saved_rip >= code_base + code_len {
         return false;
     }
@@ -289,7 +282,7 @@ fn jit_pf_handler(
 
     // Not materializable (outside the declared region, or a write to a
     // pinned read-only page) → a PVM-level PageFault, charging nothing.
-    let ctx_kva = state.ctx_kva.load(Ordering::SeqCst);
+    let ctx_kva = state.ctx_kva.load(Ordering::Relaxed);
     // SAFETY: ctx_kva is the kernel VA of the JitContext page for the
     // current invocation; valid while the handler runs.
     unsafe {
@@ -299,7 +292,7 @@ fn jit_pf_handler(
         (*jc).pc = pvm_pc;
     }
 
-    let exit_va = state.exit_label_va.load(Ordering::SeqCst);
+    let exit_va = state.exit_label_va.load(Ordering::Relaxed);
     // SAFETY: info is a valid pointer to a writable iretq frame.
     unsafe {
         (&raw mut (*info).rip).write_volatile(exit_va);
@@ -311,8 +304,8 @@ fn jit_pf_handler(
 /// the trap table. Returns `(0, 0)` when no entry covers the offset
 /// (not a guest memory op → width 0 → caller treats as a PageFault).
 fn trap_lookup(state: &LaneJitState, offset: u32) -> (u32, u32) {
-    let tt_ptr = state.trap_table_ptr.load(Ordering::SeqCst);
-    let tt_len = state.trap_table_len.load(Ordering::SeqCst) as usize;
+    let tt_ptr = state.trap_table_ptr.load(Ordering::Relaxed);
+    let tt_len = state.trap_table_len.load(Ordering::Relaxed) as usize;
     if tt_ptr.is_null() || tt_len == 0 {
         return (0, 0);
     }
@@ -345,8 +338,8 @@ fn mat_range_for_in(
 /// `page_va` (page-aligned) in the running frame's published `mat_ranges`, or
 /// `None` for an ephemeral page.
 fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<crate::call_loop::MatRange> {
-    let ptr = state.mat_ranges_ptr.load(Ordering::SeqCst);
-    let len = state.mat_ranges_len.load(Ordering::SeqCst) as usize;
+    let ptr = state.mat_ranges_ptr.load(Ordering::Relaxed);
+    let len = state.mat_ranges_len.load(Ordering::Relaxed) as usize;
     if ptr.is_null() || len == 0 {
         return None;
     }
@@ -368,8 +361,8 @@ fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<crate::call_loop:
 /// and this shared read returns a `u64` (the borrow ends) before any `&mut`
 /// write to the same cap in [`cow_into_fresh`].
 fn mem_source_pa(state: &LaneJitState, page_va: u64) -> Option<u64> {
-    let data_base = state.mat_data_base.load(Ordering::SeqCst);
-    let sink = state.overlay_sink.load(Ordering::SeqCst);
+    let data_base = state.mat_data_base.load(Ordering::Relaxed);
+    let sink = state.overlay_sink.load(Ordering::Relaxed);
     if sink.is_null() {
         return None;
     }
@@ -380,7 +373,7 @@ fn mem_source_pa(state: &LaneJitState, page_va: u64) -> Option<u64> {
         mem,
         data_base,
         page_va,
-        state.mat_zero_pa.load(Ordering::SeqCst),
+        state.mat_zero_pa.load(Ordering::Relaxed),
     )
 }
 
@@ -409,7 +402,7 @@ fn mem_source_pa_in(
 /// HALT) only needs its leaf W bit flipped back, whereas a write to a shared
 /// backing page must CoW a fresh private copy.
 fn overlay_has_page(state: &LaneJitState, page_va: u64, data_base: u64) -> bool {
-    let sink = state.overlay_sink.load(Ordering::SeqCst);
+    let sink = state.overlay_sink.load(Ordering::Relaxed);
     if sink.is_null() {
         return false;
     }
@@ -458,13 +451,13 @@ fn try_materialize(
     is_write: bool,
     ctx: *mut Context,
 ) -> bool {
-    let data_base = state.mat_data_base.load(Ordering::SeqCst);
-    let mem_top = state.mat_mem_top.load(Ordering::SeqCst);
-    let code_base = state.mat_code_base.load(Ordering::SeqCst);
-    let code_top = state.mat_code_top.load(Ordering::SeqCst);
-    let code_pa = state.mat_code_pa.load(Ordering::SeqCst);
-    let pml4 = state.active_pt_pml4_kva.load(Ordering::SeqCst);
-    let owned_vec = state.owned_vec_ptr.load(Ordering::SeqCst);
+    let data_base = state.mat_data_base.load(Ordering::Relaxed);
+    let mem_top = state.mat_mem_top.load(Ordering::Relaxed);
+    let code_base = state.mat_code_base.load(Ordering::Relaxed);
+    let code_top = state.mat_code_top.load(Ordering::Relaxed);
+    let code_pa = state.mat_code_pa.load(Ordering::Relaxed);
+    let pml4 = state.active_pt_pml4_kva.load(Ordering::Relaxed);
+    let owned_vec = state.owned_vec_ptr.load(Ordering::Relaxed);
     if pml4 == 0 || owned_vec == 0 {
         return false;
     }
@@ -507,9 +500,9 @@ fn try_materialize(
 
     // Per-region state arrays. Null only when a region is undeclared, in
     // which case no page of `set` lies in it (guarded by in_code/in_data).
-    let dstate_ptr = state.mat_state_ptr.load(Ordering::SeqCst);
-    let dstate_len = state.mat_state_len.load(Ordering::SeqCst) as usize;
-    let ro_units_ptr = state.mat_ro_units_sink.load(Ordering::SeqCst);
+    let dstate_ptr = state.mat_state_ptr.load(Ordering::Relaxed);
+    let dstate_len = state.mat_state_len.load(Ordering::Relaxed) as usize;
+    let ro_units_ptr = state.mat_ro_units_sink.load(Ordering::Relaxed);
     // SAFETY: each ptr describes the running FrameRuntime's state
     // (single-threaded → exclusive); empty slice / scratch Vec if undeclared.
     let dstate: &mut [u8] = if dstate_ptr.is_null() {
@@ -716,7 +709,7 @@ fn cow_into_fresh(
         crate::paging::invlpg(page_va);
     }
 
-    let sink_ptr = state.overlay_sink.load(Ordering::SeqCst);
+    let sink_ptr = state.overlay_sink.load(Ordering::Relaxed);
     if !sink_ptr.is_null() {
         // SAFETY: sink_ptr is the running frame's `mem` DataCap, re-published
         // each enter_frame; exclusively ours (single-threaded) for the
@@ -875,11 +868,6 @@ const STACK_SIZE: u64 = PAGE_SIZE as u64;
 pub struct FrameRuntime {
     lane: ExecutionLane,
     pt: PageTable,
-    /// Per-frame PDPT joining lane-local CTX, per-image META arena, and
-    /// lane-local STACK. The page table borrows this PDPT at PML4[1], so this
-    /// owner must live as long as `pt`.
-    #[allow(dead_code)]
-    meta_slot_template: Pml4SlotTemplate,
     jit_va: u64,
     jit_size: u64,
     /// Dispatch-table VA (`META_BASE_M + dispatch_offset`) — re-stamped into
@@ -1061,11 +1049,11 @@ pub unsafe fn build_frame_runtime(
             // is safe.
             let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
             let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-            let meta_slot_template = Pml4SlotTemplate::new(
+            let template_pdpt_pa = cached.template_pdpt_pa_for_lane(
+                lane,
                 CTX_VA_M,
                 lane_pd_pa(&CTX_PD_PA, lane, CTX_VA_M, lane_page(&CTX_PAGES, lane).pa()),
                 META_BASE_M,
-                cached.template_pd_pa,
                 STACK_VA_M,
                 lane_pd_pa(
                     &STACK_PD_PA,
@@ -1074,7 +1062,6 @@ pub unsafe fn build_frame_runtime(
                     lane_page(&STACK_PAGES, lane).pa(),
                 ),
             )?;
-            let template_pdpt_pa = meta_slot_template.pdpt_pa()?;
             // Install the PML4 slot-1 subtree (CTX | META arena | STACK) with
             // one borrowed PML4 write. CTX/STACK are lane-local; META is the
             // per-Image cached arena PD.
@@ -1084,7 +1071,6 @@ pub unsafe fn build_frame_runtime(
             Some(FrameRuntime {
                 lane,
                 pt,
-                meta_slot_template,
                 jit_va,
                 jit_size: cached.jit_size as u64,
                 dispatch_va,
@@ -1170,51 +1156,53 @@ pub unsafe fn enter_frame(
     unsafe { ring3::prepare_ring3_entry(lane) };
 
     let state = lane_jit_state(lane);
-    state.clear();
-    state.jit_code_base.store(rt.jit_va, Ordering::SeqCst);
-    state.jit_code_len.store(rt.jit_size, Ordering::SeqCst);
+    state.jit_code_base.store(rt.jit_va, Ordering::Relaxed);
+    state.jit_code_len.store(rt.jit_size, Ordering::Relaxed);
     state
         .exit_label_va
-        .store(rt.exit_label_va, Ordering::SeqCst);
+        .store(rt.exit_label_va, Ordering::Relaxed);
     state
         .trap_table_ptr
-        .store(rt.trap_table_ptr as *mut (u32, u32, u32), Ordering::SeqCst);
+        .store(rt.trap_table_ptr as *mut (u32, u32, u32), Ordering::Relaxed);
     state
         .trap_table_len
-        .store(rt.trap_table_len, Ordering::SeqCst);
-    state.ctx_kva.store(ctx_kva, Ordering::SeqCst);
+        .store(rt.trap_table_len, Ordering::Relaxed);
+    state.ctx_kva.store(ctx_kva, Ordering::Relaxed);
     state.mat_ranges_ptr.store(
         rt.mat_ranges.as_ptr() as *mut crate::call_loop::MatRange,
-        Ordering::SeqCst,
+        Ordering::Relaxed,
     );
     state
         .mat_ranges_len
-        .store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
-    state.mat_zero_pa.store(ZERO_PAGE.pa(), Ordering::SeqCst);
-    state.mat_state_ptr.store(mat_state_ptr, Ordering::SeqCst);
-    state.mat_state_len.store(mat_state_len, Ordering::SeqCst);
+        .store(rt.mat_ranges.len() as u64, Ordering::Relaxed);
+    state.mat_zero_pa.store(ZERO_PAGE.pa(), Ordering::Relaxed);
+    state.mat_state_ptr.store(mat_state_ptr, Ordering::Relaxed);
+    state.mat_state_len.store(mat_state_len, Ordering::Relaxed);
     state
         .mat_data_base
-        .store(rt.data_base as u64, Ordering::SeqCst);
-    state.mat_mem_top.store(rt.mem_top as u64, Ordering::SeqCst);
+        .store(rt.data_base as u64, Ordering::Relaxed);
+    state
+        .mat_mem_top
+        .store(rt.mem_top as u64, Ordering::Relaxed);
     state
         .mat_code_base
-        .store(rt.code_base as u64, Ordering::SeqCst);
+        .store(rt.code_base as u64, Ordering::Relaxed);
     state
         .mat_code_top
-        .store(rt.code_top as u64, Ordering::SeqCst);
-    state.mat_code_pa.store(rt.code_pa, Ordering::SeqCst);
-    state.mat_ro_units_sink.store(ro_units, Ordering::SeqCst);
-    state.overlay_sink.store(overlay_sink, Ordering::SeqCst);
+        .store(rt.code_top as u64, Ordering::Relaxed);
+    state.mat_code_pa.store(rt.code_pa, Ordering::Relaxed);
+    state.mat_ro_units_sink.store(ro_units, Ordering::Relaxed);
+    state.overlay_sink.store(overlay_sink, Ordering::Relaxed);
     state
         .active_pt_pml4_kva
-        .store(rt.pt.pml4_kva(), Ordering::SeqCst);
+        .store(rt.pt.pml4_kva(), Ordering::Relaxed);
     state
         .owned_vec_ptr
-        .store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
+        .store(rt.pt.owned_vec_ptr(), Ordering::Relaxed);
     // Publish the CR3 last: the #PF handler finds this lane by current CR3, so
     // matching the CR3 implies every other field above is initialized.
-    state.active_cr3.store(rt.new_cr3, Ordering::SeqCst);
+    state.active_cr3.store(rt.new_cr3, Ordering::Release);
+    LAST_ACTIVE_JIT_LANE.store(lane.index() as u64, Ordering::Relaxed);
     // Shared handler, lane-local state: leave the function installed across
     // exits so one lane cannot clear another lane's #PF hook. The handler
     // returns `false` for non-JIT CR3s.
@@ -1254,13 +1242,13 @@ pub unsafe fn enter_frame(
 fn flush_global_arena_on_image_switch(lane: ExecutionLane, next_token: u64, next_pages: u64) {
     let idx = lane.index();
     lane.assert_in_range();
-    let prev_token = LAST_GLOBAL_ARENA_TOKEN[idx].load(Ordering::SeqCst);
+    let prev_token = LAST_GLOBAL_ARENA_TOKEN[idx].load(Ordering::Relaxed);
     if prev_token != 0 && prev_token != next_token {
-        let prev_pages = LAST_GLOBAL_ARENA_PAGES[idx].load(Ordering::SeqCst);
+        let prev_pages = LAST_GLOBAL_ARENA_PAGES[idx].load(Ordering::Relaxed);
         for page in 0..prev_pages {
             crate::paging::invlpg(META_BASE_M + page * PAGE_SIZE as u64);
         }
     }
-    LAST_GLOBAL_ARENA_PAGES[idx].store(next_pages, Ordering::SeqCst);
-    LAST_GLOBAL_ARENA_TOKEN[idx].store(next_token, Ordering::SeqCst);
+    LAST_GLOBAL_ARENA_PAGES[idx].store(next_pages, Ordering::Relaxed);
+    LAST_GLOBAL_ARENA_TOKEN[idx].store(next_token, Ordering::Relaxed);
 }

@@ -269,10 +269,22 @@ impl MultiUseSandbox {
     ) -> Result<InvocationResult> {
         let (workers, lane) = loop {
             let workers = self.ensure_invoke_workers()?;
+            if let Some(lane) = workers.try_acquire_lane()? {
+                break (workers, lane);
+            }
+            if let Some(lane_idx) = workers.reserve_unstarted_lane()? {
+                match self.start_invoke_worker_lane(lane_idx) {
+                    Ok(handle) => workers.install_started_lane(lane_idx, handle)?,
+                    Err(e) => {
+                        workers.release_start_reservation(lane_idx)?;
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
             if let Some(lane) = workers.acquire_lane()? {
                 break (workers, lane);
             }
-            thread::yield_now();
         };
         let lane_idx = lane.index();
 
@@ -429,22 +441,8 @@ impl MultiUseSandbox {
         }
 
         let vcpu_count = self.vcpu_count()?;
-        let mut handles = Vec::with_capacity(vcpu_count);
-        for lane in 0..vcpu_count {
-            match self.start_invoke_worker_lane(lane) {
-                Ok(handle) => handles.push(handle),
-                Err(start_err) => {
-                    if let Err(cleanup_err) = self.stop_started_invoke_worker_handles(handles) {
-                        return Err(crate::new_error!(
-                            "failed to start invoke worker pool: {start_err}; \
-                             additionally failed to stop partially started workers: {cleanup_err}"
-                        ));
-                    }
-                    return Err(start_err);
-                }
-            }
-        }
-        let workers = Arc::new(ParallelInvokeWorkers::new(vcpu_count, handles));
+        let first_handle = self.start_invoke_worker_lane(0)?;
+        let workers = Arc::new(ParallelInvokeWorkers::new(vcpu_count, 0, first_handle));
         *guard = Some(workers.clone());
         Ok(workers)
     }
@@ -457,8 +455,8 @@ impl MultiUseSandbox {
             return Ok(());
         };
 
-        workers.mark_stopping_and_wait_idle()?;
-        for lane in 0..workers.lane_count() {
+        let started_lanes = workers.mark_stopping_and_wait_idle()?;
+        for lane in started_lanes {
             {
                 let mem_mgr = self
                     .mem_mgr
@@ -548,22 +546,6 @@ impl MultiUseSandbox {
             }
             thread::yield_now();
         }
-    }
-
-    fn stop_started_invoke_worker_handles(&self, handles: Vec<InvokeWorkerHandle>) -> Result<()> {
-        for (lane, handle) in handles.into_iter().enumerate() {
-            {
-                let mem_mgr = self
-                    .mem_mgr
-                    .lock()
-                    .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
-                mem_mgr.write_parallel_invoke_status(lane, PARALLEL_INVOKE_STATUS_STOP)?;
-            }
-            join_invoke_worker_handle(lane, handle, Duration::from_secs(5))?
-                .map_err(|e| crate::new_error!("parallel invoke worker lane {lane}: {e}"))?;
-        }
-
-        Ok(())
     }
 
     /// Publish a [`Cap`] into the guest's heap-resident cap
@@ -666,6 +648,7 @@ struct ParallelInvokeWorkers {
 
 struct ParallelInvokeWorkerState {
     available: Vec<usize>,
+    started: Vec<bool>,
     stopping: bool,
 }
 
@@ -675,24 +658,43 @@ struct LaneLease {
 }
 
 impl ParallelInvokeWorkers {
-    fn new(lane_count: usize, handles: Vec<InvokeWorkerHandle>) -> Self {
+    fn new(lane_count: usize, first_lane: usize, first_handle: InvokeWorkerHandle) -> Self {
+        let mut handles = Vec::with_capacity(lane_count);
+        handles.resize_with(lane_count, || None);
+        handles[first_lane] = Some(first_handle);
+        let mut started = vec![false; lane_count];
+        started[first_lane] = true;
         Self {
             lane_count,
             state: Mutex::new(ParallelInvokeWorkerState {
-                available: (0..lane_count).rev().collect(),
+                available: vec![first_lane],
+                started,
                 stopping: false,
             }),
             ready: Condvar::new(),
-            handles: Mutex::new(handles.into_iter().map(Some).collect()),
+            handles: Mutex::new(handles),
         }
     }
 
-    fn lane_count(&self) -> usize {
-        self.lane_count
+    fn try_acquire_lane(self: &Arc<Self>) -> Result<Option<LaneLease>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
+        if state.stopping {
+            return Ok(None);
+        }
+        Ok(state.available.pop().map(|lane| LaneLease {
+            lane,
+            workers: self.clone(),
+        }))
     }
 
     fn acquire_lane(self: &Arc<Self>) -> Result<Option<LaneLease>> {
-        let mut state = self.state.lock().expect("parallel worker mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         loop {
             if state.stopping {
                 return Ok(None);
@@ -706,8 +708,55 @@ impl ParallelInvokeWorkers {
             state = self
                 .ready
                 .wait(state)
-                .expect("parallel worker mutex poisoned");
+                .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         }
+    }
+
+    fn reserve_unstarted_lane(&self) -> Result<Option<usize>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
+        if state.stopping {
+            return Ok(None);
+        }
+        for lane in 0..self.lane_count {
+            if !state.started[lane] {
+                state.started[lane] = true;
+                return Ok(Some(lane));
+            }
+        }
+        Ok(None)
+    }
+
+    fn install_started_lane(&self, lane: usize, handle: InvokeWorkerHandle) -> Result<()> {
+        {
+            let mut handles = self
+                .handles
+                .lock()
+                .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
+            if lane >= handles.len() || handles[lane].is_some() {
+                return Err(crate::new_error!(
+                    "parallel invoke worker lane {} already has a handle",
+                    lane
+                ));
+            }
+            handles[lane] = Some(handle);
+        }
+        self.release_lane(lane);
+        Ok(())
+    }
+
+    fn release_start_reservation(&self, lane: usize) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
+        if lane < state.started.len() {
+            state.started[lane] = false;
+        }
+        self.ready.notify_all();
+        Ok(())
     }
 
     fn acquire_all_lanes(self: &Arc<Self>) -> Result<Vec<LaneLease>> {
@@ -719,7 +768,8 @@ impl ParallelInvokeWorkers {
             if state.stopping {
                 return Err(crate::new_error!("parallel invoke workers are stopping"));
             }
-            if state.available.len() == self.lane_count {
+            let started_count = state.started.iter().filter(|&&started| started).count();
+            if state.available.len() == started_count {
                 return Ok(state
                     .available
                     .drain(..)
@@ -742,20 +792,26 @@ impl ParallelInvokeWorkers {
         self.ready.notify_all();
     }
 
-    fn mark_stopping_and_wait_idle(&self) -> Result<()> {
+    fn mark_stopping_and_wait_idle(&self) -> Result<Vec<usize>> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         state.stopping = true;
         self.ready.notify_all();
-        while state.available.len() != self.lane_count {
+        let started_count = state.started.iter().filter(|&&started| started).count();
+        while state.available.len() != started_count {
             state = self
                 .ready
                 .wait(state)
                 .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         }
-        Ok(())
+        Ok(state
+            .started
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, &started)| started.then_some(lane))
+            .collect())
     }
 
     fn take_finished_result(&self, lane: usize) -> Option<InvokeWorkerResult> {
