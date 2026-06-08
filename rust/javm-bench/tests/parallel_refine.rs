@@ -8,8 +8,8 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_cap::CapHash;
 use javm_cap::image::Image;
+use javm_cap::{Cap, CapHash};
 use nub::{InvokeRequest, Nub, NubOptions};
 use ssz::Decode;
 
@@ -108,6 +108,9 @@ fn cloned_nub_handles_run_compute_refine_jobs_then_serial_accumulate() {
             .expect("submit refine invoke");
         (workload, job)
     });
+
+    nub.put_cap(&Cap::empty_cnode())
+        .expect("serialized publish while refine jobs are queued/running");
 
     for (workload, job) in jobs {
         assert_result(workload, job.wait().expect("refine job wait"));

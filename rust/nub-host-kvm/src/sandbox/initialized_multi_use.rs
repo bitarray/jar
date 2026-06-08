@@ -134,8 +134,16 @@ impl MultiUseSandbox {
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
     pub fn call_raw(&self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
         maybe_time_and_emit_guest_call("call_raw", || {
-            self.stop_invoke_workers()?;
-            self.call_guest_function_by_id_on(VcpuLane::PRIMARY, fn_id, payload)
+            let mut workers = self
+                .invoke_workers
+                .lock()
+                .map_err(|_| crate::new_error!("parallel invoke worker mutex poisoned"))?;
+            self.stop_invoke_workers_locked(&mut workers)?;
+            let _control = self
+                .control_lock
+                .lock()
+                .map_err(|_| crate::new_error!("sandbox control mutex poisoned"))?;
+            self.call_guest_function_by_id_on_locked(VcpuLane::PRIMARY, fn_id, payload)
         })
     }
 
@@ -152,12 +160,20 @@ impl MultiUseSandbox {
     ) -> Result<Vec<u8>> {
         let lane = VcpuLane::new(vcpu_index);
         maybe_time_and_emit_guest_call("call_raw_on_vcpu", || {
-            self.stop_invoke_workers()?;
-            self.call_guest_function_by_id_on(lane, fn_id, payload)
+            let mut workers = self
+                .invoke_workers
+                .lock()
+                .map_err(|_| crate::new_error!("parallel invoke worker mutex poisoned"))?;
+            self.stop_invoke_workers_locked(&mut workers)?;
+            let _control = self
+                .control_lock
+                .lock()
+                .map_err(|_| crate::new_error!("sandbox control mutex poisoned"))?;
+            self.call_guest_function_by_id_on_locked(lane, fn_id, payload)
         })
     }
 
-    fn call_guest_function_by_id_on(
+    fn call_guest_function_by_id_on_locked(
         &self,
         lane: VcpuLane,
         fn_id: u32,
@@ -167,10 +183,6 @@ impl MultiUseSandbox {
         // Clear any stale cancellation from a previous guest function call or if kill() was called too early.
         // Any kill() that completed (even partially) BEFORE this line has NO effect on this call.
         self.vm.clear_cancel();
-        let _control = self
-            .control_lock
-            .lock()
-            .map_err(|_| crate::new_error!("sandbox control mutex poisoned"))?;
 
         let res = (|| {
             let req = Request {
@@ -252,8 +264,13 @@ impl MultiUseSandbox {
         job_id: u64,
         packet: &InvokePacket,
     ) -> Result<InvocationResult> {
-        let workers = self.ensure_invoke_workers()?;
-        let lane = workers.acquire_lane()?;
+        let (workers, lane) = loop {
+            let workers = self.ensure_invoke_workers()?;
+            if let Some(lane) = workers.acquire_lane()? {
+                break (workers, lane);
+            }
+            thread::yield_now();
+        };
         let lane_idx = lane.index();
         let deadline = Instant::now() + Duration::from_secs(30);
 
@@ -351,16 +368,12 @@ impl MultiUseSandbox {
         Ok(workers)
     }
 
-    fn stop_invoke_workers(&self) -> Result<()> {
-        let workers = {
-            let mut guard = self
-                .invoke_workers
-                .lock()
-                .map_err(|_| crate::new_error!("parallel invoke worker mutex poisoned"))?;
-            let Some(workers) = guard.take() else {
-                return Ok(());
-            };
-            workers
+    fn stop_invoke_workers_locked(
+        &self,
+        guard: &mut Option<Arc<ParallelInvokeWorkers>>,
+    ) -> Result<()> {
+        let Some(workers) = guard.as_ref().cloned() else {
+            return Ok(());
         };
 
         workers.mark_stopping_and_wait_idle()?;
@@ -377,6 +390,7 @@ impl MultiUseSandbox {
                 .map_err(|e| crate::new_error!("parallel invoke worker lane {lane}: {e}"))?;
         }
 
+        *guard = None;
         Ok(())
     }
 
@@ -580,19 +594,17 @@ impl ParallelInvokeWorkers {
         self.lane_count
     }
 
-    fn acquire_lane(self: &Arc<Self>) -> Result<LaneLease> {
+    fn acquire_lane(self: &Arc<Self>) -> Result<Option<LaneLease>> {
         let mut state = self.state.lock().expect("parallel worker mutex poisoned");
         loop {
             if state.stopping {
-                return Err(crate::new_error!(
-                    "parallel invoke workers are stopping for a control-plane call"
-                ));
+                return Ok(None);
             }
             if let Some(lane) = state.available.pop() {
-                return Ok(LaneLease {
+                return Ok(Some(LaneLease {
                     lane,
                     workers: self.clone(),
-                });
+                }));
             }
             state = self
                 .ready
@@ -613,6 +625,7 @@ impl ParallelInvokeWorkers {
             .lock()
             .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
         state.stopping = true;
+        self.ready.notify_all();
         while state.available.len() != self.lane_count {
             state = self
                 .ready
