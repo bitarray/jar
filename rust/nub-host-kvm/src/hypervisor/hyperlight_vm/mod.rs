@@ -23,10 +23,10 @@ use nub_host_common::log_level::GuestLogFilter;
 use tracing_core::LevelFilter;
 
 use crate::HyperlightError;
-use crate::hypervisor::virtual_machine::VirtualMachine;
 use crate::hypervisor::virtual_machine::{
     MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VmError, VmExit,
 };
+use crate::hypervisor::virtual_machine::{VcpuLane, VirtualMachine};
 use crate::hypervisor::{InterruptHandle, InterruptHandleImpl};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::mem::mgr::{SandboxMemoryManager, SnapshotSharedMemory};
@@ -356,7 +356,7 @@ pub(crate) struct HyperlightVm {
     pub(super) vm: Box<dyn VirtualMachine>,
     pub(super) entrypoint: NextAction, // only present if this vm has not yet been initialised
     pub(super) rsp_gva: u64,
-    pub(super) interrupt_handle: Arc<dyn InterruptHandleImpl>,
+    pub(super) interrupt_handles: Vec<Arc<dyn InterruptHandleImpl>>,
 
     pub(super) snapshot_slot: u32,
     // The current snapshot region, used to keep it alive as long as
@@ -446,51 +446,72 @@ impl HyperlightVm {
     }
 
     pub(crate) fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {
-        self.interrupt_handle.clone()
+        self.interrupt_handles[VcpuLane::PRIMARY.index()].clone()
     }
 
     pub(crate) fn clear_cancel(&self) {
-        self.interrupt_handle.clear_cancel();
+        for handle in &self.interrupt_handles {
+            handle.clear_cancel();
+        }
     }
 
     pub(super) fn run(
-        &mut self,
+        &self,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
     ) -> std::result::Result<(), RunVmError> {
+        self.run_on(VcpuLane::PRIMARY, mem_mgr, host_funcs)
+    }
+
+    pub(super) fn run_on(
+        &self,
+        lane: VcpuLane,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), RunVmError> {
+        let interrupt_handle = self
+            .interrupt_handles
+            .get(lane.index())
+            .ok_or_else(|| {
+                RunVmError::UnexpectedVmExit(format!("invalid vCPU lane {}", lane.index()))
+            })?
+            .clone();
         let result = loop {
             // ===== KILL() TIMING POINT 2: Before set_tid() =====
             // If kill() is called and ran to completion BEFORE this line executes:
             //    - CANCEL_BIT will be set and we will return an early VmExit::Cancelled()
             //      without sending any signals/WHV api calls
-            self.interrupt_handle.set_tid();
-            self.interrupt_handle.set_running();
+            interrupt_handle.set_tid();
+            interrupt_handle.set_running();
             // NOTE: `set_running()`` must be called before checking `is_cancelled()`
             // otherwise we risk missing a call to `kill()` because the vcpu would not be marked as running yet so signals won't be sent
 
-            let exit_reason = if self.interrupt_handle.is_cancelled()
-                || self.interrupt_handle.is_debug_interrupted()
-            {
-                Ok(VmExit::Cancelled())
-            } else {
-                // ==== KILL() TIMING POINT 3: Before calling run() ====
-                // If kill() is called and ran to completion BEFORE this line executes:
-                //    - Will still do a VM entry, but signals will be sent until VM exits
-                self.vm.run_vcpu()
-            };
+            let exit_reason =
+                if interrupt_handle.is_cancelled() || interrupt_handle.is_debug_interrupted() {
+                    Ok(VmExit::Cancelled())
+                } else {
+                    // ==== KILL() TIMING POINT 3: Before calling run() ====
+                    // If kill() is called and ran to completion BEFORE this line executes:
+                    //    - Will still do a VM entry, but signals will be sent until VM exits
+                    if lane == VcpuLane::PRIMARY {
+                        self.vm.run_vcpu()
+                    } else {
+                        self.vm.run_vcpu_on(lane)
+                    }
+                };
 
             // ===== KILL() TIMING POINT 4: Before clear_running() =====
             // If kill() is called and ran to completion BEFORE this line executes:
             //    - CANCEL_BIT will be set. Cancellation is deferred to the next iteration.
             //    - Signals will be sent until `clear_running()` is called, which is ok
-            self.interrupt_handle.clear_running();
+            interrupt_handle.clear_running();
 
             // ===== KILL() TIMING POINT 5: Before capturing cancel_requested =====
             // If kill() is called and ran to completion BEFORE this line executes:
             //    - CANCEL_BIT will be set. Cancellation is deferred to the next iteration.
             //    - Signals will not be sent
-            let cancel_requested = self.interrupt_handle.is_cancelled();
-            let debug_interrupted = self.interrupt_handle.is_debug_interrupted();
+            let cancel_requested = interrupt_handle.is_cancelled();
+            let debug_interrupted = interrupt_handle.is_debug_interrupted();
 
             // ===== KILL() TIMING POINT 6: Before checking exit_reason =====
             // If kill() is called and ran to completion BEFORE this line executes:
@@ -577,7 +598,7 @@ impl HyperlightVm {
 
     /// Handle an IO exit
     fn handle_io(
-        &mut self,
+        &self,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
         port: u16,
@@ -603,7 +624,9 @@ impl HyperlightVm {
 
 impl Drop for HyperlightVm {
     fn drop(&mut self) {
-        self.interrupt_handle.set_dropped();
+        for handle in &self.interrupt_handles {
+            handle.set_dropped();
+        }
     }
 }
 

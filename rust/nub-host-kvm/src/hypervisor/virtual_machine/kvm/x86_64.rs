@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 use std::sync::LazyLock;
+use std::sync::{Mutex, MutexGuard};
 
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
@@ -24,7 +25,7 @@ use tracing::{Span, instrument};
 
 use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 use crate::hypervisor::virtual_machine::{
-    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VirtualMachine, VmExit,
+    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VcpuLane, VirtualMachine, VmExit,
 };
 use crate::mem::memory_region::MemoryRegion;
 
@@ -70,13 +71,13 @@ pub(crate) fn is_hypervisor_present() -> bool {
 
 /// A KVM implementation with a fixed vCPU pool.
 ///
-/// The legacy `VirtualMachine` trait still drives only lane 0. Creating the
+/// The legacy control path still drives only lane 0. Creating the
 /// whole pool up front mirrors the fixed KVM memory-region model and gives the
 /// parallel invoke worker ABI stable vCPU identities to attach to later.
 #[derive(Debug)]
 pub(crate) struct KvmVm {
     vm_fd: VmFd,
-    vcpu_fds: Vec<VcpuFd>,
+    vcpu_fds: Vec<Mutex<VcpuFd>>,
 }
 
 static KVM: LazyLock<std::result::Result<Kvm, CreateVmError>> =
@@ -114,23 +115,39 @@ impl KvmVm {
             vcpu_fd
                 .set_cpuid2(&kvm_cpuid)
                 .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
-            vcpu_fds.push(vcpu_fd);
+            vcpu_fds.push(Mutex::new(vcpu_fd));
         }
 
         Ok(Self { vm_fd, vcpu_fds })
     }
 
-    fn primary_vcpu(&self) -> &VcpuFd {
-        &self.vcpu_fds[0]
+    fn vcpu_for_register(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<MutexGuard<'_, VcpuFd>, RegisterError> {
+        let idx = lane.index();
+        self.vcpu_fds
+            .get(idx)
+            .ok_or(RegisterError::InvalidVcpuLane(idx))?
+            .lock()
+            .map_err(|_| RegisterError::VcpuLanePoisoned(idx))
     }
 
-    fn primary_vcpu_mut(&mut self) -> &mut VcpuFd {
-        &mut self.vcpu_fds[0]
+    fn vcpu_for_run(
+        &self,
+        lane: VcpuLane,
+    ) -> std::result::Result<MutexGuard<'_, VcpuFd>, RunVcpuError> {
+        let idx = lane.index();
+        self.vcpu_fds
+            .get(idx)
+            .ok_or(RunVcpuError::InvalidVcpuLane(idx))?
+            .lock()
+            .map_err(|_| RunVcpuError::VcpuLanePoisoned(idx))
     }
 
     /// Run the vCPU once without hardware interrupt support (default path).
-    fn run_vcpu_default(&mut self) -> std::result::Result<VmExit, RunVcpuError> {
-        match self.primary_vcpu_mut().run() {
+    fn run_vcpu_default(&self, lane: VcpuLane) -> std::result::Result<VmExit, RunVcpuError> {
+        match self.vcpu_for_run(lane)?.run() {
             Ok(VcpuExit::Hlt) => Ok(VmExit::Halt()),
             Ok(VcpuExit::IoOut(port, _)) if port == VmAction::Halt as u16 => Ok(VmExit::Halt()),
             Ok(VcpuExit::IoOut(port, data)) => Ok(VmExit::IoOut(port, data.to_vec())),
@@ -161,39 +178,55 @@ impl VirtualMachine for KvmVm {
             .map_err(|e| MapMemoryError::Hypervisor(e.into()))
     }
 
-    fn run_vcpu(&mut self) -> std::result::Result<VmExit, RunVcpuError> {
-        self.run_vcpu_default()
+    fn vcpu_count(&self) -> usize {
+        self.vcpu_fds.len()
     }
 
-    fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
+    fn run_vcpu_on(&self, lane: VcpuLane) -> std::result::Result<VmExit, RunVcpuError> {
+        self.run_vcpu_default(lane)
+    }
+
+    fn regs_on(&self, lane: VcpuLane) -> std::result::Result<CommonRegisters, RegisterError> {
         let kvm_regs = self
-            .primary_vcpu()
+            .vcpu_for_register(lane)?
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;
         Ok((&kvm_regs).into())
     }
 
-    fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError> {
+    fn set_regs_on(
+        &self,
+        lane: VcpuLane,
+        regs: &CommonRegisters,
+    ) -> std::result::Result<(), RegisterError> {
         let kvm_regs: kvm_regs = regs.into();
-        self.primary_vcpu()
+        self.vcpu_for_register(lane)?
             .set_regs(&kvm_regs)
             .map_err(|e| RegisterError::SetRegs(e.into()))?;
         Ok(())
     }
 
-    fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError> {
+    fn set_fpu_on(
+        &self,
+        lane: VcpuLane,
+        fpu: &CommonFpu,
+    ) -> std::result::Result<(), RegisterError> {
         let kvm_fpu: kvm_fpu = fpu.into();
         // Note: On KVM this ignores MXCSR.
         // See https://github.com/torvalds/linux/blob/d358e5254674b70f34c847715ca509e46eb81e6f/arch/x86/kvm/x86.c#L12554-L12599
-        self.primary_vcpu()
+        self.vcpu_for_register(lane)?
             .set_fpu(&kvm_fpu)
             .map_err(|e| RegisterError::SetFpu(e.into()))?;
         Ok(())
     }
 
-    fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError> {
+    fn set_sregs_on(
+        &self,
+        lane: VcpuLane,
+        sregs: &CommonSpecialRegisters,
+    ) -> std::result::Result<(), RegisterError> {
         let kvm_sregs: kvm_sregs = sregs.into();
-        self.primary_vcpu()
+        self.vcpu_for_register(lane)?
             .set_sregs(&kvm_sregs)
             .map_err(|e| RegisterError::SetSregs(e.into()))?;
         Ok(())

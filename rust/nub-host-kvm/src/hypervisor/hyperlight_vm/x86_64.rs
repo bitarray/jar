@@ -26,9 +26,9 @@ use super::*;
 use crate::hypervisor::InterruptHandleImpl;
 use crate::hypervisor::LinuxInterruptHandle;
 use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
-use crate::hypervisor::virtual_machine::VirtualMachine;
 use crate::hypervisor::virtual_machine::kvm::KvmVm;
 use crate::hypervisor::virtual_machine::{HypervisorType, VmError, get_available_hypervisor};
+use crate::hypervisor::virtual_machine::{VcpuLane, VirtualMachine};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
@@ -58,31 +58,37 @@ impl HyperlightVm {
             None => return Err(CreateHyperlightVmError::NoHypervisorFound),
         };
 
-        vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(
-            root_pt_addr,
-        ))
-        .map_err(VmError::Register)?;
+        let sregs = CommonSpecialRegisters::standard_64bit_defaults(root_pt_addr);
+        vm.set_sregs(&sregs).map_err(VmError::Register)?;
+        for lane in 1..vm.vcpu_count() {
+            vm.set_sregs_on(VcpuLane::new(lane), &sregs)
+                .map_err(VmError::Register)?;
+        }
 
-        let interrupt_handle: Arc<dyn InterruptHandleImpl> = Arc::new(LinuxInterruptHandle {
-            state: AtomicU8::new(0),
-            #[cfg(all(
-                target_arch = "x86_64",
-                target_vendor = "unknown",
-                target_os = "linux",
-                target_env = "musl"
-            ))]
-            tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
-            #[cfg(not(all(
-                target_arch = "x86_64",
-                target_vendor = "unknown",
-                target_os = "linux",
-                target_env = "musl"
-            )))]
-            tid: AtomicU64::new(unsafe { libc::pthread_self() }),
-            retry_delay: config.get_interrupt_retry_delay(),
-            sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
-            dropped: AtomicBool::new(false),
-        });
+        let interrupt_handles: Vec<Arc<dyn InterruptHandleImpl>> = (0..vm.vcpu_count())
+            .map(|_| {
+                Arc::new(LinuxInterruptHandle {
+                    state: AtomicU8::new(0),
+                    #[cfg(all(
+                        target_arch = "x86_64",
+                        target_vendor = "unknown",
+                        target_os = "linux",
+                        target_env = "musl"
+                    ))]
+                    tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
+                    #[cfg(not(all(
+                        target_arch = "x86_64",
+                        target_vendor = "unknown",
+                        target_os = "linux",
+                        target_env = "musl"
+                    )))]
+                    tid: AtomicU64::new(unsafe { libc::pthread_self() }),
+                    retry_delay: config.get_interrupt_retry_delay(),
+                    sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
+                    dropped: AtomicBool::new(false),
+                }) as Arc<dyn InterruptHandleImpl>
+            })
+            .collect();
 
         let snapshot_slot = 0u32;
         let scratch_slot = 1u32;
@@ -90,7 +96,7 @@ impl HyperlightVm {
             vm,
             entrypoint,
             rsp_gva,
-            interrupt_handle,
+            interrupt_handles,
 
             snapshot_slot,
             snapshot_memory: None,
