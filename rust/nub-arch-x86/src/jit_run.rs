@@ -54,7 +54,7 @@ use crate::cached_cap::CachedCap;
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
 use crate::page_alloc::GlobalPage;
-use crate::paging::{PAGE_SIZE, PageTable};
+use crate::paging::{PAGE_SIZE, PageTable, Pml4SlotTemplate};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -64,9 +64,9 @@ use javm_recompiler_x86::codegen::HelperFns;
 // === Per-invocation context for the #PF handler ===========================
 //
 // Set by `enter_frame` immediately before `enter_ring3`, read by
-// `jit_pf_handler` if a #PF fires from inside the JIT'd code window.
-// Single-threaded (Hyperlight serialises calls), so unsynchronised
-// statics are safe — we use atomics for `&'static mut` avoidance only.
+// `jit_pf_handler` if a #PF fires from inside the JIT'd code window. The
+// handler finds the active lane by the current CR3, then reads that lane's
+// atomics; there is no process-global active frame.
 
 struct LaneJitState {
     active_cr3: AtomicU64,
@@ -195,20 +195,38 @@ static ZERO_PAGE: GlobalPage = GlobalPage::new();
 /// `dispatch_table`/`code_base`); the ring-3 stack is reset to its top every
 /// entry; `host_rsp_base` and the spilled x3/x4 are per-execution scratch the
 /// guest re-initialises. This removes the per-frame CTX + STACK `PageBuf`s.
-static CTX_PAGE: GlobalPage = GlobalPage::new();
-static STACK_PAGE: GlobalPage = GlobalPage::new();
+static CTX_PAGES: [GlobalPage; MAX_EXECUTION_LANES] =
+    [const { GlobalPage::new() }; MAX_EXECUTION_LANES];
+static STACK_PAGES: [GlobalPage; MAX_EXECUTION_LANES] =
+    [const { GlobalPage::new() }; MAX_EXECUTION_LANES];
 
-/// PD physical addresses of the process-global CTX / STACK 1 GiB PD subtrees
-/// (PD -> PT -> the shared CTX/STACK page above), built + leaked once and
-/// borrowed as the CTX/STACK entries of *every* Image's `Pml4SlotTemplate`, so
-/// those identical tables are not duplicated per Image.
-static CTX_PD_PA: AtomicU64 = AtomicU64::new(0);
-static STACK_PD_PA: AtomicU64 = AtomicU64::new(0);
+/// PD physical addresses of the lane-local CTX / STACK 1 GiB PD subtrees
+/// (PD -> PT -> the lane's CTX/STACK page), built + leaked once per lane and
+/// borrowed by every frame runtime assigned to that lane.
+static CTX_PD_PA: [AtomicU64; MAX_EXECUTION_LANES] =
+    [const { AtomicU64::new(0) }; MAX_EXECUTION_LANES];
+static STACK_PD_PA: [AtomicU64; MAX_EXECUTION_LANES] =
+    [const { AtomicU64::new(0) }; MAX_EXECUTION_LANES];
 static GLOBAL_PD_INIT: spin::Mutex<()> = spin::Mutex::new(());
 
 /// Resolve a global CTX/STACK PD PA, building + leaking the PD subtree mapping
 /// `page_pa` at `va` on first call.
-fn global_pd_pa(slot: &AtomicU64, va: u64, page_pa: u64) -> u64 {
+fn lane_page(
+    pages: &'static [GlobalPage; MAX_EXECUTION_LANES],
+    lane: ExecutionLane,
+) -> &'static GlobalPage {
+    lane.assert_in_range();
+    &pages[lane.index()]
+}
+
+fn lane_pd_pa(
+    slots: &'static [AtomicU64; MAX_EXECUTION_LANES],
+    lane: ExecutionLane,
+    va: u64,
+    page_pa: u64,
+) -> u64 {
+    lane.assert_in_range();
+    let slot = &slots[lane.index()];
     let cur = slot.load(Ordering::Acquire);
     if cur != 0 {
         return cur;
@@ -811,15 +829,15 @@ pub struct ExitInfo {
 /// PML4 slot so the per-Image template PT can own the META PD without
 /// colliding with the CTX/STACK PDs.
 ///
-/// CTX and STACK are process-global shared pages ([`CTX_PAGE`] /
-/// [`STACK_PAGE`]) mapped at the fixed VAs below in every frame's PT — only
-/// one frame runs in ring 3 at a time, so they need no per-call copy.
+/// CTX and STACK are lane-local pages mapped at the fixed VAs below in every
+/// frame's PT. A frame runtime owns the small PDPT that joins those lane-local
+/// pages with the per-Image META arena.
 ///
 /// ```text
 ///   PML4[1] (512..1024 GiB)
-///     PDPT[0] (512..513 GiB)  ← CTX, global shared page
+///     PDPT[0] (512..513 GiB)  ← CTX, lane-local page
 ///     PDPT[1] (513..514 GiB)  ← META arena, template-owned
-///     PDPT[2] (514..515 GiB)  ← STACK, global shared page
+///     PDPT[2] (514..515 GiB)  ← STACK, lane-local page
 /// ```
 const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
@@ -841,10 +859,8 @@ const STACK_SIZE: u64 = PAGE_SIZE as u64;
 /// to publish #PF-handler atomics on every entry. Built once per `KernelFrame`
 /// (lazily on first [`enter_frame`]) and reused across every re-entry on the
 /// same frame — it is **not** evicted (the synchronous call stack is bounded
-/// structurally, so all live page tables stay resident). The CTX, STACK, and
-/// zero scratch pages are process-global ([`CTX_PAGE`] / [`STACK_PAGE`] /
-/// [`ZERO_PAGE`]), shared by every frame (only one runs in ring 3 at a time),
-/// so the page table is the bulk of a frame's footprint.
+/// structurally, so all live page tables stay resident). CTX and STACK are
+/// lane-local scratch pages; the zero scratch page remains process-global.
 ///
 /// The category-#3 materialization *bookkeeping* (`mat_state` / `ro_units`)
 /// lives on the [`KernelFrame`](crate::call_loop), not here — it is gas history
@@ -859,6 +875,11 @@ const STACK_SIZE: u64 = PAGE_SIZE as u64;
 pub struct FrameRuntime {
     lane: ExecutionLane,
     pt: PageTable,
+    /// Per-frame PDPT joining lane-local CTX, per-image META arena, and
+    /// lane-local STACK. The page table borrows this PDPT at PML4[1], so this
+    /// owner must live as long as `pt`.
+    #[allow(dead_code)]
+    meta_slot_template: Pml4SlotTemplate,
     jit_va: u64,
     jit_size: u64,
     /// Dispatch-table VA (`META_BASE_M + dispatch_offset`) — re-stamped into
@@ -953,9 +974,9 @@ impl FrameRuntime {
 /// `PinnedCapRo` region lazily paged in RO on guest PIC reads.
 ///
 /// # Safety
-/// The guest runs single-threaded (Hyperlight serialises calls); the
-/// `code` / overlay slices and `code_pa` / cap PAs must outlive the
-/// returned [`FrameRuntime`], which owns the per-call page table.
+/// The `code` / overlay slices and `code_pa` / cap PAs must outlive the
+/// returned [`FrameRuntime`], which owns the per-call page table and borrows
+/// the cached Image arena PD.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn build_frame_runtime(
     lane: ExecutionLane,
@@ -993,9 +1014,6 @@ pub unsafe fn build_frame_runtime(
         code_base,
         META_BASE_M,
         CTX_VA_M,
-        STACK_VA_M,
-        global_pd_pa(&CTX_PD_PA, CTX_VA_M, CTX_PAGE.pa()),
-        global_pd_pa(&STACK_PD_PA, STACK_VA_M, STACK_PAGE.pa()),
         mem_cycles,
         helpers,
         |cached| {
@@ -1019,9 +1037,9 @@ pub unsafe fn build_frame_runtime(
             // Memory is sourced lazily from the Instance's `mem` DataCap via
             // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
             // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
-            // STACK are process-global shared pages ([`CTX_PAGE`] / [`STACK_PAGE`]) —
-            // nothing is allocated per call but the page table itself. The shared ctx's
-            // frame-constant fields (`dispatch_table` / `code_base`) are re-stamped by
+            // STACK are lane-local shared pages, so each frame allocates only its page
+            // table plus the small CTX|META|STACK PDPT. The ctx's frame-constant
+            // fields (`dispatch_table` / `code_base`) are re-stamped by
             // [`enter_frame`] each entry (the page is shared, the image differs).
 
             let mut pt = PageTable::new()?;
@@ -1043,16 +1061,30 @@ pub unsafe fn build_frame_runtime(
             // is safe.
             let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
             let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-            // Install the entire PML4 slot-1 subtree (CTX | META arena | STACK) with a
-            // single borrowed PML4 write. CTX/STACK are the global shared pages and the
-            // arena PD is per-Image, so the whole PDPT is an Image constant built once
-            // in `with_compiled_image` — no per-frame CTX/STACK PDPT/PD/PT allocation.
-            pt.install_borrowed_pdpt(META_PML4_BASE, cached.template_pdpt_pa)?;
+            let meta_slot_template = Pml4SlotTemplate::new(
+                CTX_VA_M,
+                lane_pd_pa(&CTX_PD_PA, lane, CTX_VA_M, lane_page(&CTX_PAGES, lane).pa()),
+                META_BASE_M,
+                cached.template_pd_pa,
+                STACK_VA_M,
+                lane_pd_pa(
+                    &STACK_PD_PA,
+                    lane,
+                    STACK_VA_M,
+                    lane_page(&STACK_PAGES, lane).pa(),
+                ),
+            )?;
+            let template_pdpt_pa = meta_slot_template.pdpt_pa()?;
+            // Install the PML4 slot-1 subtree (CTX | META arena | STACK) with
+            // one borrowed PML4 write. CTX/STACK are lane-local; META is the
+            // per-Image cached arena PD.
+            pt.install_borrowed_pdpt(META_PML4_BASE, template_pdpt_pa)?;
             let new_cr3 = pt.cr3()?;
 
             Some(FrameRuntime {
                 lane,
                 pt,
+                meta_slot_template,
                 jit_va,
                 jit_size: cached.jit_size as u64,
                 dispatch_va,
@@ -1106,10 +1138,10 @@ pub unsafe fn enter_frame(
     ro_units: *mut alloc::vec::Vec<u32>,
 ) -> ExitInfo {
     assert_eq!(rt.lane, lane, "FrameRuntime entered on the wrong lane");
-    let ctx_kva = CTX_PAGE.kva();
+    let ctx_kva = lane_page(&CTX_PAGES, lane).kva();
     let ctx = ctx_kva as *mut JitContext;
-    // SAFETY: CTX_PAGE is the process-global ring-3 ctx page, leaked for the
-    // kernel's lifetime; mapped at CTX_VA_M in this frame's PT.
+    // SAFETY: the lane-local CTX page is leaked for the kernel's lifetime and
+    // mapped at CTX_VA_M in this frame's PT.
     unsafe {
         // The persisted register file is the 13 host-mapped slots; the two
         // spilled slots (x3/x4) are invocation-local and start at 0, matching
