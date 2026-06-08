@@ -14,7 +14,7 @@
 //! Gated to the nub Hyperlight host (linux-x86_64), like the other guest tests.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_cap::image::{EndpointDef, Image, PinnedCap};
+use javm_cap::image::{EndpointDef, Image, ImageBuilder};
 use javm_cap::{Cap, CapHash, Key, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
@@ -45,43 +45,23 @@ fn child_image() -> Image {
 /// halt). `IMAGE_SLOT` is a pinned `Cap::Image` (the src); `PINNED_DST` is a
 /// pinned `Cap::Data`. Endpoint args φ[7]=src, φ[8]=dst.
 fn parent_image(child_hash: CapHash) -> Image {
-    let mut endpoints = BTreeMap::new();
-    endpoints.insert(
-        Key::from(0u8),
-        EndpointDef {
-            entry_pc: 0,
-            arg_registers: 0,
-            arg_cnode_size: 0,
-            initial_regs: BTreeMap::new(),
-        },
-    );
-    let mut pinned_slots = BTreeMap::new();
-    pinned_slots.insert(
-        Key::from(IMAGE_SLOT),
-        PinnedCap::Image {
-            content_hash: child_hash,
-        },
-    );
-    pinned_slots.insert(
-        Key::from(PINNED_DST),
-        PinnedCap::Data {
-            content: vec![0xAB; 16],
-            size: 4096,
-        },
-    );
     let mut code = Vec::new();
     code.extend_from_slice(&ecalli(OP_IMAGE_HASH_CHAIN).to_le_bytes());
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
-    Image {
-        code,
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots,
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    ImageBuilder::new()
+        .code(code)
+        .endpoint(
+            Key::from(0u8),
+            EndpointDef {
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
+            },
+        )
+        .pinned_image(Key::from(IMAGE_SLOT), child_hash)
+        .pinned_data(Key::from(PINNED_DST), vec![0xAB; 16], 4096)
+        .build()
 }
 
 /// Publish the parent instance and invoke endpoint 0 with the given

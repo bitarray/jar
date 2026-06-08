@@ -19,7 +19,7 @@
 //! register-setup code is needed.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_cap::image::{EndpointDef, Image, PinnedCap};
+use javm_cap::image::{EndpointDef, Image, ImageBuilder};
 use javm_cap::{Cap, CapHash, Key, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
@@ -47,42 +47,22 @@ fn child_image() -> Image {
 /// Parent image: one `ecalli OP_DERIVE_SPAWN`. `image_slot` (slot 3) is a
 /// pinned `Cap::Image`; the dst (slot 66) is a pinned `Cap::Data`.
 fn parent_image(child_hash: CapHash) -> Image {
-    let mut endpoints = BTreeMap::new();
-    endpoints.insert(
-        Key::from(0u8),
-        EndpointDef {
-            // Code-region byte offset (the runtime adds CODE_BASE); the
-            // single instruction sits at offset 0.
-            entry_pc: 0,
-            arg_registers: 0,
-            arg_cnode_size: 0,
-            initial_regs: BTreeMap::new(),
-        },
-    );
-    let mut pinned_slots = BTreeMap::new();
-    pinned_slots.insert(
-        Key::from(IMAGE_SLOT),
-        PinnedCap::Image {
-            content_hash: child_hash,
-        },
-    );
-    pinned_slots.insert(
-        Key::from(PINNED_DST),
-        PinnedCap::Data {
-            content: vec![0xAB; 16],
-            size: 4096,
-        },
-    );
-    Image {
-        code: ecalli(OP_DERIVE_SPAWN).to_le_bytes().to_vec(),
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots,
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    ImageBuilder::new()
+        .code(ecalli(OP_DERIVE_SPAWN).to_le_bytes().to_vec())
+        .endpoint(
+            Key::from(0u8),
+            EndpointDef {
+                // Code-region byte offset (the runtime adds CODE_BASE); the
+                // single instruction sits at offset 0.
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
+            },
+        )
+        .pinned_image(Key::from(IMAGE_SLOT), child_hash)
+        .pinned_data(Key::from(PINNED_DST), vec![0xAB; 16], 4096)
+        .build()
 }
 
 /// φ[7]=image_slot, φ[8]=cnode_slot(unused), φ[9]=dst — matching the 3-arg

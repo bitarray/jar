@@ -26,16 +26,9 @@ fn reply_image() -> Image {
             initial_regs: BTreeMap::new(),
         },
     );
-    Image {
-        code: ecalli(OP_REPLY).to_le_bytes().to_vec(),
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    let mut img = Image::with_code(ecalli(OP_REPLY).to_le_bytes().to_vec());
+    img.endpoints = endpoints;
+    img
 }
 
 #[test]

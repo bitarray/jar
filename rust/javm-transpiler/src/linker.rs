@@ -39,7 +39,7 @@ use crate::layout::{
 };
 use javm_cap::Key;
 use javm_cap::abi::BARE_YIELD_RECEIVER_SLOT;
-use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
+use javm_cap::image::{EndpointDef, Image, ImageBuilder, MemoryMapping};
 use javm_cap::slot::SlotPath;
 use std::collections::BTreeMap;
 
@@ -438,10 +438,17 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         def.initial_regs.insert(SP_REG, stack_top);
     }
 
+    // The data regions are handed to `ImageBuilder` as the same contiguous
+    // `ro_data`/`rw_data` buffers as before; `build()` page-splits them,
+    // elides all-zero pages (the leading rw gap and trailing `.bss` stop
+    // being serialized), and deduplicates identical pages into one shared
+    // page-granular `arena`. `MemoryMapping`s and geometry are unchanged —
+    // each region's `size` is still `page_count * PAGE_SIZE`, so the
+    // resulting `DataCap`s are byte- and hash-identical to the old inline
+    // form; only the wire encoding shrinks.
     let mut memory_mappings: Vec<MemoryMapping> = Vec::new();
-    let mut pinned_slots: BTreeMap<Key, PinnedCap> = BTreeMap::new();
-    let mut initial_slots: BTreeMap<Key, InitialDataCap> = BTreeMap::new();
     let page_bytes = u64::from(PVM_PAGE_SIZE);
+    let mut builder = ImageBuilder::new();
 
     let stack_slot = Key::from(STACK_CAP_INDEX);
     let stack_size = u64::from(layout.stack.page_count) * page_bytes;
@@ -450,13 +457,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         size: stack_size,
         source: SlotPath::root(stack_slot.clone()),
     });
-    initial_slots.insert(
-        stack_slot,
-        InitialDataCap {
-            content: Vec::new(),
-            size: stack_size,
-        },
-    );
+    builder = builder.initial_data(stack_slot, Vec::new(), stack_size);
 
     if let Some(ro) = &layout.ro {
         let ro_slot = Key::from(RO_CAP_INDEX);
@@ -466,13 +467,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
             size,
             source: SlotPath::root(ro_slot.clone()),
         });
-        pinned_slots.insert(
-            ro_slot,
-            PinnedCap::Data {
-                content: ro_data,
-                size,
-            },
-        );
+        builder = builder.pinned_data(ro_slot, ro_data, size);
     }
 
     if let Some(rw) = &layout.rw {
@@ -483,13 +478,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
             size,
             source: SlotPath::root(rw_slot.clone()),
         });
-        initial_slots.insert(
-            rw_slot,
-            InitialDataCap {
-                content: rw_data,
-                size,
-            },
-        );
+        builder = builder.initial_data(rw_slot, rw_data, size);
     }
 
     if let Some(heap) = &layout.heap {
@@ -500,13 +489,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
             size,
             source: SlotPath::root(heap_slot.clone()),
         });
-        initial_slots.insert(
-            heap_slot,
-            InitialDataCap {
-                content: Vec::new(),
-                size,
-            },
-        );
+        builder = builder.initial_data(heap_slot, Vec::new(), size);
     }
 
     // Layout geometry: code occupies `[CODE_BASE, CODE_BASE +
@@ -531,16 +514,16 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // via a declarative mapping, so an untrusted Image cannot relocate
     // it. `memory_mappings` describes data/slot regions only.
 
-    Ok(Image {
-        code,
-        endpoints,
-        memory_mappings,
-        pinned_slots,
-        initial_slots,
-        yield_receiver_slot: Some(Key::from(BARE_YIELD_RECEIVER_SLOT)),
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    })
+    builder = builder.code(code);
+    for (key, ep) in endpoints {
+        builder = builder.endpoint(key, ep);
+    }
+    for mapping in memory_mappings {
+        builder = builder.mapping(mapping);
+    }
+    Ok(builder
+        .yield_receiver_slot(Some(Key::from(BARE_YIELD_RECEIVER_SLOT)))
+        .build())
 }
 
 /// Verify the 4 bytes at `off` decode to an `auipc`; error otherwise.

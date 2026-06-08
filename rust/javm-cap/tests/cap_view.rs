@@ -6,7 +6,7 @@
 //! [`DataCap::flush`] folds the overlay into a fresh backing.
 
 use javm_cap::cap::data::PageResolution;
-use javm_cap::{Cap, DataCap, PAGE_SIZE};
+use javm_cap::{Cap, DataCap, PAGE_SIZE, PageSlot};
 
 /// Build a 2-page cap whose page 0 is nonzero (`marker`) and page 1 zero.
 fn cap_2pages(marker: &[u8]) -> DataCap {
@@ -184,4 +184,83 @@ fn place_shared_clamps_to_extent() {
     assert_eq!(page_at(&mem, 0)[0], 0); // page 0 untouched
     assert_eq!(page_at(&mem, 1)[0], 0x55); // page 1 placed
     assert_eq!(mem.page_count(), 2); // extent unchanged
+}
+
+/// `DataCap::from_sparse_pages` (the Image-arena wire-decode constructor) must
+/// produce a cap byte- and hash-identical to the contiguous `from_bytes_sized`
+/// for the same logical content. This is the load-bearing invariant of the
+/// arena format: a sparse blob (zero pages elided) decodes to the *same*
+/// `DataCap` — and thus the same cap hash — the old inline form produced, so
+/// the conformance oracle and both engines never fork. Pinned here (incl.
+/// `size == 0`, a partial last page, and interior/trailing zero pages) so a
+/// future change to either constructor cannot silently diverge.
+#[test]
+fn from_sparse_pages_matches_from_bytes_sized() {
+    let p = PAGE_SIZE;
+    // page0 nonzero, page1 ALL-ZERO (must be elided), page2 nonzero.
+    let mut interior = vec![0x11u8; p];
+    interior.extend(core::iter::repeat_n(0u8, p));
+    interior.extend(core::iter::repeat_n(0x22u8, p));
+
+    let cases: &[(Vec<u8>, u64)] = &[
+        (vec![], 0),                        // degenerate: floors to one empty page
+        (vec![], p as u64),                 // pure zero page
+        (vec![0x7u8; 10], p as u64),        // content < size (partial page)
+        (vec![0x7u8; p], p as u64),         // exactly one page
+        (vec![0x9u8; 5000], 2 * p as u64),  // spans two pages, partial last
+        (vec![0x3u8; 3 * p], 3 * p as u64), // three full pages
+        (interior.clone(), 3 * p as u64),   // interior zero page (elided)
+        (vec![0x4u8; p], 4 * p as u64),     // one page + trailing zero pages
+    ];
+
+    for (content, target_size) in cases {
+        let inline = DataCap::from_bytes_sized(content, *target_size);
+        // Reconstruct sparsely from inline's NON-ZERO pages only — exactly
+        // what the wire decode does (omitted pages are the canonical zero).
+        let pages: Vec<(u32, Vec<u8>)> = (0..inline.backing.page_count())
+            .filter_map(|i| match inline.backing.page(i) {
+                PageSlot::Loaded(pb) => Some((i as u32, pb.bytes.clone())),
+                _ => None,
+            })
+            .collect();
+        let inline_clen = inline.content_len();
+        let sparse =
+            DataCap::from_sparse_pages(inline_clen, pages.iter().map(|(i, b)| (*i, b.as_slice())));
+        let sparse_clen = sparse.content_len();
+        assert_eq!(
+            Cap::Data(inline).cap_hash(),
+            Cap::Data(sparse).cap_hash(),
+            "sparse vs inline cap hash mismatch (content.len()={}, size={target_size})",
+            content.len(),
+        );
+        assert_eq!(inline_clen, sparse_clen, "content_len mismatch");
+    }
+
+    // `size == 0` specifically: both floor to a single canonical empty page.
+    assert_eq!(
+        Cap::Data(DataCap::from_sparse_pages(
+            0,
+            core::iter::empty::<(u32, &[u8])>()
+        ))
+        .cap_hash(),
+        Cap::Data(DataCap::from_bytes_sized(&[], 0)).cap_hash(),
+    );
+
+    // A `len`-trimmed page (trailing zeros within the page dropped) zero-pads
+    // back to the identical page — so the wire trim is hash-invisible.
+    let mut full_page = vec![0u8; p];
+    full_page[..3].copy_from_slice(&[1, 2, 3]);
+    assert_eq!(
+        Cap::Data(DataCap::from_sparse_pages(
+            p as u64,
+            [(0u32, &full_page[..3])]
+        ))
+        .cap_hash(),
+        Cap::Data(DataCap::from_sparse_pages(
+            p as u64,
+            [(0u32, full_page.as_slice())]
+        ))
+        .cap_hash(),
+        "trimmed page must zero-pad to the same cap as the full page",
+    );
 }

@@ -45,16 +45,9 @@ fn prog_image() -> Image {
     let mut code = Vec::new();
     code.extend_from_slice(&ecalli(OP_IMAGE_HASH_CHAIN).to_le_bytes());
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
-    Image {
-        code,
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    let mut img = Image::with_code(code);
+    img.endpoints = endpoints;
+    img
 }
 
 /// Invoke the program with the given src slot; return (exit_reason, exit_arg).

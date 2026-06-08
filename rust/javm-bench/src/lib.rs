@@ -78,8 +78,8 @@ impl BuiltCaps {
 
         for (slot, pinned) in &image.pinned_slots {
             let (h, cap) = match pinned {
-                PinnedCap::Data { content, size } => {
-                    let cap = Cap::data_inline_with_size(content, *size);
+                PinnedCap::Data { desc } => {
+                    let cap = Cap::data_from_desc(&image.arena, desc);
                     let h = ssz::hash_tree_root(&cap);
                     (h, Some(cap))
                 }
@@ -94,8 +94,8 @@ impl BuiltCaps {
                 data_caps.push((h, c));
             }
         }
-        for (slot, init) in &image.initial_slots {
-            let cap = Cap::data_inline_with_size(&init.content, init.size);
+        for (slot, desc) in &image.initial_slots {
+            let cap = Cap::data_from_desc(&image.arena, desc);
             let h = ssz::hash_tree_root(&cap);
             initial_hashes.push((slot.clone(), h));
             data_caps.push((h, cap));
@@ -329,8 +329,8 @@ fn publish_image(nub: &mut Nub, image: &Image) -> CapHash {
     let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let (h, maybe_cap) = match pinned {
-            PinnedCap::Data { content, size } => {
-                let cap = Cap::data_inline_with_size(content, *size);
+            PinnedCap::Data { desc } => {
+                let cap = Cap::data_from_desc(&image.arena, desc);
                 let h = ssz::hash_tree_root(&cap);
                 (h, Some(cap))
             }
@@ -341,8 +341,8 @@ fn publish_image(nub: &mut Nub, image: &Image) -> CapHash {
             data_caps.push((h, cap));
         }
     }
-    for (slot, init) in &image.initial_slots {
-        let cap = Cap::data_inline_with_size(&init.content, init.size);
+    for (slot, desc) in &image.initial_slots {
+        let cap = Cap::data_from_desc(&image.arena, desc);
         let h = ssz::hash_tree_root(&cap);
         initial_hashes.push((slot.clone(), h));
         data_caps.push((h, cap));

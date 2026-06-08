@@ -7,9 +7,8 @@ use std::collections::BTreeMap;
 use std::thread;
 
 fn ecalli_imm_image(imm: u32) -> Image {
-    let mut img = Image::empty();
     let instr = (imm << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11;
-    img.code = instr.to_le_bytes().to_vec();
+    let mut img = Image::with_code(instr.to_le_bytes().to_vec());
     img.endpoints.insert(
         Key::from(0u8),
         EndpointDef {

@@ -16,8 +16,7 @@ const GAS_SLOT: u8 = 5;
 /// `ecalli 42` at PC 0 (exits `HostCall(42)` after consuming a fixed amount of
 /// gas). `gas_slots[0]` optionally names the slot holding the `Gas` handle.
 fn ecalli_42_image(with_gas_slot: bool) -> Image {
-    let mut img = Image::empty();
-    img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
+    let mut img = Image::with_code(0x02A0_200Bu32.to_le_bytes().to_vec());
     let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     endpoints.insert(
         Key::from(0u8),

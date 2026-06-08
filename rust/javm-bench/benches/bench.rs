@@ -21,10 +21,7 @@ macro_rules! bench_workload {
             let (val, gas) = javm_bench::run_recompiler(&built);
             eprintln!(
                 "[{}] result = {:#x}, gas = {}, code = {}B",
-                $label,
-                val,
-                gas,
-                image.code.len(),
+                $label, val, gas, image.code.len,
             );
 
             let mut g = c.benchmark_group($label);

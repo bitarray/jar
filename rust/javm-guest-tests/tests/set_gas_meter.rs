@@ -59,16 +59,10 @@ fn endpoint0() -> BTreeMap<Key, EndpointDef> {
 }
 
 fn image(code: Vec<u8>, gas_slots: Vec<Key>) -> Image {
-    Image {
-        code,
-        endpoints: endpoint0(),
-        memory_mappings: Vec::new(),
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots,
-        quota_slots: Vec::new(),
-    }
+    let mut img = Image::with_code(code);
+    img.endpoints = endpoint0();
+    img.gas_slots = gas_slots;
+    img
 }
 
 /// Invoke a standalone image and return its `(exit_reason, return_value)`.

@@ -56,16 +56,10 @@ fn endpoints(extra1: bool) -> BTreeMap<Key, EndpointDef> {
 }
 
 fn image(code: Vec<u8>, eps: BTreeMap<Key, EndpointDef>, recv: Option<Key>) -> Image {
-    Image {
-        code,
-        endpoints: eps,
-        memory_mappings: Vec::new(),
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: recv,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    let mut img = Image::with_code(code);
+    img.endpoints = eps;
+    img.yield_receiver_slot = recv;
+    img
 }
 
 fn put_instance(nub: &mut Nub, img: &Image, cnode_h: [u8; 32]) -> nub::AbiCapHash {

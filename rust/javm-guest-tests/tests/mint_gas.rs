@@ -14,7 +14,7 @@
 //! nub Hyperlight host (linux-x86_64).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_cap::image::{EndpointDef, Image, PinnedCap};
+use javm_cap::image::{EndpointDef, Image, ImageBuilder};
 use javm_cap::yield_cap::{YK_MINT_GAS, YK_MINT_QUOTA};
 use javm_cap::{yield_sender, CNodeCap, Cap, CapHashOrRef, Key, NUM_REGS};
 use nub::Nub;
@@ -39,37 +39,22 @@ fn ecalli(imm: u32) -> u32 {
 /// Image: `host_yield(φ7=sender, φ8=key, φ9=dst); reply`, with a pinned
 /// `Cap::Data` at PINNED_DST so the negative run targets a read-only slot.
 fn prog_image() -> Image {
-    let mut endpoints = BTreeMap::new();
-    endpoints.insert(
-        Key::from(0u8),
-        EndpointDef {
-            entry_pc: 0,
-            arg_registers: 0,
-            arg_cnode_size: 0,
-            initial_regs: BTreeMap::new(),
-        },
-    );
-    let mut pinned_slots = BTreeMap::new();
-    pinned_slots.insert(
-        Key::from(PINNED_DST),
-        PinnedCap::Data {
-            content: vec![0xAB; 16],
-            size: 4096,
-        },
-    );
     let mut code = Vec::new();
     code.extend_from_slice(&ecalli(OP_HOST_YIELD).to_le_bytes());
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
-    Image {
-        code,
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots,
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
-    }
+    ImageBuilder::new()
+        .code(code)
+        .endpoint(
+            Key::from(0u8),
+            EndpointDef {
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
+            },
+        )
+        .pinned_data(Key::from(PINNED_DST), vec![0xAB; 16], 4096)
+        .build()
 }
 
 /// Invoke the program: `mint_key` selects mint_gas vs mint_quota; `dst` is the
