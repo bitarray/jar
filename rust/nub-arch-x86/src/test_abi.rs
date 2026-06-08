@@ -9,6 +9,10 @@
 /// Smoke probe — returns 42u64 rkyv-encoded.
 pub const FN_ID_TEST_SMOKE: u32 = 100;
 
+/// Test-only scheduler probe. Payload is two raw `InvokePacket`s concatenated;
+/// output is rkyv-encoded `[InvocationResult; 2]`.
+pub const FN_ID_TEST_INVOKE_TWO_SERIAL: u32 = 101;
+
 /// Bench: allocate `N` × `Arc<Page>` where `Page` is a 4 KiB
 /// page-aligned block.
 ///

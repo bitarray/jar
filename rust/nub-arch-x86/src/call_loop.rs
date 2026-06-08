@@ -90,7 +90,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
@@ -678,117 +678,167 @@ fn read_scratchpad_head(frame: &KernelFrame) -> [u8; SCRATCHPAD_HEAD_LEN] {
     out
 }
 
-/// Drive the CALL/HALT loop until either the top frame HALTs (clean
-/// exit) or the JIT signals an unrecoverable condition (page fault,
-/// gas exhaustion, …). See module docs for the loop body.
-///
-/// Cap lookups go through the heap-resident [`CACHE`] static. Each
-/// lookup takes the cache's spinlock; we keep lock scopes tight
-/// (clone out the fields we need, drop the guard) so other guest-mode
-/// lookups can proceed concurrently.
-pub fn run_top(
-    instance_hash: &CapHash,
-    endpoint_idx: u32,
-    args: [u64; 4],
-    initial_gas: i64,
-) -> Result<LoopOutcome, u32> {
-    let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
-    let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
-    // Monotonic Instance identity. The top-level invocation is instance 0; every
-    // CALL mints the next id.
-    let mut next_iid: u64 = 0;
-    stack.push(StackEntry::instance(top, 0, next_iid));
-    next_iid += 1;
-    // GAS MODEL (single reconciliation point). The threaded `gas` always holds
-    // the LIVE balance of the running frame's ACTIVE meter — `active_meter(top)`,
-    // the frame's stored gas scope (its own declared meter list, or its
-    // caller/catcher's loaned scope).
-    // `meters[k]` is authoritative for every non-active meter. At the top of each
-    // iteration we reconcile: if the top's active meter changed since last
-    // iteration, bank the old scope + load the new. Every CALL/HALT/yield/resume/
-    // drop changes the top, so this one point catches them all — no per-transition
-    // gas bookkeeping. The guest meter table is per-RPC (a block-spanning table is
-    // the deferred lazy-load piece).
-    let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
-    // The TOP frame's primary usable meter, if declared, is the RPC's ROOT
-    // scope: stamp it like any frame and seed the table from the host-supplied
-    // budget, so `set_gas_meter` on the root meter goes through the SAME table
-    // as sub-meters. A top with NO gas slot is host-budgeted
-    // (`root_active == None`, tracked in `host_budget`). The host ABI still
-    // supplies one budget; secondary root gas slots are usable if a guest-side
-    // syscall funds them during the run.
-    stack[0].gas = resolve_frame_gas(frame_at(&stack, 0))?.unwrap_or_else(FrameGas::host_budgeted);
-    let root_active = stack[0].gas.active_key();
-    if let Some(k) = &root_active {
-        meters.insert(k.clone(), initial_gas);
-    }
-    let mut gas = initial_gas;
-    let mut host_budget = initial_gas;
-    let mut current_active: Option<Key> = root_active.clone();
+type TaskId = u64;
 
-    let outcome = loop {
-        let top_idx = stack.len() - 1;
-        // Reconcile the active meter for the (possibly new) top frame.
-        let new_active = active_meter(&stack, top_idx);
+/// GAS MODEL (single reconciliation point). `live_gas` always holds the live
+/// balance of the running frame's active meter. `meters[k]` is authoritative for
+/// every non-active meter, while `host_budget` is the banked unmetered scope.
+/// Every CALL/HALT/yield/resume/drop changes the top through one scheduler poll
+/// boundary, so this one task-local state object catches all gas scope changes.
+struct TaskGasState {
+    meters: BTreeMap<Key, i64>,
+    live_gas: i64,
+    host_budget: i64,
+    root_active: Option<Key>,
+    current_active: Option<Key>,
+}
+
+impl TaskGasState {
+    fn new(root_gas: &FrameGas, initial_gas: i64) -> Self {
+        let root_active = root_gas.active_key();
+        let mut meters = BTreeMap::new();
+        if let Some(k) = &root_active {
+            meters.insert(k.clone(), initial_gas);
+        }
+        Self {
+            meters,
+            live_gas: initial_gas,
+            host_budget: initial_gas,
+            root_active: root_active.clone(),
+            current_active: root_active,
+        }
+    }
+
+    fn reconcile_for(&mut self, stack: &[StackEntry], top_idx: usize) {
+        let new_active = active_meter(stack, top_idx);
         reconcile_active(
-            &current_active,
+            &self.current_active,
             &new_active,
-            &mut gas,
-            &mut host_budget,
-            &mut meters,
+            &mut self.live_gas,
+            &mut self.host_budget,
+            &mut self.meters,
         );
-        current_active = new_active;
+        self.current_active = new_active;
+    }
+
+    fn root_remaining(&self) -> i64 {
+        root_remaining(
+            &self.root_active,
+            &self.current_active,
+            self.live_gas,
+            self.host_budget,
+            &self.meters,
+        )
+    }
+}
+
+enum TaskPoll {
+    Pending,
+    Done(LoopOutcome),
+}
+
+/// One top-level invocation as a resumable kernel task. The task owns exactly
+/// the state that used to live in `run_top` locals: one physical caller stack,
+/// one task-local gas bank, and one monotonic Instance id allocator.
+struct KernelTask {
+    id: TaskId,
+    stack: Vec<StackEntry>,
+    next_iid: u64,
+    gas_state: TaskGasState,
+}
+
+impl KernelTask {
+    fn new(
+        id: TaskId,
+        instance_hash: &CapHash,
+        endpoint_idx: u32,
+        args: [u64; 4],
+        initial_gas: i64,
+    ) -> Result<Self, u32> {
+        let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
+        let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
+        // Monotonic Instance identity. The top-level invocation is instance 0;
+        // every CALL mints the next id.
+        let mut next_iid: u64 = 0;
+        stack.push(StackEntry::instance(top, 0, next_iid));
+        next_iid += 1;
+
+        // The TOP frame's primary usable meter, if declared, is the task's root
+        // scope. A top with no gas slot is host-budgeted.
+        stack[0].gas =
+            resolve_frame_gas(frame_at(&stack, 0))?.unwrap_or_else(FrameGas::host_budgeted);
+        let gas_state = TaskGasState::new(&stack[0].gas, initial_gas);
+        Ok(Self {
+            id,
+            stack,
+            next_iid,
+            gas_state,
+        })
+    }
+
+    fn outcome(
+        &self,
+        exit_reason: u32,
+        exit_arg: u32,
+        return_value: u64,
+        scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
+    ) -> LoopOutcome {
+        LoopOutcome {
+            exit_reason,
+            exit_arg,
+            return_value,
+            gas_remaining: self.gas_state.root_remaining(),
+            scratchpad_head,
+        }
+    }
+
+    fn poll_once(&mut self) -> Result<TaskPoll, u32> {
+        let top_idx = self.stack.len() - 1;
+        // Reconcile the active meter for the (possibly new) top frame.
+        self.gas_state.reconcile_for(&self.stack, top_idx);
+
         // Phase 1: run one ring-3 entry on the top entry's frame (an
-        // InstanceEntry runs its own frame; a ReferenceEntry runs its
-        // referent's — the same Instance, sharing one PC/regs/mem).
+        // InstanceEntry runs its own frame; a ReferenceEntry runs its referent's
+        // — the same Instance, sharing one PC/regs/mem).
         let info = {
-            let frame = frame_at_mut(&mut stack, top_idx);
-            run_one_entry(frame, gas)?
+            let frame = frame_at_mut(&mut self.stack, top_idx);
+            run_one_entry(frame, self.gas_state.live_gas)?
         };
-        gas = info.gas_remaining;
+        self.gas_state.live_gas = info.gas_remaining;
+
         // Mirror the JIT's post-exit state back into the running frame.
         {
-            let frame = frame_at_mut(&mut stack, top_idx);
+            let frame = frame_at_mut(&mut self.stack, top_idx);
             frame.instance.regs = info.regs;
             frame.instance.pc = info.pc as u64;
         }
 
-        // Phase 2: classify the exit. Borrow scopes are kept tight so
-        // we can mutate `stack` (push/pop) inside each arm.
+        // Phase 2: classify the exit. Borrow scopes are kept tight so we can
+        // mutate `stack` (push/pop) inside each arm.
         match info.exit_reason {
             EXIT_HALT => {
-                // Read the scratchpad head from the InstanceEntry that will drain
-                // (its `target` reaches stack[0]) BEFORE it is popped — meaningful
-                // only at the top-level HALT. `frame_at(top_idx)` resolves the
-                // running frame whether the top is an InstanceEntry or a handler
-                // ReferenceEntry.
-                let head = if stack[top_idx].target == 0 {
-                    read_scratchpad_head(frame_at(&stack, top_idx))
+                // Read the scratchpad head from the InstanceEntry that will
+                // drain before it is popped — meaningful only at top-level HALT.
+                let head = if self.stack[top_idx].target == 0 {
+                    read_scratchpad_head(frame_at(&self.stack, top_idx))
                 } else {
                     [0u8; SCRATCHPAD_HEAD_LEN]
                 };
                 // A handler activation (ReferenceEntry) that HALTs without
                 // resuming/dropping its yielder triggers the sub-tree-atomic
                 // unwind; an ordinary InstanceEntry pops and reflects.
-                let drained = if stack[top_idx].target != top_idx {
-                    unwind_to_handler(&mut stack, top_idx, info.regs[7])?
+                let drained = if self.stack[top_idx].target != top_idx {
+                    unwind_to_handler(&mut self.stack, top_idx, info.regs[7])?
                 } else {
-                    pop_and_reflect(&mut stack, info.regs[7])?
+                    pop_and_reflect(&mut self.stack, info.regs[7])?
                 };
                 if drained {
-                    break LoopOutcome {
-                        exit_reason: info.exit_reason,
-                        exit_arg: info.exit_arg,
-                        return_value: info.regs[7],
-                        gas_remaining: root_remaining(
-                            &root_active,
-                            &current_active,
-                            gas,
-                            host_budget,
-                            &meters,
-                        ),
-                        scratchpad_head: head,
-                    };
+                    return Ok(TaskPoll::Done(self.outcome(
+                        info.exit_reason,
+                        info.exit_arg,
+                        info.regs[7],
+                        head,
+                    )));
                 }
             }
             EXIT_HOST_CALL | EXIT_ECALL => {
@@ -814,10 +864,10 @@ pub fn run_top(
                 // not an OOG.
                 let mut host_call_pending = false;
                 let frame_cost = if op == OP_HOST_CALL {
-                    if stack.len() >= MAX_DEPTH {
+                    if self.stack.len() >= MAX_DEPTH {
                         return Err(ERR_DEPTH_LIMIT);
                     }
-                    let parent = frame_at(&stack, top_idx);
+                    let parent = frame_at(&self.stack, top_idx);
                     match host_call_frame_cost(parent)? {
                         Some(cost) => cost,
                         None => {
@@ -829,155 +879,118 @@ pub fn run_top(
                     0
                 };
                 let total_cost = ecall_cost + frame_cost;
-                if gas < total_cost {
+                if self.gas_state.live_gas < total_cost {
                     // A metered frame re-attempts THIS ecall after a kernel:oog
-                    // topup; unmetered / uncaught → bubble EXIT_OOG.
-                    if try_oog_yield(&mut stack, top_idx, info.pc.saturating_sub(4)) {
-                        continue;
+                    // topup; unmetered / uncaught -> bubble EXIT_OOG.
+                    if try_oog_yield(&mut self.stack, top_idx, info.pc.saturating_sub(4)) {
+                        return Ok(TaskPoll::Pending);
                     }
-                    break LoopOutcome {
-                        exit_reason: EXIT_OOG,
-                        exit_arg: 0,
-                        return_value: info.regs[7],
-                        gas_remaining: root_remaining(
-                            &root_active,
-                            &current_active,
-                            gas,
-                            host_budget,
-                            &meters,
-                        ),
-                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                    };
+                    return Ok(TaskPoll::Done(self.outcome(
+                        EXIT_OOG,
+                        0,
+                        info.regs[7],
+                        [0u8; SCRATCHPAD_HEAD_LEN],
+                    )));
                 }
-                gas -= total_cost;
+                self.gas_state.live_gas -= total_cost;
 
                 match op {
                     OP_REPLY => {
                         // Read the scratchpad head from the InstanceEntry that
                         // will drain before the pop (see EXIT_HALT).
-                        let head = if stack[top_idx].target == 0 {
-                            read_scratchpad_head(frame_at(&stack, top_idx))
+                        let head = if self.stack[top_idx].target == 0 {
+                            read_scratchpad_head(frame_at(&self.stack, top_idx))
                         } else {
                             [0u8; SCRATCHPAD_HEAD_LEN]
                         };
-                        // A handler REPLYing without resuming/dropping → sub-tree
+                        // A handler REPLYing without resuming/dropping -> sub-tree
                         // unwind; an ordinary InstanceEntry pops and reflects.
-                        let drained = if stack[top_idx].target != top_idx {
-                            unwind_to_handler(&mut stack, top_idx, info.regs[7])?
+                        let drained = if self.stack[top_idx].target != top_idx {
+                            unwind_to_handler(&mut self.stack, top_idx, info.regs[7])?
                         } else {
-                            pop_and_reflect(&mut stack, info.regs[7])?
+                            pop_and_reflect(&mut self.stack, info.regs[7])?
                         };
                         if drained {
                             // Preserve the JIT exit shape so the host bench
                             // harness (which asserts `(reason=4, arg=0)` for the
                             // subsoil trampoline halt) doesn't trip.
-                            break LoopOutcome {
-                                exit_reason: info.exit_reason,
-                                exit_arg: info.exit_arg,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: head,
-                            };
+                            return Ok(TaskPoll::Done(self.outcome(
+                                info.exit_reason,
+                                info.exit_arg,
+                                info.regs[7],
+                                head,
+                            )));
                         }
                         // Stack still has frames; the parent picks up at the next
-                        // iter with the child's φ[7] reflected.
+                        // poll with the child's phi[7] reflected.
                     }
                     OP_DERIVE_SPAWN => {
                         let trapped = {
-                            let frame = frame_at_mut(&mut stack, top_idx);
+                            let frame = frame_at_mut(&mut self.stack, top_idx);
                             dispatch_derive_spawn(frame)?
                         };
                         if trapped {
-                            // Pinned dst → guest trap, mirroring the interpreter.
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                            // Pinned dst -> guest trap, mirroring the interpreter.
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         }
                     }
                     OP_IMAGE_HASH_CHAIN => {
                         let trapped = {
-                            let frame = frame_at_mut(&mut stack, top_idx);
+                            let frame = frame_at_mut(&mut self.stack, top_idx);
                             dispatch_image_hash_chain(frame)?
                         };
                         if trapped {
-                            // Pinned/empty dst or wrong src kind → guest trap.
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                            // Pinned/empty dst or wrong src kind -> guest trap.
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         }
                     }
                     OP_HOST_YIELD => {
                         let outcome = {
-                            let frame = frame_at_mut(&mut stack, top_idx);
-                            dispatch_host_yield(frame, &mut meters, &mut gas, &current_active)?
+                            let frame = frame_at_mut(&mut self.stack, top_idx);
+                            dispatch_host_yield(
+                                frame,
+                                &mut self.gas_state.meters,
+                                &mut self.gas_state.live_gas,
+                                &self.gas_state.current_active,
+                            )?
                         };
                         match outcome {
                             // A kernel-root pure-cap syscall handled inline; the
                             // guest resumes at the next instruction (the
                             // "conceptually push a kernel frame but don't" path).
                             YieldOutcome::Inline => {}
-                            // Bad/empty sender slot or pinned dst → guest trap.
+                            // Bad/empty sender slot or pinned dst -> guest trap.
                             YieldOutcome::Trap => {
-                                break LoopOutcome {
-                                    exit_reason: EXIT_TRAP,
-                                    exit_arg: 0,
-                                    return_value: info.regs[7],
-                                    gas_remaining: root_remaining(
-                                        &root_active,
-                                        &current_active,
-                                        gas,
-                                        host_budget,
-                                        &meters,
-                                    ),
-                                    scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                                };
+                                return Ok(TaskPoll::Done(self.outcome(
+                                    EXIT_TRAP,
+                                    0,
+                                    info.regs[7],
+                                    [0u8; SCRATCHPAD_HEAD_LEN],
+                                )));
                             }
                             // Route `key` to an owner YieldReceiver (the payload
                             // is a copy of the emitted YieldSender). No catcher
-                            // → the emitter faults ("unhandled yield_key").
+                            // -> the emitter faults ("unhandled yield_key").
                             YieldOutcome::Route { key, sender_slot } => {
                                 let payload =
-                                    read_instance_cap(frame_at(&stack, top_idx), &sender_slot);
-                                if !route_yield(&mut stack, top_idx, &key, payload) {
-                                    break LoopOutcome {
-                                        exit_reason: EXIT_TRAP,
-                                        exit_arg: ERR_YIELD_UNHANDLED,
-                                        return_value: info.regs[7],
-                                        gas_remaining: root_remaining(
-                                            &root_active,
-                                            &current_active,
-                                            gas,
-                                            host_budget,
-                                            &meters,
-                                        ),
-                                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                                    };
+                                    read_instance_cap(frame_at(&self.stack, top_idx), &sender_slot);
+                                if !route_yield(&mut self.stack, top_idx, &key, payload) {
+                                    return Ok(TaskPoll::Done(self.outcome(
+                                        EXIT_TRAP,
+                                        ERR_YIELD_UNHANDLED,
+                                        info.regs[7],
+                                        [0u8; SCRATCHPAD_HEAD_LEN],
+                                    )));
                                 }
                             }
                         }
@@ -986,35 +999,26 @@ pub fn run_top(
                         // Resume the Waiting yielder directly below this handler
                         // activation. The top MUST be a ReferenceEntry (we are
                         // running as a yield handler); an InstanceEntry top has no
-                        // outstanding yield to resume → trap.
-                        if stack[top_idx].target == top_idx {
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                        // outstanding yield to resume -> trap.
+                        if self.stack[top_idx].target == top_idx {
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         }
                         // Reflect the handler's scratchpad slot[0] (its response)
                         // to the yielder, pop the ReferenceEntry, and let the
                         // yielder become the running top (it continues at its
-                        // post-yield PC next iteration). Gas is reconciled at the
-                        // next loop top: the handler's active meter banks and the
-                        // yielder's loads (picking up a kernel:oog topup).
+                        // post-yield PC next poll).
                         let response = {
-                            let handler = frame_at_mut(&mut stack, top_idx);
+                            let handler = frame_at_mut(&mut self.stack, top_idx);
                             frame_cnode_take_key(handler, &[javm_cap::abi::SCRATCHPAD_SLOT])
                         };
-                        stack.pop();
-                        let yielder_idx = stack.len() - 1;
-                        let yielder = frame_at_mut(&mut stack, yielder_idx);
+                        self.stack.pop();
+                        let yielder_idx = self.stack.len() - 1;
+                        let yielder = frame_at_mut(&mut self.stack, yielder_idx);
                         if let Some(cap) = response {
                             frame_cnode_set_key(
                                 yielder,
@@ -1022,123 +1026,69 @@ pub fn run_top(
                                 Some(cap),
                             );
                         }
-                        // Spec §4: a resumed yielder sees φ[8] = Ok (the handler's
-                        // response status) — its host_yield "returns" here.
+                        // Spec section 4: a resumed yielder sees phi[8] = Ok.
                         yielder.instance.regs[8] = STATUS_OK;
                     }
                     OP_DROP_RESUME => {
                         // Give up on the Waiting yielder: discard the WHOLE caught
-                        // subtree (the yielder + any intermediates a descendant
-                        // routed past — same scope as a handler HALT, §10), but
-                        // keep the handler running. Full DROP_RESUME will detach
-                        // the yielder as sigma-resident Paused; this V1 path only
-                        // implements the discard behavior. The top must be a
-                        // handler ReferenceEntry — an InstanceEntry top has no
-                        // outstanding yield → trap.
-                        if stack[top_idx].target == top_idx {
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                        // subtree, but keep the handler running.
+                        if self.stack[top_idx].target == top_idx {
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         }
-                        // Truncate everything above the handler's InstanceEntry
-                        // (the ReferenceEntry + the discarded subtree); the handler
-                        // becomes a plain InstanceEntry again and continues at its
-                        // post-drop pc. (Discarded metered frames were banked at
-                        // route_yield, so the meter table stays consistent — gas is
-                        // STM-exempt: a dropped subtree's spend is NOT refunded.)
-                        // Using `target+1` (not `top_idx-1`) keeps subsequent
-                        // CALL_RESUME/DROP_RESUME sound — there is no longer a stale
-                        // handler with a wedged intermediate below it.
-                        let handler_inst = stack[top_idx].target;
-                        release_pending_origins_for_dropped(&mut stack, handler_inst + 1);
-                        stack.truncate(handler_inst + 1);
+                        let handler_inst = self.stack[top_idx].target;
+                        release_pending_origins_for_dropped(&mut self.stack, handler_inst + 1);
+                        self.stack.truncate(handler_inst + 1);
                     }
                     OP_HOST_CALL => {
                         if host_call_pending {
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         }
-                        // The ecall floor + this CALL's frame_cost were charged
-                        // atomically at the top of the arm (check-before-charge,
-                        // before `dispatch_host_call` moves any instance, so an
-                        // OOG left the parent slot pristine). Charged in full on
-                        // every CALL — compile/PT memoization is for *work*, never
-                        // a gas discount — so gas is independent of the cache.
-                        //
                         // Snapshot the logical owner's catch-set at this CALL:
                         // the keys on the owner edge `owner -> child`. When A is
                         // running via `ref[A]`, the physical caller is the
                         // ReferenceEntry but the logical owner is A itself.
-                        let logical_owner = stack[top_idx].target;
+                        let logical_owner = self.stack[top_idx].target;
                         let catch_result = {
-                            let parent = frame_at(&stack, top_idx);
+                            let parent = frame_at(&self.stack, top_idx);
                             snapshot_catch_set(parent)
                         };
                         let catch_set = match catch_result {
                             Ok(set) => set,
                             Err(EXIT_TRAP) => {
-                                break LoopOutcome {
-                                    exit_reason: EXIT_TRAP,
-                                    exit_arg: 0,
-                                    return_value: info.regs[7],
-                                    gas_remaining: root_remaining(
-                                        &root_active,
-                                        &current_active,
-                                        gas,
-                                        host_budget,
-                                        &meters,
-                                    ),
-                                    scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                                };
+                                return Ok(TaskPoll::Done(self.outcome(
+                                    EXIT_TRAP,
+                                    0,
+                                    info.regs[7],
+                                    [0u8; SCRATCHPAD_HEAD_LEN],
+                                )));
                             }
                             Err(e) => return Err(e),
                         };
                         let child_result = {
-                            let parent = frame_at_mut(&mut stack, top_idx);
+                            let parent = frame_at_mut(&mut self.stack, top_idx);
                             dispatch_host_call(parent, logical_owner)?
                         };
                         let Some(mut child) = child_result else {
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: root_remaining(
-                                    &root_active,
-                                    &current_active,
-                                    gas,
-                                    host_budget,
-                                    &meters,
-                                ),
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
+                            return Ok(TaskPoll::Done(self.outcome(
+                                EXIT_TRAP,
+                                0,
+                                info.regs[7],
+                                [0u8; SCRATCHPAD_HEAD_LEN],
+                            )));
                         };
-                        // Scratchpad: MOVE the caller's slot[0] into the
-                        // callee. `take_key` empties the parent (one owner);
-                        // the callee's image-default slot[0], if any, is
-                        // overwritten by the caller-provided scratchpad.
+                        // Scratchpad: MOVE the caller's slot[0] into the callee.
                         {
-                            let parent = frame_at_mut(&mut stack, top_idx);
+                            let parent = frame_at_mut(&mut self.stack, top_idx);
                             if let Some(cap) =
                                 frame_cnode_take_key(parent, &[javm_cap::abi::SCRATCHPAD_SLOT])
                             {
@@ -1149,81 +1099,157 @@ pub fn run_top(
                                 );
                             }
                         }
-                        // No runtime eviction: every live frame keeps its page
-                        // table resident. The call stack is depth-bounded by
-                        // `MAX_DEPTH` (interim) / the cnode nesting limit
-                        // (target), so the resident page-table set is bounded
-                        // structurally rather than by an LRU cap.
-                        let child_idx = stack.len();
-                        stack.push(StackEntry::instance(child, child_idx, next_iid));
-                        next_iid += 1;
+                        let child_idx = self.stack.len();
+                        self.stack
+                            .push(StackEntry::instance(child, child_idx, self.next_iid));
+                        self.next_iid += 1;
                         // Stamp owner-edge routing and funding. The child owns
                         // its declared gas scope if it has one; otherwise it
                         // loans the caller/catcher's current gas scope.
-                        stack[child_idx].owner = Some(logical_owner);
-                        stack[child_idx].owner_catch_set = catch_set;
-                        let inherited_gas = stack[top_idx].gas.clone();
-                        stack[child_idx].gas = resolve_frame_gas(frame_at(&stack, child_idx))?
-                            .unwrap_or(inherited_gas);
+                        self.stack[child_idx].owner = Some(logical_owner);
+                        self.stack[child_idx].owner_catch_set = catch_set;
+                        let inherited_gas = self.stack[top_idx].gas.clone();
+                        self.stack[child_idx].gas =
+                            resolve_frame_gas(frame_at(&self.stack, child_idx))?
+                                .unwrap_or(inherited_gas);
                     }
-                    // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
-                    // arbitrary `ecalli imm`, …) is not in-kernel-
-                    // handled in V1: bubble it up to the host with
-                    // the JIT's reported exit reason/arg verbatim.
-                    // Mirrors pre-call-loop behaviour so unit tests
-                    // that fire `ecalli imm` and check `(reason=4,
-                    // arg=imm)` keep passing.
+                    // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD, arbitrary
+                    // `ecalli imm`, ...) is not in-kernel-handled in V1: bubble it
+                    // up to the host with the JIT's reported exit reason/arg.
                     _ => {
-                        break LoopOutcome {
-                            exit_reason: info.exit_reason,
-                            exit_arg: info.exit_arg,
-                            return_value: info.regs[7],
-                            gas_remaining: root_remaining(
-                                &root_active,
-                                &current_active,
-                                gas,
-                                host_budget,
-                                &meters,
-                            ),
-                            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                        };
+                        return Ok(TaskPoll::Done(self.outcome(
+                            info.exit_reason,
+                            info.exit_arg,
+                            info.regs[7],
+                            [0u8; SCRATCHPAD_HEAD_LEN],
+                        )));
                     }
                 }
             }
             _ => {
-                // PageFault (3), Panic (1), OOG (2), Trap (7), …
-                // An in-block OOG (the JIT's per-block gas gate) on a metered
-                // frame re-attempts the SAME block after a kernel:oog topup —
-                // `info.pc` is that block's bb_start (the gate is a pre-charge:
-                // the block was not entered and no gas was charged). Unmetered /
-                // uncaught OOG, and every other exit (fault/panic/trap), bubble
-                // verbatim.
-                if info.exit_reason == EXIT_OOG && try_oog_yield(&mut stack, top_idx, info.pc) {
-                    continue;
+                // PageFault (3), Panic (1), OOG (2), Trap (7), ...
+                // An in-block OOG on a metered frame re-attempts the SAME block
+                // after a kernel:oog topup. Unmetered / uncaught OOG, and every
+                // other exit, bubble verbatim.
+                if info.exit_reason == EXIT_OOG && try_oog_yield(&mut self.stack, top_idx, info.pc)
+                {
+                    return Ok(TaskPoll::Pending);
                 }
-                break LoopOutcome {
-                    exit_reason: info.exit_reason,
-                    exit_arg: info.exit_arg,
-                    return_value: info.regs[7],
-                    gas_remaining: root_remaining(
-                        &root_active,
-                        &current_active,
-                        gas,
-                        host_budget,
-                        &meters,
-                    ),
-                    scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                };
+                return Ok(TaskPoll::Done(self.outcome(
+                    info.exit_reason,
+                    info.exit_arg,
+                    info.regs[7],
+                    [0u8; SCRATCHPAD_HEAD_LEN],
+                )));
             }
         }
-    };
 
-    // Drop the stack BEFORE we hand the outcome back. Each frame owns its
-    // `mem` DataCap and any inline `Owned` cnode caps outright, so the drop
-    // frees them directly — there are no `cache.instances` entries to reclaim
-    // (the recompiler no longer mints `Ref`).
-    drop(stack);
-    Ok(outcome)
+        Ok(TaskPoll::Pending)
+    }
+}
+
+/// Cooperative phase-1 scheduler: many task stacks can be resident, but exactly
+/// one is active on the single vCPU at any instant. Switching only happens at
+/// existing ring-3 exits. Later phases should keep the singleton host Nub, add a
+/// production batch/async submission API, and then split the ring3/JIT globals
+/// into per-vCPU execution lanes before true parallel scheduling.
+struct KernelScheduler {
+    next_task_id: TaskId,
+    tasks: BTreeMap<TaskId, KernelTask>,
+    completed: BTreeMap<TaskId, LoopOutcome>,
+    ready: VecDeque<TaskId>,
+}
+
+impl KernelScheduler {
+    fn new() -> Self {
+        Self {
+            next_task_id: 0,
+            tasks: BTreeMap::new(),
+            completed: BTreeMap::new(),
+            ready: VecDeque::new(),
+        }
+    }
+
+    fn submit_invoke(
+        &mut self,
+        instance_hash: &CapHash,
+        endpoint_idx: u32,
+        args: [u64; 4],
+        initial_gas: i64,
+    ) -> Result<TaskId, u32> {
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        let task = KernelTask::new(id, instance_hash, endpoint_idx, args, initial_gas)?;
+        self.tasks.insert(id, task);
+        self.ready.push_back(id);
+        Ok(id)
+    }
+
+    fn run_until_result(&mut self, target: TaskId) -> Result<LoopOutcome, u32> {
+        if let Some(outcome) = self.completed.remove(&target) {
+            return Ok(outcome);
+        }
+        while let Some(id) = self.ready.pop_front() {
+            let mut task = self.tasks.remove(&id).ok_or(ERR_PENDING_ORIGIN_INVARIANT)?;
+            debug_assert_eq!(task.id, id);
+            match task.poll_once()? {
+                TaskPoll::Pending => {
+                    self.tasks.insert(id, task);
+                    self.ready.push_back(id);
+                }
+                TaskPoll::Done(outcome) if id == target => return Ok(outcome),
+                TaskPoll::Done(outcome) => {
+                    self.completed.insert(id, outcome);
+                }
+            }
+            if let Some(outcome) = self.completed.remove(&target) {
+                return Ok(outcome);
+            }
+        }
+        Err(ERR_PENDING_ORIGIN_INVARIANT)
+    }
+}
+
+/// Drive the CALL/HALT loop until either the top frame HALTs (clean
+/// exit) or the JIT signals an unrecoverable condition (page fault,
+/// gas exhaustion, ...). See module docs for the loop body.
+///
+/// Cap lookups go through the heap-resident [`CACHE`] static. Each
+/// lookup takes the cache's spinlock; we keep lock scopes tight
+/// (clone out the fields we need, drop the guard) so other guest-mode
+/// lookups can proceed concurrently.
+pub fn run_top(
+    instance_hash: &CapHash,
+    endpoint_idx: u32,
+    args: [u64; 4],
+    initial_gas: i64,
+) -> Result<LoopOutcome, u32> {
+    let mut scheduler = KernelScheduler::new();
+    let task = scheduler.submit_invoke(instance_hash, endpoint_idx, args, initial_gas)?;
+    scheduler.run_until_result(task)
+}
+
+#[doc(hidden)]
+pub fn run_two_for_test(
+    first: &nub_arch_x86_abi::InvokePacket,
+    second: &nub_arch_x86_abi::InvokePacket,
+) -> Result<(LoopOutcome, LoopOutcome), u32> {
+    let mut scheduler = KernelScheduler::new();
+    let first_id = scheduler.submit_invoke(
+        &first.instance_hash,
+        first.endpoint_idx,
+        first.args,
+        first.initial_gas as i64,
+    )?;
+    let second_id = scheduler.submit_invoke(
+        &second.instance_hash,
+        second.endpoint_idx,
+        second.args,
+        second.initial_gas as i64,
+    )?;
+    let first_outcome = scheduler.run_until_result(first_id)?;
+    let second_outcome = scheduler.run_until_result(second_id)?;
+    Ok((first_outcome, second_outcome))
 }
 
 /// Run exactly one ring-3 cycle for `frame`. The first call on a
