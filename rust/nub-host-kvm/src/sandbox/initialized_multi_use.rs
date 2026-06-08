@@ -259,6 +259,9 @@ impl MultiUseSandbox {
     ///
     /// Workers are started lazily and remain hot for subsequent invoke calls.
     /// The legacy raw RPC channel remains the serialized control plane.
+    /// User job waits deliberately have no host-side timeout; without a
+    /// cancellation API, the lane must stay reserved until the guest reports
+    /// completion or the worker exits.
     pub fn invoke_cached_parallel(
         &self,
         job_id: u64,
@@ -272,7 +275,6 @@ impl MultiUseSandbox {
             thread::yield_now();
         };
         let lane_idx = lane.index();
-        let deadline = Instant::now() + Duration::from_secs(30);
 
         {
             let mem_mgr = self
@@ -330,19 +332,6 @@ impl MultiUseSandbox {
                     lane_idx,
                     job_id,
                     detail
-                ));
-            }
-            if Instant::now() >= deadline {
-                let status = self
-                    .mem_mgr
-                    .lock()
-                    .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?
-                    .read_parallel_invoke_status(lane_idx)?;
-                return Err(crate::new_error!(
-                    "parallel invoke lane {} timed out waiting for job {} (status={})",
-                    lane_idx,
-                    job_id,
-                    status
                 ));
             }
             thread::yield_now();
