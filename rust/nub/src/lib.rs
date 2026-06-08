@@ -272,6 +272,14 @@ enum Backend {
     Hyperlight(Arc<HyperlightDriver>),
 }
 
+enum InvokeBackendTarget {
+    Local {
+        inst: Box<javm_cap::InstanceCap>,
+        img: Box<javm_cap::ImageCap>,
+    },
+    Hyperlight(Arc<HyperlightDriver>),
+}
+
 /// Host-side RPC stub for the Hyperlight backend. The real kernel
 /// lives guest-side; this wrapper just ships invocations into the
 /// sandbox.
@@ -682,7 +690,7 @@ impl Nub {
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        let hyperlight = {
+        let target = {
             let mut backend = self
                 .inner
                 .backend
@@ -714,16 +722,26 @@ impl Nub {
                             ));
                         }
                     };
-                    return Ok(nub_arch_local::run_instance(
-                        &inst,
-                        &img,
-                        endpoint_idx,
-                        args,
-                        initial_gas,
-                    ));
+                    InvokeBackendTarget::Local {
+                        inst: Box::new(inst),
+                        img: Box::new(img),
+                    }
                 }
-                Backend::Hyperlight(h) => h.clone(),
+                Backend::Hyperlight(h) => InvokeBackendTarget::Hyperlight(h.clone()),
             }
+        };
+
+        let hyperlight = match target {
+            InvokeBackendTarget::Local { inst, img } => {
+                return Ok(nub_arch_local::run_instance(
+                    &inst,
+                    &img,
+                    endpoint_idx,
+                    args,
+                    initial_gas,
+                ));
+            }
+            InvokeBackendTarget::Hyperlight(h) => h,
         };
 
         // No host-side pin/unpin — the cap is owned by the guest's

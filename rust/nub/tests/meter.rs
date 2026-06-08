@@ -7,7 +7,7 @@ use javm_cap::{
     CNodeCap, Cap, CapHashOrRef, DataCap, KernelImage, Key, NUM_REGS, kernel_image_hash,
     key_to_regs,
 };
-use nub::Nub;
+use nub::{InvokeRequest, Nub};
 use std::collections::BTreeMap;
 
 const GAS_SLOT: u8 = 5;
@@ -17,6 +17,32 @@ const GAS_SLOT: u8 = 5;
 fn ecalli_42_image(with_gas_slot: bool) -> Image {
     let mut img = Image::empty();
     img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
+    let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
+    endpoints.insert(
+        Key::from(0u8),
+        EndpointDef {
+            entry_pc: 0,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
+        },
+    );
+    img.endpoints = endpoints;
+    if with_gas_slot {
+        img.gas_slots = vec![Key::from(GAS_SLOT)];
+    }
+    img
+}
+
+fn addi(rd: u8, rs1: u8, imm: i32) -> u32 {
+    (((imm as u32) & 0x0fff) << 20) | ((rs1 as u32) << 15) | ((rd as u32) << 7) | 0x13
+}
+
+fn looping_image(with_gas_slot: bool) -> Image {
+    let mut img = Image::empty();
+    img.code.extend_from_slice(&addi(10, 10, 1).to_le_bytes());
+    img.code.extend_from_slice(&addi(11, 11, 1).to_le_bytes());
+    img.code.extend_from_slice(&0xFF9F_F06Fu32.to_le_bytes()); // jal x0, -8
     let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     endpoints.insert(
         Key::from(0u8),
@@ -54,7 +80,7 @@ fn publish_plain(nub: &mut Nub) -> nub::AbiCapHash {
 }
 
 /// Publish an instance whose `gas_slots[0]` holds a `Gas{meter_key}` handle.
-fn publish_metered(nub: &mut Nub, meter_key: &Key) -> nub::AbiCapHash {
+fn publish_metered_image(nub: &Nub, img: Image, meter_key: &Key) -> nub::AbiCapHash {
     // Gas unit handle: a Cap::Instance with the well-known Gas image-hash chain
     // and the meter_key packed into regs[0..1].
     let (packed, len) = key_to_regs(meter_key);
@@ -78,7 +104,6 @@ fn publish_metered(nub: &mut Nub, meter_key: &Key) -> nub::AbiCapHash {
         .unwrap();
     let cnode_h = nub.put_cap(&Cap::CNode(cnode)).unwrap();
 
-    let img = ecalli_42_image(true);
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
         .unwrap();
@@ -92,6 +117,10 @@ fn publish_metered(nub: &mut Nub, meter_key: &Key) -> nub::AbiCapHash {
         0,
     );
     nub.put_cap(&inst).unwrap()
+}
+
+fn publish_metered(nub: &Nub, meter_key: &Key) -> nub::AbiCapHash {
+    publish_metered_image(nub, ecalli_42_image(true), meter_key)
 }
 
 fn meter_drives_gas(nub: &mut Nub) {
@@ -143,4 +172,42 @@ fn no_gas_slot_uses_call_budget() {
     let plain = publish_plain(&mut nub);
     let r = nub.invoke_cached(plain, 0, [0; 4], 1_000_000).unwrap();
     assert!(r.gas_remaining < 1_000_000 && r.gas_remaining > 0);
+}
+
+#[test]
+fn concurrent_invokes_sharing_meter_are_rejected() {
+    let nub = Nub::new_local();
+    let meter_key = Key::from(&[0xAA, 0xBB, 0xCC][..]);
+    nub.set_meter(meter_key.clone(), 20_000_000);
+    let metered = publish_metered_image(&nub, looping_image(true), &meter_key);
+
+    let jobs: Vec<_> = (0..16)
+        .map(|_| {
+            nub.submit_invoke(InvokeRequest {
+                instance_hash: metered,
+                endpoint_idx: 0,
+                args: [0; 4],
+                initial_gas: 1,
+            })
+            .expect("submit metered invoke")
+        })
+        .collect();
+
+    let mut saw_in_flight_rejection = false;
+    let mut completed = 0usize;
+    for job in jobs {
+        match job.wait() {
+            Ok(_) => completed += 1,
+            Err(e) if e.to_string().contains("gas meter is already in flight") => {
+                saw_in_flight_rejection = true;
+            }
+            Err(e) => panic!("unexpected invoke error: {e:#}"),
+        }
+    }
+
+    assert!(completed >= 1, "at least one invoke should own the meter");
+    assert!(
+        saw_in_flight_rejection,
+        "a concurrent invoke sharing the same host meter must be rejected"
+    );
 }
