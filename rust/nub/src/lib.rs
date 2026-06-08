@@ -43,6 +43,8 @@ pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult, SCRATCHPAD_H
 use nub_arch_x86_abi::{FN_ID_NUB_EVICT_JIT_ALL, InvokePacket};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
+pub const MAX_HYPERLIGHT_VCPUS: usize = nub_arch_x86_abi::MAX_EXECUTION_LANES;
+
 /// Snapshot of the guest's talc allocation state. Returned by
 /// [`Nub::heap_stats`].
 #[cfg(feature = "heap-diag")]
@@ -162,6 +164,20 @@ impl NubOptions {
     pub fn with_vcpu_count(mut self, vcpu_count: usize) -> Self {
         self.vcpu_count = vcpu_count.max(1);
         self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.vcpu_count == 0 {
+            return Err(anyhow::anyhow!("NubOptions.vcpu_count must be at least 1"));
+        }
+        if self.vcpu_count > MAX_HYPERLIGHT_VCPUS {
+            return Err(anyhow::anyhow!(
+                "NubOptions.vcpu_count={} exceeds guest lane capacity {}",
+                self.vcpu_count,
+                MAX_HYPERLIGHT_VCPUS
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -463,6 +479,7 @@ impl Nub {
     }
 
     pub(crate) fn hyperlight_with_blob(blob: HyperlightBlob, options: NubOptions) -> Result<Nub> {
+        options.validate()?;
         let mut guard = HYPERLIGHT_NUB
             .lock()
             .map_err(|_| anyhow::anyhow!("Hyperlight Nub singleton mutex poisoned"))?;

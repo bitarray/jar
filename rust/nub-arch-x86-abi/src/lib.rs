@@ -15,6 +15,11 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
+/// Maximum fixed execution lanes the guest runtime can address. The production
+/// default vCPU pool is capped lower, but host configuration must not exceed
+/// this ABI-visible lane table size.
+pub const MAX_EXECUTION_LANES: usize = 64;
+
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
 /// response is 32 bytes packing four LE u64s (allocated_bytes,
 /// allocation_count, fragment_count, available_bytes).

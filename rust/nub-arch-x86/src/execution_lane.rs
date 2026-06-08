@@ -1,7 +1,4 @@
-/// Maximum fixed execution lanes the guest runtime can address. The production
-/// default vCPU pool is capped at 8; this leaves room for explicit overrides
-/// while keeping lane-local hot state static and allocation-free.
-pub const MAX_EXECUTION_LANES: usize = 64;
+pub use nub_arch_x86_abi::MAX_EXECUTION_LANES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExecutionLane {

@@ -2,7 +2,7 @@
 
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, DataCap, Key, NUM_REGS};
-use nub::{InvokeRequest, Nub};
+use nub::{InvokeRequest, MAX_HYPERLIGHT_VCPUS, Nub, NubOptions};
 use std::collections::BTreeMap;
 use std::thread;
 
@@ -100,4 +100,18 @@ fn cloned_local_nub_handles_can_idempotently_publish_from_many_threads() {
     for handle in handles {
         handle.join().expect("put thread");
     }
+}
+
+#[test]
+fn hyperlight_options_reject_too_many_vcpus() {
+    let result = Nub::hyperlight_tests_with_options(NubOptions {
+        vcpu_count: MAX_HYPERLIGHT_VCPUS + 1,
+    });
+    let Err(err) = result else {
+        panic!("oversized vCPU pool must fail before sandbox boot");
+    };
+    assert!(
+        err.to_string().contains("exceeds guest lane capacity"),
+        "unexpected error: {err:#}"
+    );
 }
