@@ -2,7 +2,7 @@
 //!
 //! ## CACHE
 //!
-//! The cap store is a `CacheDirectory<FixedState>` that lives entirely
+//! The cap store is a `CacheDirectory<FixedState, CachedCap>` that lives entirely
 //! in the guest's talc heap. The host populates blobs via the
 //! [`FN_ID_NUB_PUT_CAP`](nub_arch_x86_abi::FN_ID_NUB_PUT_CAP) RPC:
 //! ship a rkyv-archived `Cap` payload, the guest validates via
@@ -36,6 +36,8 @@ use foldhash::fast::FixedState;
 use javm_cap::cache::CacheDirectory;
 use nub_arch_x86_abi::BootInfo;
 
+use crate::cached_cap::CachedCap;
+
 /// Per-cache hasher seed. Pinned at a constant so the host's
 /// direct-dereference reader (via `BootInfo.directory_va`) agrees on
 /// bucket assignments. Any value works; using the magic for symmetry
@@ -50,7 +52,7 @@ const DIRECTORY_HASHER_SEED: u64 = 0x4A41_525F_4449_5230; // "JAR_DIR0"
 ///
 /// `CacheDirectory::new_const` is `const fn`, so the static initialiser
 /// runs at link time — the cache is ready before `hyperlight_main`.
-pub static CACHE: CacheDirectory<FixedState> = CacheDirectory::new_const(
+pub static CACHE: CacheDirectory<FixedState, CachedCap> = CacheDirectory::new_const(
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
 );
@@ -69,10 +71,9 @@ pub static mut BOOT_INFO: BootInfo = BootInfo {
     magic: BootInfo::MAGIC,
     directory_va: 0,
     // Sentinel: hash of the published directory's type signature.
-    // Bumped to 0x0003 when CapRef became a handle and the
-    // instances tier shape changed to `HashMap<u64, (CapRef,
-    // Arc<Cap>)>`.
-    directory_type_id: 0x0003,
+    // Bumped to 0x0004 when the guest resident directory payload changed from
+    // `Arc<Cap>` to `Arc<CachedCap>`.
+    directory_type_id: 0x0004,
     // Patched at boot from `kernel_base_va() - KERNEL_OFFSET`.
     guest_va_base: 0,
     _reserved: [0u64; 12],
@@ -96,7 +97,7 @@ pub fn init_directory_va() {
     {
         return;
     }
-    let va = &CACHE as *const CacheDirectory<FixedState> as u64;
+    let va = &CACHE as *const CacheDirectory<FixedState, CachedCap> as u64;
     let kernel_base = &_kernel_start as *const u8 as u64;
     let guest_va_base = kernel_base - nub_host_common::layout::KERNEL_OFFSET;
     // SAFETY: `BOOT_INFO` is `static mut` but we're the only writer

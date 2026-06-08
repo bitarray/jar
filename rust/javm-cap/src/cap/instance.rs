@@ -6,16 +6,16 @@
 //! frame mutates it), the read-write memory image, register file, PC,
 //! gas counter.
 
+use alloc::boxed::Box;
+
 use crate::cache::CapHashOrRef;
 
-use super::CapHash;
 use super::NUM_REGS;
 use super::data::{DataCap, PAGE_SIZE};
+use super::{Cap, CapHash};
 
-#[derive(
-    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
-pub struct InstanceCap {
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct InstanceCap<O = Box<Cap>> {
     /// Cumulative chain hash identifying the Instance's type.
     pub image_hash_chain: CapHash,
     /// Hash of the Image cap currently bound. Always content-
@@ -24,7 +24,7 @@ pub struct InstanceCap {
     /// Reference to the root cnode. `Hash` when clean / not yet
     /// promoted for mutation; an inline `Owned` cnode cap while the
     /// running kernel frame is mutating it.
-    pub root_cnode: CapHashOrRef,
+    pub root_cnode: CapHashOrRef<O>,
     /// The Instance's read-write memory image: a dense `DataCap` covering the
     /// data extent `[DATA_BASE, DATA_BASE + mem.size)`. Holds the initial
     /// content at boot and the settled (folded) content after each HALT — the
@@ -45,7 +45,27 @@ pub struct InstanceCap {
     pub gas_remaining: u64,
 }
 
-impl InstanceCap {
+impl<O> ssz::HashTreeRoot for InstanceCap<O>
+where
+    CapHashOrRef<O>: ssz::HashTreeRoot,
+{
+    fn hash_tree_root<D: ssz::digest::Digest<OutputSize = ssz::digest::typenum::U32>>(
+        &self,
+    ) -> [u8; 32] {
+        let roots: [[u8; 32]; 7] = [
+            self.image_hash_chain.hash_tree_root::<D>(),
+            self.image_hash.hash_tree_root::<D>(),
+            self.root_cnode.hash_tree_root::<D>(),
+            self.mem.hash_tree_root::<D>(),
+            self.regs.hash_tree_root::<D>(),
+            self.pc.hash_tree_root::<D>(),
+            self.gas_remaining.hash_tree_root::<D>(),
+        ];
+        ssz::merkleize::<D>(&roots, roots.len())
+    }
+}
+
+impl<O> InstanceCap<O> {
     /// Absolute exclusive top of the data region (`DATA_BASE + mem.size`). The
     /// data extent `[DATA_BASE, mem_size)` is what the engines map; this matches
     /// the legacy `mem_size` field's semantics for call sites.

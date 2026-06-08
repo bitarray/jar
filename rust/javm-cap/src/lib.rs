@@ -33,8 +33,9 @@ pub mod image;
 pub mod kernel_image;
 pub mod layout;
 pub mod slot;
+pub mod yield_cap;
 
-pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
+pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef, ResidentCap};
 pub use cap::cnode::CNodeCap;
 pub use cap::data::{DataCap, GROUP_SIZE, PAGE_SIZE, PageResolution, PageSlab};
 pub use cap::image::{
@@ -42,7 +43,7 @@ pub use cap::image::{
 };
 pub use cap::instance::InstanceCap;
 pub use cap::page::{PageBytes, PageRef, PageSlot};
-pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
+pub use cap::{Cap, CapHash, MAX_SOURCE_DEPTH, NUM_REGS};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
@@ -50,7 +51,11 @@ pub use image::{
 };
 pub use kernel_image::{ALL_KERNEL_IMAGES, KernelImage, kernel_image_hash, recognize_kernel_image};
 pub use slot::{Key, MAX_KEY_LEN, SlotPath, key_from_regs, key_to_regs};
-// `CNodeCap::slots` (`CNodeSlots = RadixMap<CapHashOrRef, _>`) exposes
-// `MissingOr` through `iter()`; re-export it so cnode-slot walkers (e.g. the
-// recompiler's cnode-inherit loop) don't need a direct `ssz` dependency.
+pub use yield_cap::{
+    gas_handle, gas_meter_key, is_kernel_yield_key, merge_yield_receivers, quota_handle, quota_key,
+    yield_receiver, yield_receiver_keys, yield_sender, yield_sender_key,
+};
+// `CNodeCap::slots` stores `MissingOr<CapHashOrRef>` values; re-export it so
+// cnode-slot walkers (e.g. the recompiler's cnode-inherit loop) don't need a
+// direct `ssz` dependency.
 pub use ssz::MissingOr;

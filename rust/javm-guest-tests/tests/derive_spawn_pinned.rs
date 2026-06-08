@@ -49,7 +49,7 @@ fn child_image() -> Image {
 fn parent_image(child_hash: CapHash) -> Image {
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
-        0u8,
+        Key::from(0u8),
         EndpointDef {
             // Code-region byte offset (the runtime adds CODE_BASE); the
             // single instruction sits at offset 0.
@@ -79,7 +79,7 @@ fn parent_image(child_hash: CapHash) -> Image {
         memory_mappings: Vec::new(),
         pinned_slots,
         initial_slots: BTreeMap::new(),
-        yield_marker_slot: None,
+        yield_receiver_slot: None,
         gas_slots: Vec::new(),
         quota_slots: Vec::new(),
     }

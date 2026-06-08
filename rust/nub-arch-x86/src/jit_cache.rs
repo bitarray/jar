@@ -29,15 +29,15 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
 use javm_cap::CapHash;
 
+use crate::cached_cap::{CachedCap, CapCache};
 use crate::page_alloc::PageBuf;
 use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
 
@@ -101,22 +101,6 @@ pub struct CompiledImage {
     pub template_pdpt_pa: u64,
 }
 
-/// Process-wide compile cache.
-///
-/// Hyperlight serialises host calls, so the guest is single-threaded
-/// and a plain `UnsafeCell` is sound. We wrap it in a newtype so the
-/// `unsafe` is local and the public API can stay safe.
-struct CompileCache {
-    inner: UnsafeCell<BTreeMap<CapHash, CompiledImage>>,
-}
-
-/// SAFETY: single-threaded guest (Hyperlight serialisation).
-unsafe impl Sync for CompileCache {}
-
-static CACHE: CompileCache = CompileCache {
-    inner: UnsafeCell::new(BTreeMap::new()),
-};
-
 static NEXT_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// Round a byte count up to the next [`PAGE_SIZE`] boundary, with a
@@ -130,19 +114,22 @@ fn page_round_up_min1(n: usize) -> usize {
 ///
 /// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
 /// and template PD/PT pages, which is fine between invocations (no
-/// in-flight call references them). The next `get_or_compile` will
+/// in-flight call references them). The next `with_compiled_image` miss will
 /// pay full recompile cost. Safe under Hyperlight serialisation; not
 /// meant for production paths.
 pub fn evict_all() {
-    // SAFETY: single-threaded guest (Hyperlight serialisation), no
-    // concurrent call in progress when this RPC fires.
-    let map = unsafe { &mut *CACHE.inner.get() };
-    map.clear();
+    for (_, cap) in crate::state_cache::CACHE.iter_blobs() {
+        let mut cache = cap.cache.lock();
+        if matches!(&*cache, CapCache::Image(_)) {
+            *cache = CapCache::None;
+        }
+    }
 }
 
-/// Look up the compile cache by `image_hash`. On miss, compile the
-/// Image and materialise the per-Image arena. Returns a `'static`
-/// borrow into the cache entry.
+/// Look up the compile cache attached to `image_cap`. On miss, compile the
+/// Image and materialise the per-Image arena, then run `f` with a borrow of the
+/// boxed cached artifact. The borrow must not escape the closure; callers copy
+/// the stable pointers/metadata they need into their frame runtime.
 ///
 /// `arena_base_va` is the ring-3 VA where the arena will be mapped
 /// (used to compute the per-Image `JIT_VA` so codegen embeds correct
@@ -151,10 +138,12 @@ pub fn evict_all() {
 ///
 /// # Safety
 ///
-/// Hyperlight serialises host calls; the returned reference is valid
-/// until eviction (V1 never evicts), effectively `'static`.
+/// Hyperlight serialises host calls. The compiled artifact is boxed inside the
+/// resident `CachedCap`, so raw pointers into it remain stable as long as that
+/// cap cache is not evicted while frames are live.
 #[allow(clippy::too_many_arguments)]
-pub fn get_or_compile(
+pub fn with_compiled_image<R>(
+    image_cap: &CachedCap,
     image_hash: &CapHash,
     code: &[u8],
     code_base: u32,
@@ -165,142 +154,169 @@ pub fn get_or_compile(
     stack_pd_pa: u64,
     mem_cycles: u8,
     helpers: HelperFns,
-) -> &'static CompiledImage {
-    // SAFETY: single-threaded guest.
-    let map = unsafe { &mut *CACHE.inner.get() };
-    if !map.contains_key(image_hash) {
-        // Region sizing. Layout: DISPATCH | JIT | TRAMP. The dispatch
-        // table is dense — one i32 native offset per code byte — and
-        // doubles as the jalr-target validator (no separate BB set).
-        let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
-
-        let dispatch_offset = 0usize;
-        let jit_offset = dispatch_offset + dispatch_size;
-        let jit_va = arena_base_va + jit_offset as u64;
-
-        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
-        let CompileResult {
-            native_code,
-            dispatch_entries,
-            trap_table,
-            exit_label_offset,
-            panic_offset,
-        } = compiler.compile(code);
-
-        let jit_size = page_round_up_min1(native_code.len());
-        let tramp_offset = jit_offset + jit_size;
-        let tramp_size = PAGE_SIZE;
-        let total = tramp_offset + tramp_size;
-        let global_arena_token = NEXT_GLOBAL_ARENA_TOKEN.fetch_add(1, Ordering::Relaxed);
-
-        let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
-        let buf = arena.as_mut_slice();
-
-        // DISPATCH region — dense fill. First set *every* code-byte slot
-        // to the panic-stub offset, so a jalr to any non-block-start
-        // offset lands on the panic stub; then overwrite the block-start
-        // offsets with their real native targets. This folds the
-        // block-start validation into the dispatch lookup.
-        //
-        // SECURITY-CRITICAL: the panic-fill must cover all `code.len()`
-        // slots — a slot left zero (the arena is page-zeroed) would route
-        // a bad jalr target to native offset 0 instead of faulting.
-        //
-        // The panic-fill is the per-recompile (cold-path) cost of the
-        // dense table, so do it at memset speed via a u32 view rather
-        // than a per-slot byte copy. `dispatch_offset` is 0 in the
-        // page-aligned arena, so the region is 4-aligned and holds
-        // exactly `code.len()` i32 slots. The host is little-endian
-        // (x86-64), so a native u32 store matches the LE bytes the JIT
-        // reads back as i32.
-        let dispatch_slots = code.len();
-        debug_assert_eq!(dispatch_offset, 0);
-        // SAFETY: 4-aligned (page-aligned arena base), in-bounds
-        // (dispatch_size ≥ dispatch_slots * 4), no aliasing (exclusive
-        // `buf`).
-        let dispatch_u32: &mut [u32] = unsafe {
-            core::slice::from_raw_parts_mut(
-                buf.as_mut_ptr().add(dispatch_offset) as *mut u32,
-                dispatch_slots,
-            )
-        };
-        dispatch_u32.fill(panic_offset);
-        for &(pvm_pc, off) in &dispatch_entries {
-            dispatch_u32[pvm_pc as usize] = off as u32;
-        }
-
-        // JIT region.
-        buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
-
-        // TRAMP region (same 26-byte sequence as PVM).
-        let tramp_start = tramp_offset;
-        buf[tramp_start] = 0x48;
-        buf[tramp_start + 1] = 0xBF;
-        buf[tramp_start + 2..tramp_start + 10].copy_from_slice(&ctx_va.to_le_bytes());
-        buf[tramp_start + 10] = 0x48;
-        buf[tramp_start + 11] = 0xB8;
-        buf[tramp_start + 12..tramp_start + 20].copy_from_slice(&jit_va.to_le_bytes());
-        buf[tramp_start + 20] = 0xFF;
-        buf[tramp_start + 21] = 0xD0;
-        buf[tramp_start + 22] = 0xCD;
-        buf[tramp_start + 23] = 0x81;
-        buf[tramp_start + 24] = 0x0F;
-        buf[tramp_start + 25] = 0x0B;
-
-        // Template PD: same RO-then-RX split as the PVM path.
-        let arena_pa = arena.pa();
-        let mut template = TemplatePT::new().expect("TemplatePT alloc");
-        let ro_end = jit_offset;
-        let mut off = 0usize;
-        while off < total {
-            let perm = if off < ro_end {
-                Perm::user_ro_global()
-            } else {
-                Perm::user_rx_global()
-            };
-            template
-                .map_leaf(off as u64, arena_pa + off as u64, perm)
-                .expect("TemplatePT::map_leaf");
-            off += PAGE_SIZE;
-        }
-        let template_pd_pa = template
-            .pd_pa()
-            .expect("template PD must be in kernel half");
-
-        // Build this Image's PML4 slot-1 PDPT once: CTX/STACK borrow the
-        // process-global CTX/STACK PD subtrees, META this Image's arena PD. The
-        // PDPT is the only table owned per Image; per-call PTs install it with a
-        // single borrowed PML4 write.
-        let pml4_slot_template = Pml4SlotTemplate::new(
-            ctx_va,
-            ctx_pd_pa,
+    f: impl FnOnce(&CompiledImage) -> R,
+) -> R {
+    let mut cache = image_cap.cache.lock();
+    if !matches!(&*cache, CapCache::Image(_)) {
+        *cache = CapCache::Image(Box::new(compile_image(
+            image_hash,
+            code,
+            code_base,
             arena_base_va,
-            template_pd_pa,
+            ctx_va,
             stack_va,
+            ctx_pd_pa,
             stack_pd_pa,
-        )
-        .expect("Pml4SlotTemplate alloc");
-        let template_pdpt_pa = pml4_slot_template
-            .pdpt_pa()
-            .expect("template PDPT must be in kernel half");
-
-        map.insert(
-            *image_hash,
-            CompiledImage {
-                arena,
-                dispatch_offset,
-                jit_offset,
-                tramp_offset,
-                arena_size: total,
-                global_arena_token,
-                jit_size,
-                exit_label_offset,
-                trap_table,
-                template,
-                pml4_slot_template,
-                template_pdpt_pa,
-            },
-        );
+            mem_cycles,
+            helpers,
+        )));
     }
-    map.get(image_hash).expect("inserted above")
+    let CapCache::Image(compiled) = &*cache else {
+        unreachable!("image cache variant installed above")
+    };
+    f(compiled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_image(
+    _image_hash: &CapHash,
+    code: &[u8],
+    code_base: u32,
+    arena_base_va: u64,
+    ctx_va: u64,
+    stack_va: u64,
+    ctx_pd_pa: u64,
+    stack_pd_pa: u64,
+    mem_cycles: u8,
+    helpers: HelperFns,
+) -> CompiledImage {
+    // Region sizing. Layout: DISPATCH | JIT | TRAMP. The dispatch
+    // table is dense — one i32 native offset per code byte — and
+    // doubles as the jalr-target validator (no separate BB set).
+    let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
+
+    let dispatch_offset = 0usize;
+    let jit_offset = dispatch_offset + dispatch_size;
+    let jit_va = arena_base_va + jit_offset as u64;
+
+    let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
+    let CompileResult {
+        native_code,
+        dispatch_entries,
+        trap_table,
+        exit_label_offset,
+        panic_offset,
+    } = compiler.compile(code);
+
+    let jit_size = page_round_up_min1(native_code.len());
+    let tramp_offset = jit_offset + jit_size;
+    let tramp_size = PAGE_SIZE;
+    let total = tramp_offset + tramp_size;
+    let global_arena_token = NEXT_GLOBAL_ARENA_TOKEN.fetch_add(1, Ordering::Relaxed);
+
+    let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
+    let buf = arena.as_mut_slice();
+
+    // DISPATCH region — dense fill. First set *every* code-byte slot
+    // to the panic-stub offset, so a jalr to any non-block-start
+    // offset lands on the panic stub; then overwrite the block-start
+    // offsets with their real native targets. This folds the
+    // block-start validation into the dispatch lookup.
+    //
+    // SECURITY-CRITICAL: the panic-fill must cover all `code.len()`
+    // slots — a slot left zero (the arena is page-zeroed) would route
+    // a bad jalr target to native offset 0 instead of faulting.
+    //
+    // The panic-fill is the per-recompile (cold-path) cost of the
+    // dense table, so do it at memset speed via a u32 view rather
+    // than a per-slot byte copy. `dispatch_offset` is 0 in the
+    // page-aligned arena, so the region is 4-aligned and holds
+    // exactly `code.len()` i32 slots. The host is little-endian
+    // (x86-64), so a native u32 store matches the LE bytes the JIT
+    // reads back as i32.
+    let dispatch_slots = code.len();
+    debug_assert_eq!(dispatch_offset, 0);
+    // SAFETY: 4-aligned (page-aligned arena base), in-bounds
+    // (dispatch_size ≥ dispatch_slots * 4), no aliasing (exclusive
+    // `buf`).
+    let dispatch_u32: &mut [u32] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf.as_mut_ptr().add(dispatch_offset) as *mut u32,
+            dispatch_slots,
+        )
+    };
+    dispatch_u32.fill(panic_offset);
+    for &(pvm_pc, off) in &dispatch_entries {
+        dispatch_u32[pvm_pc as usize] = off as u32;
+    }
+
+    // JIT region.
+    buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
+
+    // TRAMP region (same 26-byte sequence as PVM).
+    let tramp_start = tramp_offset;
+    buf[tramp_start] = 0x48;
+    buf[tramp_start + 1] = 0xBF;
+    buf[tramp_start + 2..tramp_start + 10].copy_from_slice(&ctx_va.to_le_bytes());
+    buf[tramp_start + 10] = 0x48;
+    buf[tramp_start + 11] = 0xB8;
+    buf[tramp_start + 12..tramp_start + 20].copy_from_slice(&jit_va.to_le_bytes());
+    buf[tramp_start + 20] = 0xFF;
+    buf[tramp_start + 21] = 0xD0;
+    buf[tramp_start + 22] = 0xCD;
+    buf[tramp_start + 23] = 0x81;
+    buf[tramp_start + 24] = 0x0F;
+    buf[tramp_start + 25] = 0x0B;
+
+    // Template PD: same RO-then-RX split as the PVM path.
+    let arena_pa = arena.pa();
+    let mut template = TemplatePT::new().expect("TemplatePT alloc");
+    let ro_end = jit_offset;
+    let mut off = 0usize;
+    while off < total {
+        let perm = if off < ro_end {
+            Perm::user_ro_global()
+        } else {
+            Perm::user_rx_global()
+        };
+        template
+            .map_leaf(off as u64, arena_pa + off as u64, perm)
+            .expect("TemplatePT::map_leaf");
+        off += PAGE_SIZE;
+    }
+    let template_pd_pa = template
+        .pd_pa()
+        .expect("template PD must be in kernel half");
+
+    // Build this Image's PML4 slot-1 PDPT once: CTX/STACK borrow the
+    // process-global CTX/STACK PD subtrees, META this Image's arena PD. The
+    // PDPT is the only table owned per Image; per-call PTs install it with a
+    // single borrowed PML4 write.
+    let pml4_slot_template = Pml4SlotTemplate::new(
+        ctx_va,
+        ctx_pd_pa,
+        arena_base_va,
+        template_pd_pa,
+        stack_va,
+        stack_pd_pa,
+    )
+    .expect("Pml4SlotTemplate alloc");
+    let template_pdpt_pa = pml4_slot_template
+        .pdpt_pa()
+        .expect("template PDPT must be in kernel half");
+
+    CompiledImage {
+        arena,
+        dispatch_offset,
+        jit_offset,
+        tramp_offset,
+        arena_size: total,
+        global_arena_token,
+        jit_size,
+        exit_label_offset,
+        trap_table,
+        template,
+        pml4_slot_template,
+        template_pdpt_pa,
+    }
 }

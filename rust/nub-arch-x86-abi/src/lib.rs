@@ -29,8 +29,9 @@ pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 /// Payload: rkyv-archived `javm_cap::Cap`. Guest validates and
 /// materialises via [`rkyv::access`] + [`rkyv::deserialize`], computes
 /// the cap's content hash, inserts into the guest-resident `CACHE`
-/// (a `CacheDirectory<FixedState>` holding `HashMap<CapHash, Arc<Cap>>`
-/// in talc heap), and replies with the rkyv-archived [`CapHash`] (raw
+/// (a resident `CacheDirectory<FixedState, CachedCap>` holding
+/// `HashMap<CapHash, Arc<CachedCap>>` in talc heap), and replies with the
+/// rkyv-archived [`CapHash`] (raw
 /// 32 bytes). The host's `MultiUseSandbox::put_cap` propagates a
 /// `CapHasRefError` from `javm_cap` if any slot still holds a Ref.
 pub const FN_ID_NUB_PUT_CAP: u32 = 4;
@@ -59,11 +60,10 @@ pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
 ///
 /// `magic` is checked first as a sanity guard against reading a
 /// stale or wrong-binary boot region. `directory_va` is the address
-/// of the guest's `CacheDirectory<FixedState>`, which the host reader
-/// (`GuestCacheReader`) dereferences and indexes by `CapHash`.
+/// of the guest's resident cap directory.
 /// `directory_type_id` lets future protocol upgrades reject a
 /// mismatched layout (today: opaque sentinel matching
-/// `CacheDirectory<FixedState>` — bumped when any field is added or
+/// `CacheDirectory<FixedState, CachedCap>` — bumped when any field is added or
 /// its type changes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

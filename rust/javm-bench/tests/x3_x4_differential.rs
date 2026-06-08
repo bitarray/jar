@@ -22,6 +22,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_bench::{BuiltCaps, run_interpreter};
+use javm_cap::Key;
 use javm_cap::image::{EndpointDef, Image};
 use std::collections::BTreeMap;
 
@@ -59,7 +60,7 @@ fn image(code: Vec<u8>) -> Image {
     let mut img = Image::empty();
     img.code = code;
     img.endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,

@@ -12,7 +12,7 @@ use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
 use javm_cap::{
-    CNodeCap, Cap, DataCap, GROUP_SIZE, Key, NUM_REGS, PAGE_SIZE, PageSlab, TypeCap, image::Image,
+    CNodeCap, Cap, DataCap, GROUP_SIZE, Key, NUM_REGS, PAGE_SIZE, PageSlab, image::Image,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,13 +27,6 @@ fn round_trip(cap: Cap) {
     let recovered: Cap =
         rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).expect("rkyv deserialize");
     assert_eq!(original, recovered.cap_hash());
-}
-
-#[test]
-fn type_cap_roundtrip_preserves_hash() {
-    round_trip(Cap::Type(TypeCap {
-        image_hash_chain: [0xAB; 32],
-    }));
 }
 
 #[test]
@@ -57,7 +50,7 @@ fn image_cap_roundtrip_preserves_hash() {
     img.code = vec![0u8, 10u8, 42];
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
-        0u8,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 1,
             arg_registers: 0,

@@ -1,20 +1,21 @@
-//! `CNodeCap` — CNode cap: a sparse, hash-keyed key→cap map.
+//! `CNodeCap` — CNode cap: a sparse, Key-addressed key→cap map.
 //!
-//! A CNode is a [`RadixMap`] from `Hasher(k)` to a [`CapHashOrRef`] slot
-//! target, where the logical key `k` is a byte string. The structurally-
-//! compressed binary radix (EIP-7864 "minimal InternalNodes", no 256-value
-//! stem subtree) gives a canonical, shallow commitment to the key→cap set
-//! (depth ≈ `log2(entries)` for well-spread digests), with **no fixed
-//! capacity bound** — a CNode is bounded by storage quota, not a
-//! compile-time slot count, and a single-entry CNode is one leaf at depth 1.
+//! A CNode is a direct map from logical [`Key`] byte strings to
+//! [`CapHashOrRef`] slot targets. There is **no fixed capacity bound** — a
+//! CNode is bounded by storage quota, not a compile-time slot count.
 //!
 //! A slot is named by a [`Key`] (a short byte string); [`CNodeCap::get`]
-//! / [`CNodeCap::set`] / [`CNodeCap::take`] hash the key to its physical
-//! radix key. The V1 ABI uses single-byte keys (`Key::from(b)`), but the
-//! map admits arbitrary-length keys natively (the same `get`/`set`/`take`
+//! / [`CNodeCap::set`] / [`CNodeCap::take`] operate on that logical key
+//! directly. The V1 ABI uses single-byte keys (`Key::from(b)`), but the map
+//! admits arbitrary-length keys natively (the same `get`/`set`/`take`
 //! surface), so a future ABI can key e.g. `address -> Cap::Instance` with no
-//! structural change. The raw `&[u8]` form is exposed via
+//! structural change. The raw `&[u8]` convenience form is exposed via
 //! [`CNodeCap::get_key`] / [`CNodeCap::set_key`] / [`CNodeCap::take_key`].
+//!
+//! The hash-keyed radix tree is a commitment/proof representation, not the
+//! runtime storage model. [`HashTreeRoot`](ssz::HashTreeRoot) derives that
+//! view on demand by hashing each logical key into a 32-byte radix path; normal
+//! kernel execution never hashes a CNode key just to read or mutate a slot.
 //!
 //! The leaf value is **always a cap** ([`CapHashOrRef`]), never raw data —
 //! this is what lets a CNode model e.g. `address -> Cap::Instance` for
@@ -36,6 +37,7 @@
 //! a runtime panic). See [`CapHashOrRef`] for the gate.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use ssz::{MissingOr, RadixMap};
 
@@ -45,13 +47,96 @@ use crate::error::CapError;
 use crate::hash::{Hash, Hasher};
 use crate::slot::Key;
 
-/// Physical radix-key width: a 32-byte digest of the logical key.
-pub const CNODE_KEY_BYTES: usize = 32;
+/// Commitment radix-key width: a 32-byte digest of the logical key.
+///
+/// This width is used only when deriving a Merkle/radix commitment in
+/// [`HashTreeRoot`](ssz::HashTreeRoot). Runtime CNode access is direct by
+/// [`Key`].
+pub const CNODE_COMMITMENT_KEY_BYTES: usize = 32;
 
-/// Radix map backing a CNode: `Hasher(k) -> CapHashOrRef<O>`.
-pub type CNodeSlots<O = Box<Cap>> = RadixMap<CapHashOrRef<O>, CNODE_KEY_BYTES>;
+/// Direct runtime slot map backing a CNode: `Key -> CapHashOrRef<O>`.
+///
+/// Stored as a sorted vector, not a `BTreeMap`: CNodes are usually tiny in the
+/// hot guest path, and avoiding per-entry tree-node allocations matters. The
+/// API is map-shaped and preserves strictly-ascending keys.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CNodeSlots<O = Box<Cap>> {
+    entries: Vec<(Key, MissingOr<CapHashOrRef<O>>)>,
+}
 
-/// CNode cap: a sparse, hash-keyed `key -> CapHashOrRef<O>` map.
+impl<O> CNodeSlots<O> {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, key: &Key) -> Option<&MissingOr<CapHashOrRef<O>>> {
+        self.entries
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()
+            .map(|pos| &self.entries[pos].1)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: Key,
+        value: MissingOr<CapHashOrRef<O>>,
+    ) -> Option<MissingOr<CapHashOrRef<O>>> {
+        match self.entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+            Ok(pos) => Some(core::mem::replace(&mut self.entries[pos].1, value)),
+            Err(pos) => {
+                self.entries.insert(pos, (key, value));
+                None
+            }
+        }
+    }
+
+    pub fn remove(&mut self, key: &Key) -> Option<MissingOr<CapHashOrRef<O>>> {
+        match self.entries.binary_search_by(|(k, _)| k.cmp(key)) {
+            Ok(pos) => Some(self.entries.remove(pos).1),
+            Err(_) => None,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &MissingOr<CapHashOrRef<O>>)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut MissingOr<CapHashOrRef<O>>)> {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    }
+}
+
+impl<O> Default for CNodeSlots<O> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<O: Clone> Clone for CNodeSlots<O> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+impl<O: core::fmt::Debug> core::fmt::Debug for CNodeSlots<O> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list().entries(self.entries.iter()).finish()
+    }
+}
+
+/// CNode cap: a sparse, direct `Key -> CapHashOrRef<O>` map.
 ///
 /// rkyv (the wire form) is derived; the derive adds a `slots: Archive` field
 /// bound, which for the wire payload resolves via `CapHashOrRef<Box<Cap>>:
@@ -65,9 +150,8 @@ pub type CNodeSlots<O = Box<Cap>> = RadixMap<CapHashOrRef<O>, CNODE_KEY_BYTES>;
 /// not compile for a generic field).
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CNodeCap<O = Box<Cap>> {
-    /// Sparse hash-keyed slot table: `Hasher(k) -> CapHashOrRef<O>`. Absent
-    /// keys contribute the radix `EMPTY` summary; a `Missing(h)` entry
-    /// substitutes losslessly for the value rooting at `h`.
+    /// Sparse slot table keyed by logical [`Key`]. Absent keys are empty; a
+    /// `Missing(h)` entry substitutes losslessly for the value rooting at `h`.
     pub slots: CNodeSlots<O>,
 }
 
@@ -99,12 +183,17 @@ impl<O: core::fmt::Debug> core::fmt::Debug for CNodeCap<O> {
 // content hash, so a cache-carrying cnode is non-hashable at compile time.
 impl<O> ssz::HashTreeRoot for CNodeCap<O>
 where
-    CNodeSlots<O>: ssz::HashTreeRoot,
+    O: Clone,
+    CapHashOrRef<O>: ssz::HashTreeRoot,
 {
     fn hash_tree_root<D: ssz::digest::Digest<OutputSize = ssz::digest::typenum::U32>>(
         &self,
     ) -> [u8; 32] {
-        let roots: [[u8; 32]; 1] = [self.slots.hash_tree_root::<D>()];
+        let mut commitment = RadixMap::<CapHashOrRef<O>, CNODE_COMMITMENT_KEY_BYTES>::new();
+        for (key, value) in self.slots.iter() {
+            commitment.insert(Self::commitment_key(key), value.clone());
+        }
+        let roots: [[u8; 32]; 1] = [commitment.hash_tree_root::<D>()];
         ssz::merkleize::<D>(&roots, 1)
     }
 }
@@ -118,10 +207,12 @@ impl<O> CNodeCap<O> {
         }
     }
 
-    /// Physical radix key for a logical byte-string key `k`: `Hasher(k)`.
+    /// Commitment radix key for a logical key: `Hasher(key)`.
+    ///
+    /// This is intentionally not used by ordinary `get` / `set` / `take`.
     #[inline]
-    pub fn key_of(k: &[u8]) -> [u8; CNODE_KEY_BYTES] {
-        <Hasher as Hash>::hash(k)
+    pub fn commitment_key(key: &Key) -> [u8; CNODE_COMMITMENT_KEY_BYTES] {
+        <Hasher as Hash>::hash(key.as_slice())
     }
 
     // ---- logical byte-string key API ----
@@ -132,7 +223,7 @@ impl<O> CNodeCap<O> {
     /// [`take_key`](Self::take_key) it. `None` for an absent key or a
     /// `Missing(_)` placeholder.
     pub fn peek_key(&self, k: &[u8]) -> Option<&CapHashOrRef<O>> {
-        match self.slots.get(&Self::key_of(k))? {
+        match self.slots.get(&Key::from(k))? {
             MissingOr::Materialized(t) => Some(t),
             MissingOr::Missing(_) => None,
         }
@@ -147,7 +238,7 @@ impl<O> CNodeCap<O> {
         k: &[u8],
         target: Option<CapHashOrRef<O>>,
     ) -> Option<CapHashOrRef<O>> {
-        let key = Self::key_of(k);
+        let key = Key::from(k);
         // `insert` / `remove` hand back the displaced entry by value — no
         // clone of the prior `CapHashOrRef`.
         let old = match target {
@@ -179,7 +270,16 @@ impl<O> CNodeCap<O> {
         key: &Key,
         target: Option<CapHashOrRef<O>>,
     ) -> Result<Option<CapHashOrRef<O>>, CapError> {
-        Ok(self.set_key(key.as_slice(), target))
+        // `insert` / `remove` hand back the displaced entry by value — no
+        // clone of the prior `CapHashOrRef`.
+        let old = match target {
+            Some(t) => self.slots.insert(key.clone(), MissingOr::Materialized(t)),
+            None => self.slots.remove(key),
+        };
+        Ok(match old {
+            Some(MissingOr::Materialized(t)) => Some(t),
+            Some(MissingOr::Missing(_)) | None => None,
+        })
     }
 
     /// Take the binding at `key`, leaving it empty. Returns the prior
@@ -194,7 +294,7 @@ impl<O: Clone> CNodeCap<O> {
     /// absent key or a `Missing(_)` placeholder (callers needing to tell
     /// "absent" from "missing placeholder" apart inspect `self.slots`).
     pub fn get_key(&self, k: &[u8]) -> Option<CapHashOrRef<O>> {
-        match self.slots.get(&Self::key_of(k))? {
+        match self.slots.get(&Key::from(k))? {
             MissingOr::Materialized(t) => Some(t.clone()),
             MissingOr::Missing(_) => None,
         }
@@ -203,6 +303,9 @@ impl<O: Clone> CNodeCap<O> {
     /// Look up the slot named by `key`. See [`CNodeCap::get_key`] for the
     /// placeholder semantics.
     pub fn get(&self, key: &Key) -> Option<CapHashOrRef<O>> {
-        self.get_key(key.as_slice())
+        match self.slots.get(key)? {
+            MissingOr::Materialized(t) => Some(t.clone()),
+            MissingOr::Missing(_) => None,
+        }
     }
 }

@@ -69,7 +69,7 @@ impl BuiltCaps {
     pub fn for_image(image: &Image, endpoint_idx: u8) -> Self {
         let endpoint = image
             .endpoints
-            .get(&endpoint_idx)
+            .get(&Key::from(endpoint_idx))
             .unwrap_or_else(|| panic!("endpoint {endpoint_idx} not declared"));
 
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
@@ -408,7 +408,10 @@ fn publish_instance(
     nub.put_cap_with_hash(cnode_hash, &cnode_cap)
         .expect("put cnode");
 
-    let endpoint = image.endpoints.get(&ENDPOINT_IDX).expect("endpoint 0");
+    let endpoint = image
+        .endpoints
+        .get(&Key::from(ENDPOINT_IDX))
+        .expect("endpoint 0");
     let mut regs = [0u64; NUM_REGS];
     for (&i, &v) in &endpoint.initial_regs {
         if let Some(slot) = regs.get_mut(i as usize) {

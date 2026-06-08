@@ -113,10 +113,14 @@ pub fn run_instance(
         }
     }
 
-    let endpoint = image
+    // V1 single-byte ABI: the endpoint selector is a single-byte Key into the
+    // sparse endpoint list.
+    let target = javm_cap::Key::from(endpoint_idx);
+    let (_, endpoint) = image
         .endpoints
-        .get(endpoint_idx as usize)
-        .expect("endpoint index out of range");
+        .iter()
+        .find(|(k, _)| *k == target)
+        .expect("endpoint key not defined");
 
     let mut regs = Regs::new();
     regs.pc = endpoint.entry_pc;

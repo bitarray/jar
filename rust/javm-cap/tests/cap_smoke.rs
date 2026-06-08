@@ -3,8 +3,8 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
-    InstanceCap, Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotPath,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, ImageSlotEntry, InstanceCap,
+    Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, ResidentCap, SlotPath,
 };
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn make_image_cap() -> ImageCap {
         mappings: Vec::new(),
         pinned: Vec::new(),
         initial: Vec::new(),
-        yield_marker_slot: None,
+        yield_receiver_slot: None,
         gas_slots: Vec::new(),
         quota_slots: Vec::new(),
     }
@@ -145,6 +145,46 @@ fn cache_get_owned_is_none() {
     assert!(cache.get(owned).is_none());
 }
 
+#[derive(Clone)]
+struct TestResidentCap {
+    cap: Cap,
+    resident_wrapped: bool,
+}
+
+impl ResidentCap for TestResidentCap {
+    fn from_cap(cap: Cap) -> Self {
+        Self {
+            cap,
+            resident_wrapped: true,
+        }
+    }
+
+    fn as_cap(&self) -> &Cap {
+        &self.cap
+    }
+
+    fn into_cap(self) -> Cap {
+        self.cap
+    }
+}
+
+#[test]
+fn cache_directory_can_store_resident_payload() {
+    let cache: CacheDirectory<_, TestResidentCap> =
+        CacheDirectory::with_hasher(hashbrown::DefaultHashBuilder::default());
+    let cap = Cap::data_inline(b"resident");
+    let h = cache.put_cap(&cap).expect("put resident cap");
+
+    let blob = cache.get_blob(&h).expect("resident blob");
+    assert!(blob.resident_wrapped);
+    assert!(matches!(blob.as_cap(), Cap::Data(_)));
+
+    let r = cache.put_instance(Cap::empty_cnode());
+    let inst = cache.get_instance(&r).expect("resident instance entry");
+    assert!(inst.resident_wrapped);
+    assert!(matches!(inst.as_cap(), Cap::CNode(_)));
+}
+
 #[test]
 fn cnode_lookup_after_set() {
     let mut cnode: CNodeCap = CNodeCap::new();
@@ -221,15 +261,6 @@ fn instance_with_mem_image() {
     let mut out = vec![0u8; PAGE_SIZE];
     inst.mem.copy_into(0x1000, &mut out);
     assert_eq!(&out[..2], &[0xDE, 0xAD]);
-}
-
-#[test]
-fn endpoint_def_empty_sentinel() {
-    let e = EndpointDef::empty();
-    assert_eq!(e.entry_pc, 0);
-    for r in &e.initial_regs {
-        assert_eq!(*r, 0);
-    }
 }
 
 #[test]

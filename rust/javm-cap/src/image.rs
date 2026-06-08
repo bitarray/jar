@@ -34,7 +34,7 @@ use ssz_derive::{Decode, Encode};
 /// Image: the program spec (code, endpoints, memory layout, slot
 /// declarations, pinned ro caps).
 ///
-/// `pinned_slots` and `yield_marker_slot` reference cnode slots; the
+/// `pinned_slots` and `yield_receiver_slot` reference cnode slots; the
 /// kernel installs declared pinned content into the Instance's cnode
 /// at `set_image` / `host_derive_spawn` time and treats them as
 /// read-only thereafter.
@@ -56,9 +56,11 @@ pub struct Image {
     /// read its own bytes (AUIPC+load PIC); the JIT executes the native
     /// translation. Empty for codeless images (kernel placeholders).
     pub code: Vec<u8>,
-    /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
-    /// declared endpoints are present.
-    pub endpoints: BTreeMap<u8, EndpointDef>,
+    /// Endpoints addressable by a [`Key`] selector (the same byte-string key
+    /// type as a cnode slot; in the V1 single-byte ABI the selector is one
+    /// byte). Sparse — only declared endpoints are present, with no fixed
+    /// capacity. An absent key is an undefined endpoint.
+    pub endpoints: BTreeMap<Key, EndpointDef>,
     /// Memory layout. Each entry maps a `Cap::Data` (resolved through
     /// the `source` slot path) into the address space at `[start, start
     /// + size)`. RO vs RW is derived from whether the target slot
@@ -72,15 +74,16 @@ pub struct Image {
     /// honored at standalone (root) Instance bootstrap — a
     /// parented Instance receives its cnode from the spawner.
     pub initial_slots: BTreeMap<Key, InitialDataCap>,
-    /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
-    /// catches yields. None = no catcher.
-    pub yield_marker_slot: Option<Key>,
+    /// Slot holding `Cap::Instance[YieldReceiver]` — the set of yield_keys this
+    /// Instance catches. The kernel snapshots it at each downward CALL and
+    /// consults the snapshot when routing a yield. None = catches no yields.
+    pub yield_receiver_slot: Option<Key>,
     /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles
-    /// the kernel debits while this Instance runs. `gas_slots[0]` is the
-    /// **active** meter (the kernel reads its `meter_key` at frame entry to
-    /// seed/settle gas against the kernel-maintained meter mapping); later
-    /// entries are fallback reserves (chain-spec policy). Empty = no
-    /// Image-declared meter (the kernel uses the call-supplied budget).
+    /// the kernel debits while this Instance runs. Slots are consulted in order:
+    /// empty declared slots are skipped, the first valid non-empty slot is the
+    /// primary meter used in OOG payloads, and later valid slots are fallback
+    /// reserves. Empty list = no Image-declared meter (the frame loans its
+    /// caller's gas scope, or the host budget at root).
     pub gas_slots: Vec<Key>,
     /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
     /// Same convention as [`Self::gas_slots`].
@@ -160,7 +163,7 @@ impl Image {
             memory_mappings: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
+            yield_receiver_slot: None,
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
         }

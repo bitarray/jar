@@ -28,24 +28,16 @@ pub const BARE_GAS_SLOT: u8 = 7;
 /// `BARE_GAS_SLOT`).
 pub const BARE_QUOTA_SLOT: u8 = 8;
 
-/// Chain's `Cap::Instance[YieldCatcher]` (its own catcher; per-block
-/// reset). The chain Image's `yield_marker_slot` points here.
-pub const BARE_YIELD_CATCHER_SLOT: u8 = 9;
-
-/// `Cap::Instance[SetGasMeter]` factory.
-pub const BARE_SET_GAS_METER_SLOT: u8 = 10;
-
-/// `Cap::Instance[SetStorageQuota]` factory.
-pub const BARE_SET_STORAGE_QUOTA_SLOT: u8 = 11;
-
-/// `Cap::Instance[MintGas]` factory.
-pub const BARE_MINT_GAS_SLOT: u8 = 12;
-
-/// `Cap::Instance[MintQuota]` factory.
-pub const BARE_MINT_QUOTA_SLOT: u8 = 13;
-
-/// `Cap::Instance[CreateYieldCatcher]` factory.
-pub const BARE_CREATE_YIELD_CATCHER_SLOT: u8 = 14;
+/// Slot the chain Image's `yield_receiver_slot` points at, holding the chain's
+/// `Cap::Instance[YieldReceiver]` (its catch-set; per-block reset). The kernel
+/// reads it when routing a yield.
+///
+/// The per-syscall factory/marker slots (set_gas_meter, mint_gas,
+/// create_yield_catcher, …) that used to follow are gone: a syscall is a
+/// `host_yield` of a named `kernel:*` YieldSender from the top-level scratchpad
+/// CNode, caught by the kernel as the root YieldReceiver — not a CALL into a
+/// factory Instance pinned at a well-known slot.
+pub const BARE_YIELD_RECEIVER_SLOT: u8 = 9;
 
 /// `Cap::Instance[HostOpen]` — read-only entry handle for `host_open`.
 pub const BARE_HOST_OPEN_SLOT: u8 = 15;

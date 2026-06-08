@@ -55,10 +55,8 @@ impl Hash for Blake2b256 {
     }
 }
 
-/// Central alias for the content-addressing / key-derivation hash.
-///
-/// Used to derive fixed-width physical keys from program-supplied bytes —
-/// e.g. a `Cap::CNode` slot key `<Hasher as Hash>::hash(k)` (`[u8; 32]`).
+/// Central alias for content-addressing and the few places that deliberately
+/// need fixed-width derived keys.
 ///
 /// TODO(hash-unify): this is Blake2b-256, but the SSZ merkle digest used by
 /// [`crate::cap::Cap::cap_hash`] (`ssz::hash_tree_root`, the `ssz` `sha2`

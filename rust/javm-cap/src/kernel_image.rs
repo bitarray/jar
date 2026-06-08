@@ -15,24 +15,34 @@ use crate::cap::CapHash;
 use crate::hash::{Blake2b256, Hash};
 
 /// Identifies which kernel-assisted Image a given `image_hash_chain` refers to.
+///
+/// The four kernel-assisted Instance variants of the v3 design are
+/// `Gas{meter_key}`, `Quota{quota_key}`, `YieldSender{yield_key}` (the EMIT
+/// right) and `YieldReceiver{Vec<yield_key>}` (the CATCH right), plus the two
+/// kernel-internal tables (`GasMeter`, `StorageQuota`) the unit handles index.
+/// The older per-syscall factory/marker images (set_gas_meter, mint_gas,
+/// yield_catcher, oog_marker, …) are gone: a syscall is now a `host_yield` of a
+/// `YieldSender` carrying a `kernel:*` yield_key, caught by the kernel as the
+/// root YieldReceiver — so those names are yield_keys, not Images.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KernelImage {
+    /// Kernel-internal gas meter table (never in chain hands).
     GasMeter,
+    /// Kernel-internal storage quota table (never in chain hands).
     StorageQuota,
-    YieldCatcher,
     /// Per-Instance `Gas{meter_key}` unit handle. State: a `meter_key: Key`
     /// packed into the handle's registers (see
     /// [`crate::slot::key_to_regs`]).
     Gas,
     /// Per-Instance `Quota{quota_key}` unit handle.
     Quota,
-    SetGasMeter,
-    SetStorageQuota,
-    MintGas,
-    MintQuota,
-    CreateYieldCatcher,
-    OogMarker,
-    StorageExhaustedMarker,
+    /// `YieldSender{yield_key}` — the EMIT right for a yield_key. State: the
+    /// `yield_key: Key` packed into the handle's registers.
+    YieldSender,
+    /// `YieldReceiver{Vec<yield_key>}` — the CATCH right: the set of yield_keys
+    /// an Instance catches. State (a serialized `Set<Key>`) lives in the
+    /// handle's `mem` DataCap; the kernel short-circuits it during routing.
+    YieldReceiver,
     /// Per-Instance `File{file_id}` handle.
     File,
     /// Per-Instance HostOpen handle.
@@ -42,19 +52,13 @@ pub enum KernelImage {
 }
 
 /// All kernel Images, for registry iteration.
-pub const ALL_KERNEL_IMAGES: [KernelImage; 15] = [
+pub const ALL_KERNEL_IMAGES: [KernelImage; 9] = [
     KernelImage::GasMeter,
     KernelImage::StorageQuota,
-    KernelImage::YieldCatcher,
     KernelImage::Gas,
     KernelImage::Quota,
-    KernelImage::SetGasMeter,
-    KernelImage::SetStorageQuota,
-    KernelImage::MintGas,
-    KernelImage::MintQuota,
-    KernelImage::CreateYieldCatcher,
-    KernelImage::OogMarker,
-    KernelImage::StorageExhaustedMarker,
+    KernelImage::YieldSender,
+    KernelImage::YieldReceiver,
     KernelImage::File,
     KernelImage::HostOpen,
     KernelImage::HostSave,
@@ -64,16 +68,10 @@ const fn const_kernel_image_label(kind: KernelImage) -> &'static [u8] {
     match kind {
         KernelImage::GasMeter => b"kernel:gasmeter",
         KernelImage::StorageQuota => b"kernel:storagequota",
-        KernelImage::YieldCatcher => b"kernel:yieldcatcher",
         KernelImage::Gas => b"kernel:gas",
         KernelImage::Quota => b"kernel:quota",
-        KernelImage::SetGasMeter => b"kernel:set_gas_meter",
-        KernelImage::SetStorageQuota => b"kernel:set_storage_quota",
-        KernelImage::MintGas => b"kernel:mint_gas",
-        KernelImage::MintQuota => b"kernel:mint_quota",
-        KernelImage::CreateYieldCatcher => b"kernel:create_yield_catcher",
-        KernelImage::OogMarker => b"kernel:oog_marker",
-        KernelImage::StorageExhaustedMarker => b"kernel:storage_exhausted_marker",
+        KernelImage::YieldSender => b"kernel:yieldsender",
+        KernelImage::YieldReceiver => b"kernel:yieldreceiver",
         KernelImage::File => b"kernel:file",
         KernelImage::HostOpen => b"kernel:host_open",
         KernelImage::HostSave => b"kernel:host_save",
