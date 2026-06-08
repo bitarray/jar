@@ -60,6 +60,28 @@ use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
 use javm_recompiler_x86::codegen::HelperFns;
 
+/// Maximum fixed execution lanes the guest runtime can address. The production
+/// default vCPU pool is capped at 8; this leaves room for explicit overrides
+/// while keeping lane-local hot state static and allocation-free.
+pub const MAX_EXECUTION_LANES: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExecutionLane {
+    index: usize,
+}
+
+impl ExecutionLane {
+    pub const PRIMARY: Self = Self { index: 0 };
+
+    pub const fn new(index: usize) -> Self {
+        Self { index }
+    }
+
+    pub const fn index(self) -> usize {
+        self.index
+    }
+}
+
 // === Per-invocation context for the #PF handler ===========================
 //
 // Set by `enter_frame` immediately before `enter_ring3`, read by
@@ -73,8 +95,10 @@ static EXIT_LABEL_VA: AtomicU64 = AtomicU64::new(0);
 static TRAP_TABLE_PTR: AtomicPtr<(u32, u32, u32)> = AtomicPtr::new(core::ptr::null_mut());
 static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
 static CTX_KVA: AtomicU64 = AtomicU64::new(0);
-static LAST_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(0);
-static LAST_GLOBAL_ARENA_PAGES: AtomicU64 = AtomicU64::new(0);
+static LAST_GLOBAL_ARENA_TOKEN: [AtomicU64; MAX_EXECUTION_LANES] =
+    [const { AtomicU64::new(0) }; MAX_EXECUTION_LANES];
+static LAST_GLOBAL_ARENA_PAGES: [AtomicU64; MAX_EXECUTION_LANES] =
+    [const { AtomicU64::new(0) }; MAX_EXECUTION_LANES];
 
 // === Per-invocation category-#3 materialization state =====================
 //
@@ -807,6 +831,7 @@ const STACK_SIZE: u64 = PAGE_SIZE as u64;
 /// re-stamped by [`enter_frame`] each entry (they differ per image, and the
 /// ctx page is shared), alongside the per-entry regs/pc/gas/exit_*.
 pub struct FrameRuntime {
+    lane: ExecutionLane,
     pt: PageTable,
     jit_va: u64,
     jit_size: u64,
@@ -907,6 +932,7 @@ impl FrameRuntime {
 /// returned [`FrameRuntime`], which owns the per-call page table.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn build_frame_runtime(
+    lane: ExecutionLane,
     image_cap: &CachedCap,
     image_hash: &javm_cap::CapHash,
     code: &[u8],
@@ -999,6 +1025,7 @@ pub unsafe fn build_frame_runtime(
             let new_cr3 = pt.cr3()?;
 
             Some(FrameRuntime {
+                lane,
                 pt,
                 jit_va,
                 jit_size: cached.jit_size as u64,
@@ -1042,6 +1069,7 @@ pub unsafe fn build_frame_runtime(
 /// `mat_state_len` bytes), and `ro_units` must outlive the call.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn enter_frame(
+    lane: ExecutionLane,
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
@@ -1051,6 +1079,7 @@ pub unsafe fn enter_frame(
     mat_state_len: u64,
     ro_units: *mut alloc::vec::Vec<u32>,
 ) -> ExitInfo {
+    assert_eq!(rt.lane, lane, "FrameRuntime entered on the wrong lane");
     let ctx_kva = CTX_PAGE.kva();
     let ctx = ctx_kva as *mut JitContext;
     // SAFETY: CTX_PAGE is the process-global ring-3 ctx page, leaked for the
@@ -1107,7 +1136,7 @@ pub unsafe fn enter_frame(
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     crate::paging::enable_global_pages();
-    flush_global_arena_on_image_switch(rt.global_arena_token, rt.global_arena_pages);
+    flush_global_arena_on_image_switch(lane, rt.global_arena_token, rt.global_arena_pages);
 
     let user_stack_top = STACK_VA_M + STACK_SIZE;
     // SAFETY: trampoline (inside the Image arena) + stack mapped above;
@@ -1151,14 +1180,19 @@ pub unsafe fn enter_frame(
     }
 }
 
-fn flush_global_arena_on_image_switch(next_token: u64, next_pages: u64) {
-    let prev_token = LAST_GLOBAL_ARENA_TOKEN.load(Ordering::SeqCst);
+fn flush_global_arena_on_image_switch(lane: ExecutionLane, next_token: u64, next_pages: u64) {
+    let idx = lane.index();
+    assert!(
+        idx < MAX_EXECUTION_LANES,
+        "execution lane index exceeds guest lane table"
+    );
+    let prev_token = LAST_GLOBAL_ARENA_TOKEN[idx].load(Ordering::SeqCst);
     if prev_token != 0 && prev_token != next_token {
-        let prev_pages = LAST_GLOBAL_ARENA_PAGES.load(Ordering::SeqCst);
+        let prev_pages = LAST_GLOBAL_ARENA_PAGES[idx].load(Ordering::SeqCst);
         for page in 0..prev_pages {
             crate::paging::invlpg(META_BASE_M + page * PAGE_SIZE as u64);
         }
     }
-    LAST_GLOBAL_ARENA_PAGES.store(next_pages, Ordering::SeqCst);
-    LAST_GLOBAL_ARENA_TOKEN.store(next_token, Ordering::SeqCst);
+    LAST_GLOBAL_ARENA_PAGES[idx].store(next_pages, Ordering::SeqCst);
+    LAST_GLOBAL_ARENA_TOKEN[idx].store(next_token, Ordering::SeqCst);
 }

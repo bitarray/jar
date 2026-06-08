@@ -103,7 +103,7 @@ use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
-use crate::jit_run::{self, ExitInfo, FrameRuntime};
+use crate::jit_run::{self, ExecutionLane, ExitInfo, FrameRuntime};
 use crate::paging;
 use crate::state_cache::CACHE;
 
@@ -741,6 +741,7 @@ enum TaskPoll {
 /// one task-local gas bank, and one monotonic Instance id allocator.
 struct KernelTask {
     id: TaskId,
+    lane: ExecutionLane,
     stack: Vec<StackEntry>,
     next_iid: u64,
     gas_state: TaskGasState,
@@ -749,6 +750,7 @@ struct KernelTask {
 impl KernelTask {
     fn new(
         id: TaskId,
+        lane: ExecutionLane,
         instance_hash: &CapHash,
         endpoint_idx: u32,
         args: [u64; 4],
@@ -769,6 +771,7 @@ impl KernelTask {
         let gas_state = TaskGasState::new(&stack[0].gas, initial_gas);
         Ok(Self {
             id,
+            lane,
             stack,
             next_iid,
             gas_state,
@@ -801,7 +804,7 @@ impl KernelTask {
         // — the same Instance, sharing one PC/regs/mem).
         let info = {
             let frame = frame_at_mut(&mut self.stack, top_idx);
-            run_one_entry(frame, self.gas_state.live_gas)?
+            run_one_entry(self.lane, frame, self.gas_state.live_gas)?
         };
         self.gas_state.live_gas = info.gas_remaining;
 
@@ -1153,6 +1156,7 @@ impl KernelTask {
 /// production batch/async submission API, and then split the ring3/JIT globals
 /// into per-vCPU execution lanes before true parallel scheduling.
 struct KernelScheduler {
+    lane: ExecutionLane,
     next_task_id: TaskId,
     tasks: BTreeMap<TaskId, KernelTask>,
     completed: BTreeMap<TaskId, LoopOutcome>,
@@ -1160,8 +1164,9 @@ struct KernelScheduler {
 }
 
 impl KernelScheduler {
-    fn new() -> Self {
+    fn new(lane: ExecutionLane) -> Self {
         Self {
+            lane,
             next_task_id: 0,
             tasks: BTreeMap::new(),
             completed: BTreeMap::new(),
@@ -1178,7 +1183,14 @@ impl KernelScheduler {
     ) -> Result<TaskId, u32> {
         let id = self.next_task_id;
         self.next_task_id += 1;
-        let task = KernelTask::new(id, instance_hash, endpoint_idx, args, initial_gas)?;
+        let task = KernelTask::new(
+            id,
+            self.lane,
+            instance_hash,
+            endpoint_idx,
+            args,
+            initial_gas,
+        )?;
         self.tasks.insert(id, task);
         self.ready.push_back(id);
         Ok(id)
@@ -1223,7 +1235,23 @@ pub fn run_top(
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    let mut scheduler = KernelScheduler::new();
+    run_top_on_lane(
+        ExecutionLane::PRIMARY,
+        instance_hash,
+        endpoint_idx,
+        args,
+        initial_gas,
+    )
+}
+
+pub fn run_top_on_lane(
+    lane: ExecutionLane,
+    instance_hash: &CapHash,
+    endpoint_idx: u32,
+    args: [u64; 4],
+    initial_gas: i64,
+) -> Result<LoopOutcome, u32> {
+    let mut scheduler = KernelScheduler::new(lane);
     let task = scheduler.submit_invoke(instance_hash, endpoint_idx, args, initial_gas)?;
     scheduler.run_until_result(task)
 }
@@ -1233,7 +1261,7 @@ pub fn run_two_for_test(
     first: &nub_arch_x86_abi::InvokePacket,
     second: &nub_arch_x86_abi::InvokePacket,
 ) -> Result<(LoopOutcome, LoopOutcome), u32> {
-    let mut scheduler = KernelScheduler::new();
+    let mut scheduler = KernelScheduler::new(ExecutionLane::PRIMARY);
     let first_id = scheduler.submit_invoke(
         &first.instance_hash,
         first.endpoint_idx,
@@ -1257,9 +1285,9 @@ pub fn run_two_for_test(
 /// evicted, so it is built exactly once per frame. Frame mem + `mat_state`
 /// persist across re-entries — the parent's writes and gas history survive
 /// the child's execution.
-fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
+fn run_one_entry(lane: ExecutionLane, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
-        let rt = build_runtime(frame)?;
+        let rt = build_runtime(lane, frame)?;
         frame.runtime = Some(rt);
     }
     let pc = frame.instance.pc as u32;
@@ -1276,6 +1304,7 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     let rt = frame.runtime.as_mut().expect("just built");
     let info = unsafe {
         jit_run::enter_frame(
+            lane,
             rt,
             gas,
             pc,
@@ -1299,7 +1328,7 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// `DIRECTORY` lock scope. The PAs installed in the PT stay valid
 /// for the frame's lifetime per the V1 invariant (no eviction mid-
 /// RPC) even after this function returns and the guard is dropped.
-fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
+fn build_runtime(lane: ExecutionLane, frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // CacheDirectory is interior-mutable; each `get` takes the inner
     // spin::Mutex briefly and returns an `Arc<CachedCap>`. We keep the Arc
     // locals alive for the duration of the function so any borrowed
@@ -1378,6 +1407,7 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // the no-eviction V1 invariant.
     unsafe {
         jit_run::build_frame_runtime(
+            lane,
             &img_arc,
             &frame.instance.image_hash,
             code_bytes,
