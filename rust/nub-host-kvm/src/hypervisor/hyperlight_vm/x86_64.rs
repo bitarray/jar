@@ -180,6 +180,20 @@ impl HyperlightVm {
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
     ) -> std::result::Result<(), DispatchGuestCallError> {
+        self.dispatch_call_from_host_on(VcpuLane::PRIMARY, mem_mgr, host_funcs)
+    }
+
+    /// Dispatch a host call on a selected vCPU lane. The old shared input/output
+    /// ring is still serialized by the caller, so this is not a concurrent hot
+    /// path yet; it proves that non-primary vCPUs can enter the guest and gives
+    /// the future worker queue a lane-addressed entry primitive.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn dispatch_call_from_host_on(
+        &mut self,
+        lane: VcpuLane,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
         let NextAction::Call(dispatch_func_addr) = self.entrypoint else {
             return Err(DispatchGuestCallError::Uninitialized);
         };
@@ -204,16 +218,22 @@ impl HyperlightVm {
             ..Default::default()
         };
         self.vm
-            .set_regs(&regs)
+            .set_regs_on(lane, &regs)
             .map_err(DispatchGuestCallError::SetupRegs)?;
 
         // reset fpu
-        self.vm
-            .set_fpu(&CommonFpu::default())
-            .map_err(DispatchGuestCallError::SetupRegs)?;
+        if lane == VcpuLane::PRIMARY {
+            self.vm
+                .set_fpu(&CommonFpu::default())
+                .map_err(DispatchGuestCallError::SetupRegs)?;
+        } else {
+            self.vm
+                .set_fpu_on(lane, &CommonFpu::default())
+                .map_err(DispatchGuestCallError::SetupRegs)?;
+        }
 
         let result = self
-            .run(mem_mgr, host_funcs)
+            .run_on(lane, mem_mgr, host_funcs)
             .map_err(DispatchGuestCallError::Run);
 
         // Clear the TLB flush flag only after run() returns. The guest

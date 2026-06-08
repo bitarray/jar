@@ -8,7 +8,7 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use nub::Nub;
+use nub::{Nub, NubOptions};
 use nub_arch_x86::test_abi::{FN_ID_TEST_INVOKE_TWO_SERIAL, FN_ID_TEST_SMOKE};
 use nub_arch_x86_abi::{InvocationResult, InvokePacket};
 use rkyv::primitive::ArchivedU64;
@@ -17,10 +17,28 @@ use std::collections::BTreeMap;
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, DataCap, Key, NUM_REGS};
 
+fn test_nub() -> Nub {
+    Nub::hyperlight_tests_with_options(NubOptions::new().with_vcpu_count(2))
+        .expect("hyperlight tests bin")
+}
+
 #[test]
 fn test_bin_smoke_returns_42() {
-    let nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
+    let nub = test_nub();
     let bytes = nub.call_raw(FN_ID_TEST_SMOKE, &[]).expect("smoke rpc");
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(&bytes);
+    let archived =
+        rkyv::access::<ArchivedU64, rkyv::rancor::Error>(aligned.as_slice()).expect("rkyv access");
+    assert_eq!(archived.to_native(), 42);
+}
+
+#[test]
+fn test_bin_smoke_returns_42_on_second_vcpu() {
+    let nub = test_nub();
+    let bytes = nub
+        .call_raw_on_vcpu(1, FN_ID_TEST_SMOKE, &[])
+        .expect("smoke rpc on vcpu 1");
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(&bytes);
     let archived =
@@ -118,7 +136,7 @@ fn scheduler_probe(
 
 #[test]
 fn test_scheduler_probe_runs_two_tasks() {
-    let mut nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
+    let mut nub = test_nub();
     let first = publish_ecalli(&mut nub, 42);
     let second = publish_ecalli(&mut nub, 43);
     let results = scheduler_probe(&mut nub, first, 1_000, second, 1_000);
@@ -130,7 +148,7 @@ fn test_scheduler_probe_runs_two_tasks() {
 
 #[test]
 fn test_scheduler_probe_keeps_task_gas_local_after_oog() {
-    let mut nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
+    let mut nub = test_nub();
     let first = publish_ecalli(&mut nub, 42);
     let second = publish_ecalli(&mut nub, 43);
     let results = scheduler_probe(&mut nub, first, 0, second, 1_000);

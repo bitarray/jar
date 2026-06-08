@@ -78,4 +78,29 @@ impl Nub {
             }
         }
     }
+
+    /// Test-only raw RPC dispatch on a selected vCPU lane. This is still the
+    /// serialized control-plane ring path, not the production concurrent invoke
+    /// queue.
+    pub fn call_raw_on_vcpu(
+        &self,
+        vcpu_index: usize,
+        fn_id: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .call_raw_on_vcpu(vcpu_index, fn_id, payload)
+                .map_err(|e| anyhow::anyhow!("call_raw_on_vcpu: {e}")),
+            Backend::Local { .. } => Err(anyhow::anyhow!(
+                "call_raw_on_vcpu not supported on Local backend"
+            )),
+        }
+    }
 }

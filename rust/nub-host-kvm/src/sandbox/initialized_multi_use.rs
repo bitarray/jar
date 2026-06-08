@@ -29,6 +29,7 @@ use crate::HyperlightError;
 use crate::Result;
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
+use crate::hypervisor::virtual_machine::VcpuLane;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::{
@@ -113,11 +114,33 @@ impl MultiUseSandbox {
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
     pub fn call_raw(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
         maybe_time_and_emit_guest_call("call_raw", || {
-            self.call_guest_function_by_id(fn_id, payload)
+            self.call_guest_function_by_id_on(VcpuLane::PRIMARY, fn_id, payload)
         })
     }
 
-    fn call_guest_function_by_id(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
+    /// Serialized control-plane call on a selected vCPU lane. This still uses
+    /// the legacy shared input/output rings and therefore must not be used as
+    /// the concurrent invoke mechanism; it exists to validate and bootstrap
+    /// non-primary lanes before the shared job queue lands.
+    #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
+    pub fn call_raw_on_vcpu(
+        &mut self,
+        vcpu_index: usize,
+        fn_id: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let lane = VcpuLane::new(vcpu_index);
+        maybe_time_and_emit_guest_call("call_raw_on_vcpu", || {
+            self.call_guest_function_by_id_on(lane, fn_id, payload)
+        })
+    }
+
+    fn call_guest_function_by_id_on(
+        &mut self,
+        lane: VcpuLane,
+        fn_id: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
         // ===== KILL() TIMING POINT 1 =====
         // Clear any stale cancellation from a previous guest function call or if kill() was called too early.
         // Any kill() that completed (even partially) BEFORE this line has NO effect on this call.
@@ -134,9 +157,13 @@ impl MultiUseSandbox {
             self.mem_mgr
                 .write_guest_function_call_raw(req_bytes.as_slice())?;
 
-            let dispatch_res = self
-                .vm
-                .dispatch_call_from_host(&mut self.mem_mgr, &self.host_funcs);
+            let dispatch_res = if lane == VcpuLane::PRIMARY {
+                self.vm
+                    .dispatch_call_from_host(&mut self.mem_mgr, &self.host_funcs)
+            } else {
+                self.vm
+                    .dispatch_call_from_host_on(lane, &mut self.mem_mgr, &self.host_funcs)
+            };
 
             if let Err(e) = dispatch_res {
                 let (error, _should_poison) = e.promote();
