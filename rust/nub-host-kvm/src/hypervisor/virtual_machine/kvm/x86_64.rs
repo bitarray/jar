@@ -68,11 +68,15 @@ pub(crate) fn is_hypervisor_present() -> bool {
     }
 }
 
-/// A KVM implementation of a single-vcpu VM
+/// A KVM implementation with a fixed vCPU pool.
+///
+/// The legacy `VirtualMachine` trait still drives only lane 0. Creating the
+/// whole pool up front mirrors the fixed KVM memory-region model and gives the
+/// parallel invoke worker ABI stable vCPU identities to attach to later.
 #[derive(Debug)]
 pub(crate) struct KvmVm {
     vm_fd: VmFd,
-    vcpu_fd: VcpuFd,
+    vcpu_fds: Vec<VcpuFd>,
 }
 
 static KVM: LazyLock<std::result::Result<Kvm, CreateVmError>> =
@@ -81,16 +85,12 @@ static KVM: LazyLock<std::result::Result<Kvm, CreateVmError>> =
 impl KvmVm {
     /// Create a new instance of a `KvmVm`
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    pub(crate) fn new() -> std::result::Result<Self, CreateVmError> {
+    pub(crate) fn new(vcpu_count: usize) -> std::result::Result<Self, CreateVmError> {
         let hv = KVM.as_ref().map_err(|e| e.clone())?;
 
         let vm_fd = hv
             .create_vm_with_type(0)
             .map_err(|e| CreateVmError::CreateVmFd(e.into()))?;
-
-        let vcpu_fd = vm_fd
-            .create_vcpu(0)
-            .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?;
 
         // Set the CPUID leaf for MaxPhysAddr. KVM allows this to
         // easily be overridden by the hypervisor and defaults it very
@@ -106,16 +106,31 @@ impl KvmVm {
                 entry.eax |= nub_host_common::layout::MAX_GPA.ilog2() + 1;
             }
         }
-        vcpu_fd
-            .set_cpuid2(&kvm_cpuid)
-            .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
+        let mut vcpu_fds = Vec::with_capacity(vcpu_count.max(1));
+        for vcpu_id in 0..vcpu_count.max(1) {
+            let vcpu_fd = vm_fd
+                .create_vcpu(vcpu_id as u64)
+                .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?;
+            vcpu_fd
+                .set_cpuid2(&kvm_cpuid)
+                .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
+            vcpu_fds.push(vcpu_fd);
+        }
 
-        Ok(Self { vm_fd, vcpu_fd })
+        Ok(Self { vm_fd, vcpu_fds })
+    }
+
+    fn primary_vcpu(&self) -> &VcpuFd {
+        &self.vcpu_fds[0]
+    }
+
+    fn primary_vcpu_mut(&mut self) -> &mut VcpuFd {
+        &mut self.vcpu_fds[0]
     }
 
     /// Run the vCPU once without hardware interrupt support (default path).
     fn run_vcpu_default(&mut self) -> std::result::Result<VmExit, RunVcpuError> {
-        match self.vcpu_fd.run() {
+        match self.primary_vcpu_mut().run() {
             Ok(VcpuExit::Hlt) => Ok(VmExit::Halt()),
             Ok(VcpuExit::IoOut(port, _)) if port == VmAction::Halt as u16 => Ok(VmExit::Halt()),
             Ok(VcpuExit::IoOut(port, data)) => Ok(VmExit::IoOut(port, data.to_vec())),
@@ -152,7 +167,7 @@ impl VirtualMachine for KvmVm {
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
         let kvm_regs = self
-            .vcpu_fd
+            .primary_vcpu()
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;
         Ok((&kvm_regs).into())
@@ -160,7 +175,7 @@ impl VirtualMachine for KvmVm {
 
     fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError> {
         let kvm_regs: kvm_regs = regs.into();
-        self.vcpu_fd
+        self.primary_vcpu()
             .set_regs(&kvm_regs)
             .map_err(|e| RegisterError::SetRegs(e.into()))?;
         Ok(())
@@ -170,7 +185,7 @@ impl VirtualMachine for KvmVm {
         let kvm_fpu: kvm_fpu = fpu.into();
         // Note: On KVM this ignores MXCSR.
         // See https://github.com/torvalds/linux/blob/d358e5254674b70f34c847715ca509e46eb81e6f/arch/x86/kvm/x86.c#L12554-L12599
-        self.vcpu_fd
+        self.primary_vcpu()
             .set_fpu(&kvm_fpu)
             .map_err(|e| RegisterError::SetFpu(e.into()))?;
         Ok(())
@@ -178,7 +193,7 @@ impl VirtualMachine for KvmVm {
 
     fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError> {
         let kvm_sregs: kvm_sregs = sregs.into();
-        self.vcpu_fd
+        self.primary_vcpu()
             .set_sregs(&kvm_sregs)
             .map_err(|e| RegisterError::SetSregs(e.into()))?;
         Ok(())

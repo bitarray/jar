@@ -19,7 +19,7 @@ use javm_cap::{Cap, DataCap, Key, NUM_REGS};
 
 #[test]
 fn test_bin_smoke_returns_42() {
-    let mut nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
+    let nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
     let bytes = nub.call_raw(FN_ID_TEST_SMOKE, &[]).expect("smoke rpc");
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(&bytes);

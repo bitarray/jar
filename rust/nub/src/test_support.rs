@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 
-use crate::{Backend, HyperlightBlob, HyperlightNubGuard, Nub};
+use crate::{Backend, HyperlightBlob, HyperlightNubGuard, Nub, NubOptions};
 
 const TESTS_BLOB_PATH: &str = env!("NUB_ARCH_X86_TESTS_BLOB");
 const BENCHES_BLOB_PATH: &str = env!("NUB_ARCH_X86_BENCHES_BLOB");
@@ -27,10 +27,17 @@ impl Nub {
     /// [`Nub::hyperlight`] plus the test-only guest functions
     /// (whose FN_IDs live in [`nub_arch_x86::test_abi`]).
     pub fn hyperlight_tests() -> Result<HyperlightNubGuard> {
-        Self::hyperlight_with_blob(HyperlightBlob {
-            label: "test",
-            path: TESTS_BLOB_PATH,
-        })
+        Self::hyperlight_tests_with_options(NubOptions::default())
+    }
+
+    pub fn hyperlight_tests_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
+        Self::hyperlight_with_blob(
+            HyperlightBlob {
+                label: "test",
+                path: TESTS_BLOB_PATH,
+            },
+            options,
+        )
     }
 
     /// Borrow the Hyperlight-backed singleton running the
@@ -38,18 +45,30 @@ impl Nub {
     /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in
     /// [`nub_arch_x86::test_abi`]).
     pub fn hyperlight_benches() -> Result<HyperlightNubGuard> {
-        Self::hyperlight_with_blob(HyperlightBlob {
-            label: "bench",
-            path: BENCHES_BLOB_PATH,
-        })
+        Self::hyperlight_benches_with_options(NubOptions::default())
+    }
+
+    pub fn hyperlight_benches_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
+        Self::hyperlight_with_blob(
+            HyperlightBlob {
+                label: "bench",
+                path: BENCHES_BLOB_PATH,
+            },
+            options,
+        )
     }
 
     /// Raw RPC dispatch. Sends `payload` to the guest's `fn_id`
     /// handler and returns the response bytes verbatim. Test/bench
     /// callers use this for FN_IDs not exposed through the typed
     /// API. Returns `Err` for the Local backend (no guest to call).
-    pub fn call_raw(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
-        match &mut self.backend {
+    pub fn call_raw(&self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Hyperlight(h) => h
                 .sandbox
                 .call_raw(fn_id, payload)

@@ -52,7 +52,7 @@ fn expected_return(depth: u64) -> u64 {
 fn recomp_run(depth: u64) -> (u64, u64) {
     let mut nub = javm_bench::nub_hyperlight_lock();
     let top = javm_bench::build_sub_vm_top(&mut nub, BLOB);
-    javm_bench::invoke_sub_vm_gas(&mut nub, &top, depth)
+    javm_bench::invoke_sub_vm_gas(&nub, &top, depth)
 }
 
 #[test]

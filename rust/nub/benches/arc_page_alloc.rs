@@ -29,7 +29,7 @@ fn bench(c: &mut Criterion) {
         group.throughput(Throughput::Elements(u64::from(n)));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
-                let mut nub = Nub::hyperlight_benches().expect("bench guest binary");
+                let nub = Nub::hyperlight_benches().expect("bench guest binary");
                 let payload = n.to_le_bytes();
                 let bytes = nub
                     .call_raw(FN_ID_BENCH_ARC_PAGE_ALLOC, &payload)

@@ -20,9 +20,12 @@
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Mutex, MutexGuard};
+use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use anyhow::Result;
 use javm_cap::{
@@ -75,61 +78,149 @@ pub(crate) struct HyperlightBlob {
 
 struct HyperlightSingleton {
     blob: HyperlightBlob,
+    options: NubOptions,
     nub: Nub,
 }
 
 static HYPERLIGHT_NUB: Mutex<Option<HyperlightSingleton>> = Mutex::new(None);
 
-/// Guard for the process-wide Hyperlight-backed [`Nub`].
-///
-/// The KVM backend maps the guest at fixed host virtual addresses, so the high
-/// level `nub` API exposes exactly one live Hyperlight sandbox per process. The
-/// guard serializes access to that singleton and dereferences to [`Nub`] for the
-/// normal publish/invoke methods.
-///
-/// TODO(parallel-nub): future parallel execution should keep this single host
-/// Nub and schedule parallel work inside the guest microkernel, not by creating
-/// multiple KVM sandboxes in one host process.
-pub struct HyperlightNubGuard {
-    guard: MutexGuard<'static, Option<HyperlightSingleton>>,
-}
-
-impl Deref for HyperlightNubGuard {
-    type Target = Nub;
-
-    fn deref(&self) -> &Self::Target {
-        &self
-            .guard
-            .as_ref()
-            .expect("Hyperlight Nub singleton initialized")
-            .nub
-    }
-}
-
-impl DerefMut for HyperlightNubGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .guard
-            .as_mut()
-            .expect("Hyperlight Nub singleton initialized")
-            .nub
-    }
-}
+/// Compatibility alias for older tests/benches that named the returned
+/// Hyperlight singleton borrow. `Nub` is now a cloneable handle; synchronization
+/// lives inside the handle instead of in an outer mutex guard.
+pub type HyperlightNubGuard = Nub;
 
 /// Uniform handle to the nub microkernel.
+#[derive(Clone)]
 pub struct Nub {
-    backend: Backend,
+    inner: Arc<NubInner>,
+}
+
+struct NubInner {
+    backend: Mutex<Backend>,
     /// The kernel-maintained gas meter mapping (`meter_key -> remaining gas`).
     /// The interim "static meter mapping" of the kernel-assisted GasMeter
     /// design — a later spec change moves it behind a YieldCatcher. At top-level
     /// invoke the host resolves the running Instance's primary usable gas slot
     /// (first non-empty valid `Gas{meter_key}`), seeds the run from this map
     /// when non-zero, and writes the remaining primary balance back here.
-    meters: HashMap<Key, u64>,
+    meters: Mutex<HashMap<Key, u64>>,
     /// The kernel-maintained storage quota mapping (`quota_key -> remaining`).
     /// Symmetric to [`Self::meters`]; quota *charging* is not yet wired (V1),
     /// so this is seeded/observed but not yet debited per dirty page.
-    quotas: HashMap<Key, u64>,
+    quotas: Mutex<HashMap<Key, u64>>,
+    /// Host-side guard for top-level invokes that seed from the same kernel gas
+    /// meter. The first parallel milestone rejects concurrent reuse instead of
+    /// racing two writers on one balance.
+    in_flight_meters: Mutex<BTreeSet<Key>>,
+    next_job_id: AtomicU64,
+}
+
+/// Options used when constructing the process-wide Hyperlight Nub singleton.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NubOptions {
+    /// Fixed vCPU pool size for the backing sandbox. The current hot path still
+    /// enters lane 0; the value is plumbed through the host substrate so the
+    /// multi-lane worker ABI can attach to the same stable pool.
+    pub vcpu_count: usize,
+}
+
+impl NubOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_vcpu_count(mut self, vcpu_count: usize) -> Self {
+        self.vcpu_count = vcpu_count.max(1);
+        self
+    }
+}
+
+impl Default for NubOptions {
+    fn default() -> Self {
+        let default = thread::available_parallelism()
+            .map(NonZeroUsize::get)
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let vcpu_count = std::env::var("JAR_NUB_VCPUS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(default);
+        Self { vcpu_count }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvokeRequest {
+    pub instance_hash: AbiCapHash,
+    pub endpoint_idx: u8,
+    pub args: [u64; 4],
+    pub initial_gas: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InvokeJobId(pub u64);
+
+pub struct InvokeJob {
+    id: InvokeJobId,
+    state: Arc<InvokeJobState>,
+}
+
+struct InvokeJobState {
+    result: Mutex<Option<Result<InvocationResult, String>>>,
+    ready: Condvar,
+}
+
+impl InvokeJob {
+    pub fn id(&self) -> InvokeJobId {
+        self.id
+    }
+
+    pub fn try_wait(&self) -> Option<Result<InvocationResult>> {
+        let guard = self
+            .state
+            .result
+            .lock()
+            .expect("InvokeJob result mutex poisoned");
+        guard.as_ref().map(|r| match r {
+            Ok(v) => Ok(*v),
+            Err(e) => Err(anyhow::anyhow!(e.clone())),
+        })
+    }
+
+    pub fn wait(self) -> Result<InvocationResult> {
+        let mut guard = self
+            .state
+            .result
+            .lock()
+            .expect("InvokeJob result mutex poisoned");
+        while guard.is_none() {
+            guard = self
+                .state
+                .ready
+                .wait(guard)
+                .expect("InvokeJob result mutex poisoned");
+        }
+        match guard.take().expect("checked is_some") {
+            Ok(v) => Ok(v),
+            Err(e) => Err(anyhow::anyhow!(e)),
+        }
+    }
+}
+
+impl InvokeJobState {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, result: Result<InvocationResult, String>) {
+        let mut guard = self.result.lock().expect("InvokeJob result mutex poisoned");
+        *guard = Some(result);
+        self.ready.notify_all();
+    }
 }
 
 enum Backend {
@@ -167,30 +258,49 @@ impl Nub {
     /// Construct a Nub backed by the in-process [`LocalArch`].
     pub fn new_local() -> Self {
         Self {
-            backend: Backend::Local {
-                kernel: Kernel::new(LocalArch::new()),
-                cache: CacheDirectory::new(),
-            },
-            meters: HashMap::new(),
-            quotas: HashMap::new(),
+            inner: Arc::new(NubInner {
+                backend: Mutex::new(Backend::Local {
+                    kernel: Kernel::new(LocalArch::new()),
+                    cache: CacheDirectory::new(),
+                }),
+                meters: Mutex::new(HashMap::new()),
+                quotas: Mutex::new(HashMap::new()),
+                in_flight_meters: Mutex::new(BTreeSet::new()),
+                next_job_id: AtomicU64::new(1),
+            }),
         }
     }
 
     /// Borrow the process-wide Hyperlight-backed Nub loaded from the
     /// `nub-arch-x86` guest blob.
     pub fn hyperlight() -> Result<HyperlightNubGuard> {
-        Self::hyperlight_with_blob(HyperlightBlob {
-            label: "production",
-            path: NUB_ARCH_X86_BLOB_PATH,
-        })
+        Self::hyperlight_with_options(NubOptions::default())
     }
 
-    pub(crate) fn hyperlight_with_blob(blob: HyperlightBlob) -> Result<HyperlightNubGuard> {
+    pub fn hyperlight_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
+        Self::hyperlight_with_blob(
+            HyperlightBlob {
+                label: "production",
+                path: NUB_ARCH_X86_BLOB_PATH,
+            },
+            options,
+        )
+    }
+
+    pub(crate) fn hyperlight_with_blob(blob: HyperlightBlob, options: NubOptions) -> Result<Nub> {
         let mut guard = HYPERLIGHT_NUB
             .lock()
             .map_err(|_| anyhow::anyhow!("Hyperlight Nub singleton mutex poisoned"))?;
         match guard.as_ref() {
-            Some(existing) if existing.blob.path == blob.path => {}
+            Some(existing) if existing.blob.path == blob.path && existing.options == options => {}
+            Some(existing) if existing.blob.path == blob.path => {
+                return Err(anyhow::anyhow!(
+                    "Hyperlight Nub singleton already initialized with {} vCPU(s); \
+                     cannot reconfigure it to {} vCPU(s)",
+                    existing.options.vcpu_count,
+                    options.vcpu_count,
+                ));
+            }
             Some(existing) => {
                 return Err(anyhow::anyhow!(
                     "Hyperlight Nub singleton already initialized with {} guest ({:?}); \
@@ -202,11 +312,15 @@ impl Nub {
                 ));
             }
             None => {
-                let nub = Self::create_hyperlight_with_blob_path(blob.path)?;
-                *guard = Some(HyperlightSingleton { blob, nub });
+                let nub = Self::create_hyperlight_with_blob_path(blob.path, options)?;
+                *guard = Some(HyperlightSingleton { blob, options, nub });
             }
         }
-        Ok(HyperlightNubGuard { guard })
+        Ok(guard
+            .as_ref()
+            .expect("Hyperlight Nub singleton initialized")
+            .nub
+            .clone())
     }
 
     /// Create the backing sandbox for the process-wide Hyperlight singleton
@@ -214,8 +328,9 @@ impl Nub {
     ///
     /// This is intentionally private: high-level callers must go through the
     /// process singleton returned by [`Self::hyperlight`].
-    fn create_hyperlight_with_blob_path(path: &str) -> Result<Self> {
+    fn create_hyperlight_with_blob_path(path: &str, options: NubOptions) -> Result<Self> {
         let mut cfg = SandboxConfiguration::default();
+        cfg.set_vcpu_count(options.vcpu_count);
         cfg.set_scratch_size(512 * 1024 * 1024);
         cfg.set_input_data_size(16 * 1024 * 1024);
         cfg.set_output_data_size(16 * 1024 * 1024);
@@ -223,19 +338,28 @@ impl Nub {
         let uninit = UninitializedSandbox::new(GuestBinary::FilePath(path.to_string()), Some(cfg))?;
         let sandbox = uninit.evolve()?;
         Ok(Self {
-            backend: Backend::Hyperlight(Box::new(HyperlightDriver {
-                sandbox,
-                state_root_cache: [0; 32],
-                host_cache: CacheDirectory::new(),
-            })),
-            meters: HashMap::new(),
-            quotas: HashMap::new(),
+            inner: Arc::new(NubInner {
+                backend: Mutex::new(Backend::Hyperlight(Box::new(HyperlightDriver {
+                    sandbox,
+                    state_root_cache: [0; 32],
+                    host_cache: CacheDirectory::new(),
+                }))),
+                meters: Mutex::new(HashMap::new()),
+                quotas: Mutex::new(HashMap::new()),
+                in_flight_meters: Mutex::new(BTreeSet::new()),
+                next_job_id: AtomicU64::new(1),
+            }),
         })
     }
 
     /// Current state root.
     pub fn state_root(&self) -> CapHash {
-        match &self.backend {
+        let backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &*backend {
             Backend::Local { kernel, .. } => kernel.state_root(),
             Backend::Hyperlight(h) => h.state_root_cache,
         }
@@ -244,8 +368,13 @@ impl Nub {
     /// Bench-only: clear the guest's JIT compile cache so the next
     /// `invoke_cached` pays a full recompile. No-op on the Local
     /// backend (which uses the interpreter and has no JIT cache).
-    pub fn evict_jit_all(&mut self) -> Result<()> {
-        match &mut self.backend {
+    pub fn evict_jit_all(&self) -> Result<()> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Local { .. } => Ok(()),
             Backend::Hyperlight(h) => {
                 let _ = h.sandbox.call_raw(FN_ID_NUB_EVICT_JIT_ALL, &[])?;
@@ -257,8 +386,13 @@ impl Nub {
     /// Diagnostic: read the guest's talc allocation counters.
     /// Hyperlight backend only. Requires the `heap-diag` feature.
     #[cfg(feature = "heap-diag")]
-    pub fn heap_stats(&mut self) -> Result<HeapStats> {
-        match &mut self.backend {
+    pub fn heap_stats(&self) -> Result<HeapStats> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Local { .. } => Err(anyhow::anyhow!(
                 "heap_stats: Local backend has no guest heap"
             )),
@@ -287,8 +421,13 @@ impl Nub {
     /// Put a caller-built `Cap` into the active cache. Computes
     /// the cap's content hash and either clones the cap on first put or
     /// bumps refcount on idempotent re-put. Returns the cap's content hash.
-    pub fn put_cap(&mut self, cap: &javm_cap::Cap) -> Result<AbiCapHash> {
-        match &mut self.backend {
+    pub fn put_cap(&self, cap: &javm_cap::Cap) -> Result<AbiCapHash> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Local { cache, .. } => cache
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
@@ -319,8 +458,13 @@ impl Nub {
     /// table built with a different SIMD `Group` width than the host's,
     /// so a cross-binary deref is unsound — see
     /// `nub-host-kvm::MultiUseSandbox::published_blobs`.)
-    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
-        match &mut self.backend {
+    pub fn put_cap_with_hash(&self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Local { cache, .. } => cache
                 .put_cap_with_hash(hash, cap)
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
@@ -337,23 +481,45 @@ impl Nub {
 
     /// Set the kernel gas meter `meter_key` to `value`; returns the previous
     /// value (0 if absent). The chain-side topup / harvest primitive.
-    pub fn set_meter(&mut self, meter_key: Key, value: u64) -> u64 {
-        self.meters.insert(meter_key, value).unwrap_or(0)
+    pub fn set_meter(&self, meter_key: Key, value: u64) -> u64 {
+        self.inner
+            .meters
+            .lock()
+            .expect("Nub meter mutex poisoned")
+            .insert(meter_key, value)
+            .unwrap_or(0)
     }
 
     /// Read the kernel gas meter `meter_key` (0 if absent).
     pub fn get_meter(&self, meter_key: &Key) -> u64 {
-        self.meters.get(meter_key).copied().unwrap_or(0)
+        self.inner
+            .meters
+            .lock()
+            .expect("Nub meter mutex poisoned")
+            .get(meter_key)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set the kernel storage quota `quota_key`; returns the previous value.
-    pub fn set_quota(&mut self, quota_key: Key, value: u64) -> u64 {
-        self.quotas.insert(quota_key, value).unwrap_or(0)
+    pub fn set_quota(&self, quota_key: Key, value: u64) -> u64 {
+        self.inner
+            .quotas
+            .lock()
+            .expect("Nub quota mutex poisoned")
+            .insert(quota_key, value)
+            .unwrap_or(0)
     }
 
     /// Read the kernel storage quota `quota_key` (0 if absent).
     pub fn get_quota(&self, quota_key: &Key) -> u64 {
-        self.quotas.get(quota_key).copied().unwrap_or(0)
+        self.inner
+            .quotas
+            .lock()
+            .expect("Nub quota mutex poisoned")
+            .get(quota_key)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Resolve the running Instance's primary usable gas `meter_key` from its
@@ -362,11 +528,39 @@ impl Nub {
     /// is only for budget seeding; guest-side execution still performs the strict
     /// invalid-slot checks.
     fn resolve_gas_meter_key(&self, instance_hash: AbiCapHash) -> Option<Key> {
-        let cache = match &self.backend {
+        let backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        let cache = match &*backend {
             Backend::Local { cache, .. } => cache,
             Backend::Hyperlight(h) => &h.host_cache,
         };
         resolve_meter_key_from(cache, instance_hash)
+    }
+
+    /// Submit an invocation to the singleton Nub and return a job handle. This
+    /// compatibility implementation uses a host worker thread per submitted
+    /// job; the KVM backend still serializes at the sandbox boundary until the
+    /// guest multi-lane worker ABI lands.
+    pub fn submit_invoke(&self, request: InvokeRequest) -> Result<InvokeJob> {
+        let id = InvokeJobId(self.inner.next_job_id.fetch_add(1, Ordering::Relaxed));
+        let state = Arc::new(InvokeJobState::new());
+        let worker_state = state.clone();
+        let nub = self.clone();
+        thread::Builder::new()
+            .name(format!("nub-invoke-{}", id.0))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    nub.invoke_request_blocking(request)
+                }))
+                .map_err(|_| "invoke worker panicked".to_string())
+                .and_then(|r| r.map_err(|e| format!("{e:#}")));
+                worker_state.complete(result);
+            })
+            .map_err(|e| anyhow::anyhow!("submit_invoke: spawn worker: {e}"))?;
+        Ok(InvokeJob { id, state })
     }
 
     /// Invoke a previously-published `Cap::Instance` by hash. V0 args
@@ -379,20 +573,62 @@ impl Nub {
     /// exit. Otherwise the call-supplied `initial_gas` is used (and the meter is
     /// left untouched), preserving the bare-budget path.
     pub fn invoke_cached(
-        &mut self,
+        &self,
         instance_hash: AbiCapHash,
         endpoint_idx: u8,
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        let meter_key = self.resolve_gas_meter_key(instance_hash);
+        self.invoke_request_blocking(InvokeRequest {
+            instance_hash,
+            endpoint_idx,
+            args,
+            initial_gas,
+        })
+    }
+
+    fn invoke_request_blocking(&self, request: InvokeRequest) -> Result<InvocationResult> {
+        let meter_key = self.resolve_gas_meter_key(request.instance_hash);
+        let meter_balance = meter_key.as_ref().map(|k| self.get_meter(k)).unwrap_or(0);
         let (budget, used_meter) = match &meter_key {
-            Some(k) if self.get_meter(k) > 0 => (self.get_meter(k), true),
-            _ => (initial_gas, false),
+            Some(_) if meter_balance > 0 => (meter_balance, true),
+            _ => (request.initial_gas, false),
         };
-        let result = self.invoke_cached_raw(instance_hash, endpoint_idx, args, budget)?;
+
+        let reserved_meter = if used_meter { meter_key.clone() } else { None };
+        if let Some(k) = &reserved_meter {
+            let mut in_flight = self
+                .inner
+                .in_flight_meters
+                .lock()
+                .expect("Nub meter reservation mutex poisoned");
+            if !in_flight.insert(k.clone()) {
+                return Err(anyhow::anyhow!(
+                    "invoke_cached: gas meter is already in flight"
+                ));
+            }
+        }
+
+        let result = self.invoke_cached_raw(
+            request.instance_hash,
+            request.endpoint_idx,
+            request.args,
+            budget,
+        );
+        if let Some(k) = &reserved_meter {
+            self.inner
+                .in_flight_meters
+                .lock()
+                .expect("Nub meter reservation mutex poisoned")
+                .remove(k);
+        }
+        let result = result?;
         if used_meter && let Some(k) = meter_key {
-            self.meters.insert(k, result.gas_remaining);
+            self.inner
+                .meters
+                .lock()
+                .expect("Nub meter mutex poisoned")
+                .insert(k, result.gas_remaining);
         }
         Ok(result)
     }
@@ -400,13 +636,18 @@ impl Nub {
     /// The backend dispatch for [`Self::invoke_cached`], with the gas budget
     /// already resolved (meter-seeded or call-supplied).
     fn invoke_cached_raw(
-        &mut self,
+        &self,
         instance_hash: AbiCapHash,
         endpoint_idx: u8,
         args: [u64; 4],
         initial_gas: u64,
     ) -> Result<InvocationResult> {
-        match &mut self.backend {
+        let mut backend = self
+            .inner
+            .backend
+            .lock()
+            .expect("Nub backend mutex poisoned");
+        match &mut *backend {
             Backend::Local { cache, .. } => {
                 // Resolve the instance + image from the in-process
                 // cache and drive the PVM2 (RISC-V) interpreter.

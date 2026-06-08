@@ -52,7 +52,9 @@ impl HyperlightVm {
         type VmType = Box<dyn VirtualMachine>;
 
         let vm: VmType = match get_available_hypervisor() {
-            Some(HypervisorType::Kvm) => Box::new(KvmVm::new().map_err(VmError::CreateVm)?),
+            Some(HypervisorType::Kvm) => {
+                Box::new(KvmVm::new(config.get_vcpu_count()).map_err(VmError::CreateVm)?)
+            }
             None => return Err(CreateHyperlightVmError::NoHypervisorFound),
         };
 

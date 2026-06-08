@@ -94,7 +94,7 @@ fn recomp_traps_on_derive_spawn_into_pinned() {
     // JIT codegen ABI: `ExitReason::Trap` surfaces as exit_reason 7.
     const EXIT_TRAP: u32 = 7;
 
-    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
+    let nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     let child_cap = Cap::image_with_slots(&child_image(), &[], &[]).expect("child image");
     let child_hash = nub.put_cap(&child_cap).expect("put child image");

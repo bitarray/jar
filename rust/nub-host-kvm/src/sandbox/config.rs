@@ -55,6 +55,10 @@ pub struct SandboxConfiguration {
     interrupt_vcpu_sigrtmin_offset: u8,
     /// How much writable memory to offer the guest
     scratch_size: usize,
+    /// Fixed vCPU pool size for this sandbox. The current call_raw control path
+    /// uses vCPU 0; future parallel invoke lanes consume the remaining stable
+    /// pool without resizing the VM.
+    vcpu_count: usize,
 }
 
 impl SandboxConfiguration {
@@ -83,6 +87,7 @@ impl SandboxConfiguration {
         output_data_size: usize,
         heap_size_override: Option<u64>,
         scratch_size: usize,
+        vcpu_count: usize,
         interrupt_retry_delay: Duration,
         interrupt_vcpu_sigrtmin_offset: u8,
     ) -> Self {
@@ -91,6 +96,7 @@ impl SandboxConfiguration {
             output_data_size: max(output_data_size, Self::MIN_OUTPUT_SIZE),
             heap_size_override: heap_size_override.unwrap_or(0),
             scratch_size,
+            vcpu_count: vcpu_count.max(1),
             interrupt_retry_delay,
             interrupt_vcpu_sigrtmin_offset,
         }
@@ -174,6 +180,15 @@ impl SandboxConfiguration {
         self.scratch_size = scratch_size;
     }
 
+    /// Set the fixed vCPU pool size for this sandbox.
+    pub fn set_vcpu_count(&mut self, vcpu_count: usize) {
+        self.vcpu_count = vcpu_count.max(1);
+    }
+
+    pub(crate) fn get_vcpu_count(&self) -> usize {
+        self.vcpu_count
+    }
+
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn heap_size_override_opt(&self) -> Option<u64> {
         (self.heap_size_override > 0).then_some(self.heap_size_override)
@@ -196,6 +211,7 @@ impl Default for SandboxConfiguration {
             Self::DEFAULT_OUTPUT_SIZE,
             None,
             Self::DEFAULT_SCRATCH_SIZE,
+            1,
             Self::DEFAULT_INTERRUPT_RETRY_DELAY,
             Self::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
         )
