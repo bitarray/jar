@@ -115,6 +115,38 @@ struct NubInner {
     next_job_id: AtomicU64,
 }
 
+struct MeterReservation {
+    inner: Arc<NubInner>,
+    key: Key,
+}
+
+impl MeterReservation {
+    fn reserve(inner: Arc<NubInner>, key: Key) -> Result<Self> {
+        {
+            let mut in_flight = inner
+                .in_flight_meters
+                .lock()
+                .expect("Nub meter reservation mutex poisoned");
+            if !in_flight.insert(key.clone()) {
+                return Err(anyhow::anyhow!(
+                    "invoke_cached: gas meter is already in flight"
+                ));
+            }
+        }
+        Ok(Self { inner, key })
+    }
+}
+
+impl Drop for MeterReservation {
+    fn drop(&mut self) {
+        self.inner
+            .in_flight_meters
+            .lock()
+            .expect("Nub meter reservation mutex poisoned")
+            .remove(&self.key);
+    }
+}
+
 /// Options used when constructing the process-wide Hyperlight Nub singleton.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NubOptions {
@@ -613,19 +645,14 @@ impl Nub {
             _ => (request.initial_gas, false),
         };
 
-        let reserved_meter = if used_meter { meter_key.clone() } else { None };
-        if let Some(k) = &reserved_meter {
-            let mut in_flight = self
-                .inner
-                .in_flight_meters
-                .lock()
-                .expect("Nub meter reservation mutex poisoned");
-            if !in_flight.insert(k.clone()) {
-                return Err(anyhow::anyhow!(
-                    "invoke_cached: gas meter is already in flight"
-                ));
-            }
-        }
+        let _meter_reservation = if used_meter {
+            meter_key
+                .clone()
+                .map(|k| MeterReservation::reserve(self.inner.clone(), k))
+                .transpose()?
+        } else {
+            None
+        };
 
         let result = self.invoke_cached_raw(
             job_id,
@@ -634,13 +661,6 @@ impl Nub {
             request.args,
             budget,
         );
-        if let Some(k) = &reserved_meter {
-            self.inner
-                .in_flight_meters
-                .lock()
-                .expect("Nub meter reservation mutex poisoned")
-                .remove(k);
-        }
         let result = result?;
         if used_meter && let Some(k) = meter_key {
             self.inner
@@ -777,4 +797,27 @@ fn resolve_meter_key_from(cache: &CacheDirectory, instance_hash: AbiCapHash) -> 
         return Some(key_from_regs(g.regs[0], g.regs[1]));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meter_reservation_rejects_duplicate_and_releases_on_drop() {
+        let nub = Nub::new_local();
+        let key = Key::from(&[0xCA, 0xFE][..]);
+
+        let first =
+            MeterReservation::reserve(nub.inner.clone(), key.clone()).expect("first reservation");
+        assert!(
+            MeterReservation::reserve(nub.inner.clone(), key.clone()).is_err(),
+            "a duplicate in-flight meter reservation must be rejected"
+        );
+
+        drop(first);
+        let second = MeterReservation::reserve(nub.inner.clone(), key)
+            .expect("reservation should be released on drop");
+        drop(second);
+    }
 }
