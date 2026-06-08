@@ -20,12 +20,12 @@
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
 use javm_cap::{
@@ -113,6 +113,8 @@ struct NubInner {
     /// racing two writers on one balance.
     in_flight_meters: Mutex<BTreeSet<Key>>,
     next_job_id: AtomicU64,
+    invoke_executor: Arc<InvokeExecutor>,
+    invoke_worker_count: usize,
 }
 
 struct MeterReservation {
@@ -203,6 +205,24 @@ struct InvokeJobState {
     ready: Condvar,
 }
 
+struct QueuedInvoke {
+    nub: Nub,
+    id: InvokeJobId,
+    request: InvokeRequest,
+    state: Arc<InvokeJobState>,
+}
+
+struct InvokeExecutor {
+    state: Mutex<InvokeExecutorState>,
+    ready: Condvar,
+    handles: Mutex<Vec<JoinHandle<()>>>,
+}
+
+struct InvokeExecutorState {
+    queue: VecDeque<QueuedInvoke>,
+    stopping: bool,
+}
+
 impl InvokeJob {
     pub fn id(&self) -> InvokeJobId {
         self.id
@@ -255,6 +275,119 @@ impl InvokeJobState {
     }
 }
 
+impl InvokeExecutor {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(InvokeExecutorState {
+                queue: VecDeque::new(),
+                stopping: false,
+            }),
+            ready: Condvar::new(),
+            handles: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn ensure_started(self: &Arc<Self>, worker_count: usize) -> Result<()> {
+        let mut handles = self
+            .handles
+            .lock()
+            .expect("InvokeExecutor handles mutex poisoned");
+        if !handles.is_empty() {
+            return Ok(());
+        }
+
+        for worker in 0..worker_count.max(1) {
+            let executor = self.clone();
+            let handle = thread::Builder::new()
+                .name(format!("nub-invoke-worker-{worker}"))
+                .spawn(move || executor.worker_loop())
+                .map_err(|e| anyhow::anyhow!("submit_invoke: spawn worker: {e}"))?;
+            handles.push(handle);
+        }
+        Ok(())
+    }
+
+    fn enqueue(&self, job: QueuedInvoke) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("InvokeExecutor state mutex poisoned");
+        if state.stopping {
+            return Err(anyhow::anyhow!(
+                "submit_invoke: Nub invoke executor is stopping"
+            ));
+        }
+        state.queue.push_back(job);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    fn worker_loop(self: Arc<Self>) {
+        while let Some(job) = self.next_job() {
+            let id = job.id.0;
+            let nub = job.nub;
+            let request = job.request;
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                nub.invoke_request_blocking(request, id)
+            }))
+            .map_err(|_| "invoke worker panicked".to_string())
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            job.state.complete(result);
+        }
+    }
+
+    fn next_job(&self) -> Option<QueuedInvoke> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("InvokeExecutor state mutex poisoned");
+        loop {
+            if let Some(job) = state.queue.pop_front() {
+                return Some(job);
+            }
+            if state.stopping {
+                return None;
+            }
+            state = self
+                .ready
+                .wait(state)
+                .expect("InvokeExecutor state mutex poisoned");
+        }
+    }
+
+    fn stop_and_join(&self) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("InvokeExecutor state mutex poisoned");
+            state.stopping = true;
+            self.ready.notify_all();
+        }
+
+        let current = thread::current().id();
+        let handles = {
+            let mut handles = self
+                .handles
+                .lock()
+                .expect("InvokeExecutor handles mutex poisoned");
+            core::mem::take(&mut *handles)
+        };
+        for handle in handles {
+            if handle.thread().id() == current {
+                continue;
+            }
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for NubInner {
+    fn drop(&mut self) {
+        self.invoke_executor.stop_and_join();
+    }
+}
+
 enum Backend {
     /// In-process backend: the PVM2 (RISC-V) interpreter plus its own
     /// cap directory. `cache` is the source of truth for caps published
@@ -297,6 +430,10 @@ struct HyperlightDriver {
 impl Nub {
     /// Construct a Nub backed by the in-process [`LocalArch`].
     pub fn new_local() -> Self {
+        let invoke_worker_count = thread::available_parallelism()
+            .map(NonZeroUsize::get)
+            .unwrap_or(2)
+            .clamp(2, 8);
         Self {
             inner: Arc::new(NubInner {
                 backend: Mutex::new(Backend::Local {
@@ -307,6 +444,8 @@ impl Nub {
                 quotas: Mutex::new(HashMap::new()),
                 in_flight_meters: Mutex::new(BTreeSet::new()),
                 next_job_id: AtomicU64::new(1),
+                invoke_executor: Arc::new(InvokeExecutor::new()),
+                invoke_worker_count,
             }),
         }
     }
@@ -388,6 +527,8 @@ impl Nub {
                 quotas: Mutex::new(HashMap::new()),
                 in_flight_meters: Mutex::new(BTreeSet::new()),
                 next_job_id: AtomicU64::new(1),
+                invoke_executor: Arc::new(InvokeExecutor::new()),
+                invoke_worker_count: options.vcpu_count.max(1),
             }),
         })
     }
@@ -594,25 +735,21 @@ impl Nub {
         resolve_meter_key_from(cache, instance_hash)
     }
 
-    /// Submit an invocation to the singleton Nub and return a job handle. The
-    /// Hyperlight backend uses a host-side waiter thread for the job while the
-    /// actual guest execution runs on the sandbox's fixed vCPU worker lanes.
+    /// Submit an invocation to the singleton Nub and return a job handle. Jobs
+    /// are queued onto a fixed Nub-owned host executor; Hyperlight execution then
+    /// runs on the sandbox's fixed vCPU worker lanes.
     pub fn submit_invoke(&self, request: InvokeRequest) -> Result<InvokeJob> {
         let id = InvokeJobId(self.inner.next_job_id.fetch_add(1, Ordering::Relaxed));
         let state = Arc::new(InvokeJobState::new());
-        let worker_state = state.clone();
-        let nub = self.clone();
-        thread::Builder::new()
-            .name(format!("nub-invoke-{}", id.0))
-            .spawn(move || {
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    nub.invoke_request_blocking(request, id.0)
-                }))
-                .map_err(|_| "invoke worker panicked".to_string())
-                .and_then(|r| r.map_err(|e| format!("{e:#}")));
-                worker_state.complete(result);
-            })
-            .map_err(|e| anyhow::anyhow!("submit_invoke: spawn worker: {e}"))?;
+        self.inner
+            .invoke_executor
+            .ensure_started(self.inner.invoke_worker_count)?;
+        self.inner.invoke_executor.enqueue(QueuedInvoke {
+            nub: self.clone(),
+            id,
+            request,
+            state: state.clone(),
+        })?;
         Ok(InvokeJob { id, state })
     }
 
