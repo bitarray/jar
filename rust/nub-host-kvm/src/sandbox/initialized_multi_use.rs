@@ -150,7 +150,7 @@ impl MultiUseSandbox {
     /// Serialized control-plane call on a selected vCPU lane. This still uses
     /// the legacy shared input/output rings and therefore must not be used as
     /// the concurrent invoke mechanism; it exists to validate and bootstrap
-    /// non-primary lanes before the shared job queue lands.
+    /// non-primary lanes. Concurrent invokes use the per-lane worker slots.
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
     pub fn call_raw_on_vcpu(
         &self,
