@@ -350,7 +350,18 @@ impl MultiUseSandbox {
         let vcpu_count = self.vcpu_count()?;
         let mut handles = Vec::with_capacity(vcpu_count);
         for lane in 0..vcpu_count {
-            handles.push(self.start_invoke_worker_lane(lane)?);
+            match self.start_invoke_worker_lane(lane) {
+                Ok(handle) => handles.push(handle),
+                Err(start_err) => {
+                    if let Err(cleanup_err) = self.stop_started_invoke_worker_handles(handles) {
+                        return Err(crate::new_error!(
+                            "failed to start invoke worker pool: {start_err}; \
+                             additionally failed to stop partially started workers: {cleanup_err}"
+                        ));
+                    }
+                    return Err(start_err);
+                }
+            }
         }
         let workers = Arc::new(ParallelInvokeWorkers::new(vcpu_count, handles));
         *guard = Some(workers.clone());
@@ -456,6 +467,22 @@ impl MultiUseSandbox {
             }
             thread::yield_now();
         }
+    }
+
+    fn stop_started_invoke_worker_handles(&self, handles: Vec<InvokeWorkerHandle>) -> Result<()> {
+        for (lane, handle) in handles.into_iter().enumerate() {
+            {
+                let mem_mgr = self
+                    .mem_mgr
+                    .lock()
+                    .map_err(|_| crate::new_error!("sandbox memory manager mutex poisoned"))?;
+                mem_mgr.write_parallel_invoke_status(lane, PARALLEL_INVOKE_STATUS_STOP)?;
+            }
+            join_invoke_worker_handle(lane, handle, Duration::from_secs(5))?
+                .map_err(|e| crate::new_error!("parallel invoke worker lane {lane}: {e}"))?;
+        }
+
+        Ok(())
     }
 
     /// Publish a [`Cap`] into the guest's heap-resident cap
@@ -634,41 +661,39 @@ impl ParallelInvokeWorkers {
     }
 
     fn join_lane(&self, lane: usize, timeout: Duration) -> Result<InvokeWorkerResult> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            {
-                let handles = self
-                    .handles
-                    .lock()
-                    .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?;
-                let Some(Some(handle)) = handles.get(lane) else {
-                    return Ok(Ok(()));
-                };
-                if handle.is_finished() {
-                    break;
-                }
-            }
-            if Instant::now() >= deadline {
-                return Err(crate::new_error!(
-                    "parallel invoke worker lane {} timed out during stop",
-                    lane
-                ));
-            }
-            thread::yield_now();
-        }
-
         let handle = self
             .handles
             .lock()
             .map_err(|_| crate::new_error!("parallel worker mutex poisoned"))?
             .get_mut(lane)
-            .and_then(Option::take)
-            .ok_or_else(|| crate::new_error!("parallel invoke worker lane {} missing", lane))?;
-        Ok(match handle.join() {
-            Ok(result) => result,
-            Err(_) => Err("worker thread panicked".to_string()),
-        })
+            .and_then(Option::take);
+        let Some(handle) = handle else {
+            return Ok(Ok(()));
+        };
+        join_invoke_worker_handle(lane, handle, timeout)
     }
+}
+
+fn join_invoke_worker_handle(
+    lane: usize,
+    handle: InvokeWorkerHandle,
+    timeout: Duration,
+) -> Result<InvokeWorkerResult> {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(crate::new_error!(
+                "parallel invoke worker lane {} timed out during stop",
+                lane
+            ));
+        }
+        thread::yield_now();
+    }
+
+    Ok(match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("worker thread panicked".to_string()),
+    })
 }
 
 impl LaneLease {
