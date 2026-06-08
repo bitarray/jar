@@ -207,3 +207,28 @@ impl InterruptHandle for LinuxInterruptHandle {
         self.dropped.load(Ordering::Acquire)
     }
 }
+
+#[derive(Debug)]
+pub(super) struct MultiLaneInterruptHandle {
+    handles: Vec<std::sync::Arc<dyn InterruptHandle>>,
+}
+
+impl MultiLaneInterruptHandle {
+    pub(super) fn new(handles: Vec<std::sync::Arc<dyn InterruptHandle>>) -> Self {
+        Self { handles }
+    }
+}
+
+impl InterruptHandle for MultiLaneInterruptHandle {
+    fn kill(&self) -> bool {
+        let mut interrupted = false;
+        for handle in &self.handles {
+            interrupted = handle.kill() || interrupted;
+        }
+        interrupted
+    }
+
+    fn dropped(&self) -> bool {
+        self.handles.iter().all(|handle| handle.dropped())
+    }
+}

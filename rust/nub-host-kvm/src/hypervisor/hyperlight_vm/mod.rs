@@ -27,7 +27,7 @@ use crate::hypervisor::virtual_machine::{
     MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VmError, VmExit,
 };
 use crate::hypervisor::virtual_machine::{VcpuLane, VirtualMachine};
-use crate::hypervisor::{InterruptHandle, InterruptHandleImpl};
+use crate::hypervisor::{InterruptHandle, InterruptHandleImpl, MultiLaneInterruptHandle};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::mem::mgr::{SandboxMemoryManager, SnapshotSharedMemory};
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory, SharedMemory};
@@ -446,7 +446,16 @@ impl HyperlightVm {
     }
 
     pub(crate) fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {
-        self.interrupt_handles[VcpuLane::PRIMARY.index()].clone()
+        if self.interrupt_handles.len() == 1 {
+            self.interrupt_handles[VcpuLane::PRIMARY.index()].clone()
+        } else {
+            Arc::new(MultiLaneInterruptHandle::new(
+                self.interrupt_handles
+                    .iter()
+                    .map(|handle| handle.clone() as Arc<dyn InterruptHandle>)
+                    .collect(),
+            ))
+        }
     }
 
     pub(crate) fn clear_cancel(&self) {
