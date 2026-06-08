@@ -8,8 +8,8 @@ use ssz::Decode;
 fn dump(name: &str, blob: &[u8]) {
     let img = Image::from_ssz_bytes(blob).expect("decode");
     println!("=== {} ===", name);
-    println!("code = {} bytes", img.code.len());
-    let pd = predecode(&img.code);
+    println!("code = {} bytes", img.code.len);
+    let pd = predecode(img.code_bytes());
     println!(
         "predecode: {} insts, decode_error_at = {:?}",
         pd.insts.len(),

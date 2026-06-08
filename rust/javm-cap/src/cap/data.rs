@@ -165,6 +165,42 @@ impl PageSlab {
         }
         PageSlab { size, pages }
     }
+
+    /// Build a slab of logical `size` (a [`PAGE_SIZE`] multiple) from sparse
+    /// named pages: `pages` yields `(page_index, content)` for the non-zero
+    /// pages (`content` ≤ `PAGE_SIZE`); every unnamed page is the canonical
+    /// zero page. Reuses `put_page_idx` so the result is the same canonical
+    /// form (all-zero → `Empty`, trailing `Empty` trimmed) a contiguous
+    /// `from_bytes_sized` build would produce — i.e. byte- and hash-identical
+    /// for equivalent logical content. The decode target for
+    /// [`crate::image::DataDesc`].
+    pub fn from_sparse_pages<'a>(
+        size: u64,
+        pages: impl IntoIterator<Item = (u32, &'a [u8])>,
+    ) -> Self {
+        // Mirror `from_bytes_sized`'s size flooring so the two constructors
+        // are equivalent for *every* input — including `size == 0`, which
+        // floors to one `Empty` page rather than a zero-extent slab. A
+        // non-page-multiple `size` rounds up identically. (The deblob
+        // validates `size` is a page multiple, so this only normalizes
+        // degenerate direct-caller input.)
+        let size = size
+            .next_multiple_of(PAGE_SIZE as u64)
+            .max(PAGE_SIZE as u64);
+        let mut slab = PageSlab {
+            size,
+            pages: Vec::new(),
+        };
+        let page_count = slab.page_count();
+        for (page_index, content) in pages {
+            debug_assert!(
+                (page_index as usize) < page_count,
+                "from_sparse_pages: page_index {page_index} >= page_count {page_count}",
+            );
+            slab.put_page_idx(page_index as usize, content);
+        }
+        slab
+    }
 }
 
 impl HashTreeRoot for PageSlab {
@@ -435,6 +471,21 @@ impl DataCap {
     pub fn from_bytes_sized(content: &[u8], target_size: u64) -> Self {
         DataCap {
             backing: Arc::new(PageSlab::from_bytes_sized(content, target_size)),
+            overlay: BTreeMap::new(),
+        }
+    }
+
+    /// Build a clean (overlay-free) `DataCap` from sparse named pages over a
+    /// logical `size`. See [`PageSlab::from_sparse_pages`]. This is the
+    /// decode target for [`crate::image::DataDesc::to_data_cap`]; the result
+    /// is byte- and hash-identical to a contiguous [`Self::from_bytes_sized`]
+    /// of equivalent logical content.
+    pub fn from_sparse_pages<'a>(
+        size: u64,
+        pages: impl IntoIterator<Item = (u32, &'a [u8])>,
+    ) -> Self {
+        DataCap {
+            backing: Arc::new(PageSlab::from_sparse_pages(size, pages)),
             overlay: BTreeMap::new(),
         }
     }

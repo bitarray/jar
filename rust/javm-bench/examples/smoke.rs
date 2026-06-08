@@ -103,7 +103,7 @@ mod imp {
         for w in WORKLOADS {
             eprintln!("=== {} ===", w.name);
             let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
-            eprintln!("  code={}B", img.code.len());
+            eprintln!("  code={}B", img.code.len);
 
             let (er_r, ea_r, rv_r, gas_r) = run_one(w.blob, &mut recomp);
             let (er_i, ea_i, rv_i, gas_i) = run_one(w.blob, &mut interp);

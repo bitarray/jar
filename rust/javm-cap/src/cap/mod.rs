@@ -126,6 +126,17 @@ impl Cap {
         Cap::Data(DataCap::from_bytes_sized(bytes, target_size))
     }
 
+    /// Build a heap `Cap::Data` from a page-granular [`crate::image::DataDesc`]
+    /// over an Image `arena`: each named page is materialized from its `PAGE_SIZE`
+    /// arena window, omitted pages are the canonical zero page. The single
+    /// materialization point for Image data slots; the resulting cap hash
+    /// equals `data_inline_with_size(equivalent_contiguous_content, size)`.
+    /// The caller must have validated the descriptor
+    /// ([`crate::image::DataDesc::validate`]) against `arena.len()`.
+    pub fn data_from_desc(arena: &[u8], desc: &crate::image::DataDesc) -> Self {
+        Cap::Data(desc.to_data_cap(arena))
+    }
+
     /// Build an empty heap `Cap::CNode`. A CNode is an unbounded
     /// hash-keyed map (bounded by storage quota), so there is no
     /// `size_log` to declare.

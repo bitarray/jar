@@ -67,16 +67,9 @@ fn root_meter_self_harvest_via_set_gas_meter() {
     let mut code = Vec::new();
     code.extend_from_slice(&ecalli(OP_HOST_YIELD).to_le_bytes());
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
-    let img = Image {
-        code,
-        endpoints,
-        memory_mappings: Vec::new(),
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
-        yield_receiver_slot: None,
-        gas_slots: vec![Key::from(GAS_SLOT)],
-        quota_slots: Vec::new(),
-    };
+    let mut img = Image::with_code(code);
+    img.endpoints = endpoints;
+    img.gas_slots = vec![Key::from(GAS_SLOT)];
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&img, &[], &[]).expect("image"))
         .expect("put image");

@@ -37,7 +37,7 @@ mod imp {
 
     fn profile_one(name: &str, blob: &[u8]) {
         let image = Image::from_ssz_bytes(blob).expect("decode Image");
-        let code = image.code.as_slice();
+        let code = image.code_bytes();
         // Guest CODE_BASE (where the linker maps the code region).
         let code_base = javm_cap::layout::CODE_BASE;
 

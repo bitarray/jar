@@ -46,8 +46,7 @@ fn rkyv_archive_roundtrip_data_cap() {
 
 #[test]
 fn image_cap_roundtrip_preserves_hash() {
-    let mut img = Image::empty();
-    img.code = vec![0u8, 10u8, 42];
+    let mut img = Image::with_code(vec![0u8, 10u8, 42]);
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
         Key::from(0u8),

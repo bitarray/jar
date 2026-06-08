@@ -217,6 +217,10 @@ pub struct ImageSlotEntry {
 pub enum ImageConvertError {
     #[error("code region {0} bytes exceeds MAX_CODE_SIZE ({1})")]
     CodeTooLarge(usize, u32),
+    #[error("code ref [{0}, {0}+{1}) out of arena bounds (arena {2} bytes)")]
+    CodeRefOutOfRange(u32, u32, usize),
+    #[error("data desc invalid: {0:?}")]
+    DataDesc(crate::image::DataDescError),
     #[error("memory mapping source path empty")]
     SourcePathEmpty,
     #[error("memory mapping source path too deep (steps={0} > MAX_SOURCE_DEPTH)")]
@@ -256,15 +260,41 @@ pub fn image_cap(
     // is checked lazily, at execution); only its size is a structural
     // bound. Checked before the page-aligned copy so an oversized blob
     // is rejected without allocating it.
-    if image.code.len() > crate::layout::MAX_CODE_SIZE as usize {
+    let code_len = image.code.len as usize;
+    if code_len > crate::layout::MAX_CODE_SIZE as usize {
         return Err(ImageConvertError::CodeTooLarge(
-            image.code.len(),
+            code_len,
             crate::layout::MAX_CODE_SIZE,
         ));
     }
+    // The code window `[arena_off, arena_off + len)` must lie within the
+    // arena (untrusted wire input — fail loud, never slice out of range).
+    let code_in_bounds = (image.code.arena_off as usize)
+        .checked_add(code_len)
+        .is_some_and(|end| end <= image.arena.len());
+    if !code_in_bounds {
+        return Err(ImageConvertError::CodeRefOutOfRange(
+            image.code.arena_off,
+            image.code.len,
+            image.arena.len(),
+        ));
+    }
+    // Every pinned/initial data descriptor must reference the arena
+    // soundly (page-aligned, in-bounds, page_index < page_count, canonical
+    // page order) before any downstream materialization slices the arena.
+    for slot in image.pinned_slots.values() {
+        if let crate::image::PinnedCap::Data { desc } = slot {
+            desc.validate(image.arena.len())
+                .map_err(ImageConvertError::DataDesc)?;
+        }
+    }
+    for desc in image.initial_slots.values() {
+        desc.validate(image.arena.len())
+            .map_err(ImageConvertError::DataDesc)?;
+    }
     // Code: page-aligned copy so the kernel can direct-map it RO at
     // `layout::CODE_BASE`.
-    let code = alloc_page_aligned_code(&image.code);
+    let code = alloc_page_aligned_code(image.code_bytes());
 
     // Endpoints: a sparse, sorted `Key -> EndpointDef` association list (no
     // fixed capacity, no dense `entry_pc == 0` sentinel — presence is what

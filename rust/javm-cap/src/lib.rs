@@ -47,7 +47,8 @@ pub use cap::{Cap, CapHash, MAX_SOURCE_DEPTH, NUM_REGS};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
-    Image, InitialDataCap, PinnedCap, chain_extend, chain_genesis, image_content_hash,
+    ArenaPageRef, CodeRef, DataDesc, DataDescError, Image, ImageBuilder, InitialDataCap, PinnedCap,
+    chain_extend, chain_genesis, image_content_hash,
 };
 pub use kernel_image::{ALL_KERNEL_IMAGES, KernelImage, kernel_image_hash, recognize_kernel_image};
 pub use slot::{Key, MAX_KEY_LEN, SlotPath, key_from_regs, key_to_regs};

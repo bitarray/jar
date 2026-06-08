@@ -57,8 +57,7 @@ fn enc(words: &[u32]) -> Vec<u8> {
 }
 
 fn image(code: Vec<u8>) -> Image {
-    let mut img = Image::empty();
-    img.code = code;
+    let mut img = Image::with_code(code);
     img.endpoints.insert(
         Key::from(0u8),
         EndpointDef {

@@ -47,9 +47,8 @@ fn test_bin_smoke_returns_42_on_second_vcpu() {
 }
 
 fn ecalli_image(imm: u32) -> Image {
-    let mut img = Image::empty();
     let instr = (imm << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11;
-    img.code = instr.to_le_bytes().to_vec();
+    let mut img = Image::with_code(instr.to_le_bytes().to_vec());
     let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     endpoints.insert(
         Key::from(0u8),

@@ -9,7 +9,7 @@
 use crate::{Program, SIG_BASE, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
 use javm_cap::abi::SCRATCHPAD_SLOT;
-use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
+use javm_cap::image::{EndpointDef, Image, ImageBuilder, MemoryMapping};
 use javm_cap::slot::{Key, SlotPath};
 use std::collections::BTreeMap;
 
@@ -20,24 +20,18 @@ const WINDOW_SLOT: u32 = 1;
 /// signature epilogue stores the `SIG_BYTES`-byte register file into its head).
 const SIG_REGION_BYTES: u64 = 4096;
 
-/// Map the scratchpad (`slot[0]`) signature region at [`SIG_BASE`] into `img`: an
-/// empty-content `InitialDataCap` of one page. The guest's signature epilogue
-/// CoWs this region during the run; both engines surface its effective bytes as
-/// the run's register signature.
-fn add_signature_region(img: &mut Image) {
+/// Map the scratchpad (`slot[0]`) signature region at [`SIG_BASE`] into the
+/// builder: an empty-content initial data slot of one page. The guest's
+/// signature epilogue CoWs this region during the run; both engines surface its
+/// effective bytes as the run's register signature.
+fn add_signature_region(b: ImageBuilder) -> ImageBuilder {
     let slot = Key::from(SCRATCHPAD_SLOT);
-    img.memory_mappings.push(MemoryMapping {
+    b.mapping(MemoryMapping {
         start: SIG_BASE as u64,
         size: SIG_REGION_BYTES,
         source: SlotPath::root(slot.clone()),
-    });
-    img.initial_slots.insert(
-        slot,
-        InitialDataCap {
-            content: Vec::new(),
-            size: SIG_REGION_BYTES,
-        },
-    );
+    })
+    .initial_data(slot, Vec::new(), SIG_REGION_BYTES)
 }
 
 /// Build an `Image` from raw instruction `words` (+ `ecalli 0` terminator)
@@ -48,31 +42,25 @@ fn add_signature_region(img: &mut Image) {
 pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
     let mut code = encode::enc(words);
     code.extend_from_slice(&encode::enc(&[encode::HALT]));
-    let mut img = Image::empty();
-    img.code = code;
-    img.endpoints.insert(
-        Key::from(0u8),
-        EndpointDef {
-            entry_pc: 0,
-            arg_registers: 0,
-            arg_cnode_size: 0,
-            initial_regs: BTreeMap::new(),
-        },
-    );
     let slot = Key::from((WINDOW_SLOT + 1) as u8);
-    img.memory_mappings.push(MemoryMapping {
-        start: ro_start as u64,
-        size: ro_bytes.len() as u64,
-        source: SlotPath::root(slot.clone()),
-    });
-    img.pinned_slots.insert(
-        slot,
-        PinnedCap::Data {
-            content: ro_bytes.to_vec(),
+    ImageBuilder::new()
+        .code(code)
+        .endpoint(
+            Key::from(0u8),
+            EndpointDef {
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
+            },
+        )
+        .mapping(MemoryMapping {
+            start: ro_start as u64,
             size: ro_bytes.len() as u64,
-        },
-    );
-    img
+            source: SlotPath::root(slot.clone()),
+        })
+        .pinned_data(slot, ro_bytes.to_vec(), ro_bytes.len() as u64)
+        .build()
 }
 
 /// Build an `Image` from raw `words` with **several** pinned read-only data
@@ -83,9 +71,7 @@ pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
 pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
     let mut code = encode::enc(words);
     code.extend_from_slice(&encode::enc(&[encode::HALT]));
-    let mut img = Image::empty();
-    img.code = code;
-    img.endpoints.insert(
+    let mut b = ImageBuilder::new().code(code).endpoint(
         Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
@@ -96,20 +82,15 @@ pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
     );
     for (i, (start, bytes)) in caps.iter().enumerate() {
         let slot = Key::from((WINDOW_SLOT + 1 + i as u32) as u8);
-        img.memory_mappings.push(MemoryMapping {
-            start: *start as u64,
-            size: bytes.len() as u64,
-            source: SlotPath::root(slot.clone()),
-        });
-        img.pinned_slots.insert(
-            slot,
-            PinnedCap::Data {
-                content: bytes.to_vec(),
+        b = b
+            .mapping(MemoryMapping {
+                start: *start as u64,
                 size: bytes.len() as u64,
-            },
-        );
+                source: SlotPath::root(slot.clone()),
+            })
+            .pinned_data(slot, bytes.to_vec(), bytes.len() as u64);
     }
-    img
+    b.build()
 }
 
 /// Run a pre-built `Image` through both engines and compare.
@@ -140,9 +121,7 @@ pub fn image_for(prog: &Program) -> Image {
     let mut code = prog.code_bytes();
     code.extend_from_slice(&encode::enc(&[encode::HALT]));
 
-    let mut img = Image::empty();
-    img.code = code;
-    img.endpoints.insert(
+    let mut b = ImageBuilder::new().code(code).endpoint(
         Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
@@ -151,25 +130,20 @@ pub fn image_for(prog: &Program) -> Image {
             initial_regs: prog.init_regs.clone(),
         },
     );
-    add_signature_region(&mut img);
+    b = add_signature_region(b);
     if let Some(mem) = &prog.init_mem {
         let slot = Key::from((WINDOW_SLOT) as u8);
-        img.memory_mappings.push(MemoryMapping {
-            start: mem.start as u64,
-            size: mem.bytes.len() as u64,
-            source: SlotPath::root(slot.clone()),
-        });
         // Empty content → no overlay; the mapping only sizes the data extent,
         // and the window materializes as ephemeral zero pages on both engines.
-        img.initial_slots.insert(
-            slot,
-            InitialDataCap {
-                content: Vec::new(),
+        b = b
+            .mapping(MemoryMapping {
+                start: mem.start as u64,
                 size: mem.bytes.len() as u64,
-            },
-        );
+                source: SlotPath::root(slot.clone()),
+            })
+            .initial_data(slot, Vec::new(), mem.bytes.len() as u64);
     }
-    img
+    b.build()
 }
 
 /// Interpreter outcome for `prog`.

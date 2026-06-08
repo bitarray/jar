@@ -82,8 +82,8 @@ mod backend {
         let mut pinned_hashes = Vec::new();
         for (slot, pinned) in &image.pinned_slots {
             let h = match pinned {
-                PinnedCap::Data { content, size } => {
-                    let cap = Cap::data_inline_with_size(content, *size);
+                PinnedCap::Data { desc } => {
+                    let cap = Cap::data_from_desc(&image.arena, desc);
                     nub.put_cap(&cap)
                         .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap pinned data: {e}"))
                 }
@@ -92,8 +92,8 @@ mod backend {
             pinned_hashes.push((slot.clone(), h));
         }
         let mut initial_hashes = Vec::new();
-        for (slot, init) in &image.initial_slots {
-            let cap = Cap::data_inline_with_size(&init.content, init.size);
+        for (slot, desc) in &image.initial_slots {
+            let cap = Cap::data_from_desc(&image.arena, desc);
             let h = nub
                 .put_cap(&cap)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap initial data: {e}"));
