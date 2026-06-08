@@ -39,13 +39,9 @@ use nub_kernel::Kernel;
 
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
-use nub_arch_x86_abi::{
-    ArchivedInvocationResult, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_INVOKE_CACHED, InvokePacket,
-};
 pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult, SCRATCHPAD_HEAD_LEN};
+use nub_arch_x86_abi::{FN_ID_NUB_EVICT_JIT_ALL, InvokePacket};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
-
-use rkyv::util::AlignedVec;
 
 /// Snapshot of the guest's talc allocation state. Returned by
 /// [`Nub::heap_stats`].
@@ -883,9 +879,9 @@ impl Nub {
 
         // No host-side pin/unpin — the cap is owned by the guest's
         // heap-resident DIRECTORY; there's nothing for the host to lock against
-        // (the guest doesn't evict). Multi-vCPU sandboxes use the per-lane worker
-        // slots; the single-vCPU case keeps the legacy RPC path so control-only
-        // tests do not start a permanent worker on lane 0.
+        // (the guest doesn't evict). Hyperlight invokes always go through the
+        // fixed per-lane worker pool; serialized `call_raw` remains only for the
+        // control plane and stops idle workers before using the legacy RPC ring.
         let packet = InvokePacket {
             instance_hash,
             endpoint_idx: endpoint_idx as u32,
@@ -894,30 +890,10 @@ impl Nub {
             initial_gas,
         };
 
-        if hyperlight.sandbox.vcpu_count()? > 1 {
-            return hyperlight
-                .sandbox
-                .invoke_cached_parallel(job_id, &packet)
-                .map_err(|e| anyhow::anyhow!("invoke_cached_parallel: {e}"));
-        }
-
-        let result_bytes = hyperlight
+        hyperlight
             .sandbox
-            .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes())?;
-
-        let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
-        aligned.extend_from_slice(&result_bytes);
-        let archived =
-            rkyv::access::<ArchivedInvocationResult, rkyv::rancor::Error>(aligned.as_slice())
-                .map_err(|e| anyhow::anyhow!("rkyv-access InvocationResult: {e}"))?;
-        Ok(InvocationResult {
-            exit_reason: archived.exit_reason.to_native(),
-            exit_arg: archived.exit_arg.to_native(),
-            return_value: archived.return_value.to_native(),
-            gas_remaining: archived.gas_remaining.to_native(),
-            // `[u8; N]` archives byte-identically (u8 has no endianness).
-            scratchpad_head: archived.scratchpad_head,
-        })
+            .invoke_cached_parallel(job_id, &packet)
+            .map_err(|e| anyhow::anyhow!("invoke_cached_parallel: {e}"))
     }
 }
 
