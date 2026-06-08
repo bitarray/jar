@@ -103,7 +103,7 @@ use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
-use crate::execution_lane::ExecutionLane;
+use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::paging;
 use crate::state_cache::CACHE;
@@ -1154,8 +1154,8 @@ impl KernelTask {
 /// Cooperative per-lane scheduler: many task stacks can be resident for one
 /// execution lane, but exactly one task is active on that lane at any instant.
 /// Switching only happens at existing ring-3 exits. Multi-vCPU Hyperlight runs
-/// one worker per lane; cross-lane task migration and work stealing remain
-/// future scheduler work.
+/// one worker per lane; each worker submits into its lane's persistent scheduler.
+/// Cross-lane task migration and work stealing remain future scheduler work.
 struct KernelScheduler {
     lane: ExecutionLane,
     next_task_id: TaskId,
@@ -1222,6 +1222,37 @@ impl KernelScheduler {
     }
 }
 
+struct LaneSchedulerCell {
+    scheduler: spin::Mutex<Option<KernelScheduler>>,
+}
+
+impl LaneSchedulerCell {
+    const fn new() -> Self {
+        Self {
+            scheduler: spin::Mutex::new(None),
+        }
+    }
+}
+
+// SAFETY: a `KernelScheduler` may contain live `FrameRuntime`s, which are
+// lane-affine raw page-table/JIT pointers and deliberately not `Send`. The static
+// table is indexed by lane, and the host owns each lane with exactly one KVM
+// worker thread; the spin lock guards accidental same-lane re-entry. We mark the
+// cell `Sync` without making the scheduler or runtime generally sendable.
+unsafe impl Sync for LaneSchedulerCell {}
+
+static LANE_SCHEDULERS: [LaneSchedulerCell; MAX_EXECUTION_LANES] =
+    [const { LaneSchedulerCell::new() }; MAX_EXECUTION_LANES];
+
+/// Guest-global lane scheduler table. The host owns each lane through one KVM
+/// worker, so the lock is a structural guard rather than a hot contention point.
+fn with_lane_scheduler<R>(lane: ExecutionLane, f: impl FnOnce(&mut KernelScheduler) -> R) -> R {
+    lane.assert_in_range();
+    let mut guard = LANE_SCHEDULERS[lane.index()].scheduler.lock();
+    let scheduler = guard.get_or_insert_with(|| KernelScheduler::new(lane));
+    f(scheduler)
+}
+
 /// Drive the CALL/HALT loop until either the top frame HALTs (clean
 /// exit) or the JIT signals an unrecoverable condition (page fault,
 /// gas exhaustion, ...). See module docs for the loop body.
@@ -1252,9 +1283,10 @@ pub fn run_top_on_lane(
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    let mut scheduler = KernelScheduler::new(lane);
-    let task = scheduler.submit_invoke(instance_hash, endpoint_idx, args, initial_gas)?;
-    scheduler.run_until_result(task)
+    with_lane_scheduler(lane, |scheduler| {
+        let task = scheduler.submit_invoke(instance_hash, endpoint_idx, args, initial_gas)?;
+        scheduler.run_until_result(task)
+    })
 }
 
 #[doc(hidden)]
