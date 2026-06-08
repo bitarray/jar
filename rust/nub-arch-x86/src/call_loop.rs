@@ -92,7 +92,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
@@ -1626,24 +1625,15 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<boo
 /// and each CoWs only the pages it writes, so sharing is sound (single
 /// mutator: each instance's overlay).
 ///
-/// `UnsafeCell<BTreeMap>` mirrors [`crate::jit_cache`]'s compile cache: the
-/// Hyperlight guest is single-threaded, so the `unsafe` is sound and local.
-struct MemCache {
-    inner: UnsafeCell<BTreeMap<CapHash, DataCap>>,
-}
-/// SAFETY: single-threaded guest (Hyperlight serialisation).
-unsafe impl Sync for MemCache {}
-static MEM_CACHE: MemCache = MemCache {
-    inner: UnsafeCell::new(BTreeMap::new()),
-};
+/// Protected by a spin mutex so future multi-vCPU workers can derive/spawn
+/// independent Images without racing the shared clean-backing memo.
+static MEM_CACHE: spin::Mutex<BTreeMap<CapHash, DataCap>> = spin::Mutex::new(BTreeMap::new());
 
 /// Drop every cached clean instance-mem backing. Bench-only (paired with
 /// [`crate::jit_cache::evict_all`]) so a "cold" measurement re-composes;
 /// correctness never needs it (the cache is content-addressed by `image_hash`).
 pub fn evict_mem_cache() {
-    // SAFETY: single-threaded guest; no in-flight call when this RPC fires.
-    let map = unsafe { &mut *MEM_CACHE.inner.get() };
-    map.clear();
+    MEM_CACHE.lock().clear();
 }
 
 /// Build a derived sub-VM's initial `mem` DataCap from its Image. The composed
@@ -1652,18 +1642,13 @@ pub fn evict_mem_cache() {
 /// [`compose_instance_mem`] builds it once.
 fn build_instance_mem(image_hash: &CapHash, img: &ImageCap) -> DataCap {
     // Fast path: clone the cached clean backing (Arc-bump + empty overlay).
-    // SAFETY: single-threaded guest (Hyperlight serialisation); the returned
-    // borrow is cloned before any mutation of the map.
-    if let Some(clean) = unsafe { (*MEM_CACHE.inner.get()).get(image_hash) } {
-        return clean.clone();
+    if let Some(clean) = MEM_CACHE.lock().get(image_hash).cloned() {
+        return clean;
     }
     // Miss: compose once (no MEM_CACHE borrow held across the compose), cache,
     // hand out a clone.
     let mem = compose_instance_mem(img);
-    // SAFETY: single-threaded guest.
-    unsafe {
-        (*MEM_CACHE.inner.get()).insert(*image_hash, mem.clone());
-    }
+    MEM_CACHE.lock().insert(*image_hash, mem.clone());
     mem
 }
 
