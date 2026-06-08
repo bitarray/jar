@@ -15,6 +15,7 @@ use javm_cap::{
 };
 use nub::Nub;
 use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard};
 
 const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
@@ -35,6 +36,14 @@ const ROOT_METER: u8 = 3;
 const B_KEY: u8 = 0x42;
 const C_KEY: u8 = 0x43;
 const GAS_BUDGET: u64 = 10_000_000_000;
+
+static HYPERLIGHT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn new_serial_nub() -> (MutexGuard<'static, ()>, Nub) {
+    let guard = HYPERLIGHT_TEST_LOCK.lock().expect("hyperlight test mutex");
+    let nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    (guard, nub)
+}
 
 fn ecalli(imm: u32) -> u32 {
     ((imm & 0xFFF) << 20) | (0b010 << 12) | 0b000_1011
@@ -182,7 +191,7 @@ fn run_c_yield(nub: &mut Nub, a_catches_c: bool) -> (u32, u32) {
 
 #[test]
 fn yielded_owner_call_uses_owner_edge_not_waiting_b() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
 
     let (reason, arg) = run_c_yield(&mut nub, false);
     assert_eq!(
@@ -200,7 +209,7 @@ fn yielded_owner_call_uses_owner_edge_not_waiting_b() {
 
 #[test]
 fn yielded_owner_oog_is_not_caught_by_waiting_b() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
 
     let set_gas_sender_h = nub
         .put_cap(&Cap::Instance(yield_sender(&Key::from(

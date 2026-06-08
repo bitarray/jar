@@ -10,6 +10,7 @@ use javm_cap::{
 };
 use nub::Nub;
 use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard};
 
 const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
@@ -27,6 +28,14 @@ const METER_A: u8 = 0;
 const METER_B: u8 = 1;
 const GAS_BUDGET: u64 = 10_000_000_000;
 const FUNDED: u64 = 1_000_000;
+
+static HYPERLIGHT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn new_serial_nub() -> (MutexGuard<'static, ()>, Nub) {
+    let guard = HYPERLIGHT_TEST_LOCK.lock().expect("hyperlight test mutex");
+    let nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    (guard, nub)
+}
 
 fn ecalli(imm: u32) -> u32 {
     ((imm & 0xFFF) << 20) | (0b010 << 12) | 0b000_1011
@@ -183,7 +192,7 @@ fn run_child(
 
 #[test]
 fn empty_first_slot_skips_to_later_valid_meter() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
     assert_eq!(
         run_child(
             &mut nub,
@@ -202,7 +211,7 @@ fn empty_first_slot_skips_to_later_valid_meter() {
 
 #[test]
 fn exhausted_first_meter_falls_through_to_second_meter() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
     assert_eq!(
         run_child(
             &mut nub,
@@ -221,7 +230,7 @@ fn exhausted_first_meter_falls_through_to_second_meter() {
 
 #[test]
 fn invalid_non_empty_gas_slot_hard_faults() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
     assert_eq!(
         run_child(
             &mut nub,
@@ -239,7 +248,7 @@ fn invalid_non_empty_gas_slot_hard_faults() {
 
 #[test]
 fn all_empty_declared_gas_slots_hard_fault() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
     assert_eq!(
         run_child(
             &mut nub,
@@ -257,7 +266,7 @@ fn all_empty_declared_gas_slots_hard_fault() {
 
 #[test]
 fn exhausted_all_meters_oog_resumes_from_primary() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let (_guard, mut nub) = new_serial_nub();
     assert_eq!(
         run_child(
             &mut nub,
