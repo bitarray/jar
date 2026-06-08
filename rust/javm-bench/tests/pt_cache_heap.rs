@@ -63,7 +63,7 @@ fn invoke_churn(nub: &mut Nub, top: &PtCacheTop, n: u64) -> u64 {
 #[test]
 #[ignore]
 fn pt_cache_heap_per_call_churn() {
-    let mut nub = Nub::new_hyperlight().expect("sandbox");
+    let mut nub = Nub::hyperlight().expect("sandbox");
     let top = build_pt_cache_top(&mut nub, BLOB);
 
     // Warm up (A's + B's JIT compile, the per-image mem backing, any

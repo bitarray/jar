@@ -124,7 +124,7 @@ fn run(nub: &mut Nub, declare_meter: bool) -> u32 {
 
 #[test]
 fn unfunded_declared_meter_oogs_not_loans() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Declared-but-unfunded meter: the child runs metered@0 and OOGs; with no
     // kernel:oog receiver it bubbles (reason 2). If it had instead loaned the

@@ -2,7 +2,7 @@
 //!
 //! For each workload we:
 //!   1. Drive the interpreter through `Nub::new_local()`.
-//!   2. Drive the JIT recompiler through `Nub::new_hyperlight()`.
+//!   2. Drive the JIT recompiler through `Nub::hyperlight()`.
 //!   3. Assert both backends agree on `(return_value, gas_used)`.
 //!   4. Pin both against a hardcoded `(value, gas)` from the
 //!      reference run on this branch — a deliberate floor that

@@ -116,7 +116,7 @@ fn run(nub: &mut Nub, mint_key: &[u8], dst: u8) -> (u32, u32) {
 
 #[test]
 fn mint_gas_and_quota_via_kernel_root() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Positive: kernel:mint_gas into a free slot is handled inline and resumes
     // → clean halt (reason 4, arg 0 — the trailing REPLY).

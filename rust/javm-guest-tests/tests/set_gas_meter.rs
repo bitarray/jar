@@ -174,7 +174,7 @@ fn run_metered(nub: &mut Nub, meter_value: u64) -> u32 {
 
 #[test]
 fn set_gas_meter_funds_per_frame_metering() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // Probe the φ7→x10 register mapping the chain relies on: `addi(10,0,55);
     // reply` must return 55 in φ7. A wrong mapping here would silently corrupt

@@ -40,7 +40,7 @@ fn reply_image() -> Image {
 
 #[test]
 fn evict_jit_cache_then_reinvoke_rebuilds_image_cache() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
     let img = reply_image();
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&img, &[], &[]).expect("image"))

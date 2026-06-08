@@ -8,7 +8,6 @@ use javm_cap::yield_cap::YK_MINT_GAS;
 use javm_cap::{yield_receiver, yield_sender, CNodeCap, Cap, CapHashOrRef, Key, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard};
 
 const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
@@ -25,14 +24,6 @@ const TYPE_DST_SLOT: u8 = 11;
 const METER_KEY: u8 = 3;
 const YIELD_KEY: u8 = 0x42;
 const GAS_BUDGET: u64 = 10_000_000_000;
-
-static HYPERLIGHT_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-fn new_serial_nub() -> (MutexGuard<'static, ()>, Nub) {
-    let guard = HYPERLIGHT_TEST_LOCK.lock().expect("hyperlight test mutex");
-    let nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
-    (guard, nub)
-}
 
 fn ecalli(imm: u32) -> u32 {
     ((imm & 0xFFF) << 20) | (0b010 << 12) | 0b000_1011
@@ -94,7 +85,7 @@ fn b_image() -> Image {
 }
 
 fn run_a(a_code: Vec<u8>) -> (u32, u32) {
-    let (_guard, mut nub) = new_serial_nub();
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     let sender_h = nub
         .put_cap(&Cap::Instance(yield_sender(&Key::from(YIELD_KEY))))

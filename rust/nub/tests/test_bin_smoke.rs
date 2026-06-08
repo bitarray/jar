@@ -1,6 +1,6 @@
 //! End-to-end smoke for the `nub-arch-x86-tests` guest binary.
 //!
-//! Loads the test guest binary via [`Nub::new_hyperlight_tests`],
+//! Loads the test guest binary via [`Nub::hyperlight_tests`],
 //! calls the `nub_smoke` RPC, and verifies it returns `42u64`.
 //! Together with `tests/smoke.rs` (which exercises the production
 //! `invoke_cached` path), this gives us coverage of both the
@@ -14,7 +14,7 @@ use rkyv::primitive::ArchivedU64;
 
 #[test]
 fn test_bin_smoke_returns_42() {
-    let mut nub = Nub::new_hyperlight_tests().expect("hyperlight tests bin");
+    let mut nub = Nub::hyperlight_tests().expect("hyperlight tests bin");
     let bytes = nub.call_raw(FN_ID_TEST_SMOKE, &[]).expect("smoke rpc");
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(&bytes);

@@ -29,7 +29,7 @@ fn ecalli(imm: u32) -> u32 {
 
 #[test]
 fn root_meter_self_harvest_via_set_gas_meter() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // The set_gas_meter YieldSender + the top's Gas{ROOT_METER} handle.
     let sender_h = nub

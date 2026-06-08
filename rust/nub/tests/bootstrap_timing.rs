@@ -1,15 +1,12 @@
-//! Standalone timing for `Nub::new_hyperlight()` boot. Run with:
+//! Standalone timing for the `Nub::hyperlight()` singleton. Run with:
 //!
 //! ```bash
 //! cargo test -p nub --release --test bootstrap_timing -- --ignored --nocapture
 //! ```
 //!
-//! `#[ignore]` because it's a manual measurement, not a CI gate: each
-//! sandbox allocates ~768 MiB of mmap'd address space (the
-//! `Nub::new_hyperlight()` config = 512 MiB scratch + 256 MiB heap) and
-//! runs the guest's init function, so 10 iterations cost ~7.5 GiB of
-//! VA + several seconds of wall time. Plenty to be visible in `top`
-//! but well within a 32 GiB-RAM dev box.
+//! `#[ignore]` because it's a manual measurement, not a CI gate. The
+//! Hyperlight backend is a process singleton, so this measures the first
+//! singleton access separately from repeated cached borrows.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
@@ -20,21 +17,27 @@ const N: usize = 10;
 
 #[test]
 #[ignore]
-fn nub_new_hyperlight_boot() {
-    // One warm-up so any first-time JIT / linker init lands outside
-    // the measurement window.
-    drop(Nub::new_hyperlight().expect("warm-up sandbox"));
+fn nub_hyperlight_boot() {
+    let t = Instant::now();
+    drop(Nub::hyperlight().expect("sandbox"));
+    let first = t.elapsed();
+    eprintln!(
+        "Nub::hyperlight() first singleton access: {:.3} ms",
+        first.as_secs_f64() * 1e3,
+    );
 
     let mut samples = Vec::with_capacity(N);
     for i in 0..N {
         let t = Instant::now();
-        let nub = Nub::new_hyperlight().expect("sandbox");
+        let nub = Nub::hyperlight().expect("sandbox");
         let elapsed = t.elapsed();
-        // Drop the sandbox AFTER capturing the boot time, so dealloc
-        // doesn't pollute the measurement.
         drop(nub);
         samples.push(elapsed);
-        eprintln!("iter {:2}: {:.3} ms", i, elapsed.as_secs_f64() * 1e3);
+        eprintln!(
+            "cached borrow {:2}: {:.3} us",
+            i,
+            elapsed.as_secs_f64() * 1e6
+        );
     }
 
     samples.sort();
@@ -42,15 +45,15 @@ fn nub_new_hyperlight_boot() {
     let p50 = samples[N / 2];
     let p90 = samples[N * 9 / 10];
     let max = samples[N - 1];
-    let mean_ms = samples.iter().map(|d| d.as_secs_f64()).sum::<f64>() / (N as f64) * 1e3;
+    let mean_us = samples.iter().map(|d| d.as_secs_f64()).sum::<f64>() / (N as f64) * 1e6;
 
     eprintln!();
-    eprintln!("Nub::new_hyperlight() boot across {N} samples (post-warm-up):");
-    eprintln!("  min: {:.3} ms", min.as_secs_f64() * 1e3);
-    eprintln!("  p50: {:.3} ms", p50.as_secs_f64() * 1e3);
-    eprintln!("  p90: {:.3} ms", p90.as_secs_f64() * 1e3);
-    eprintln!("  max: {:.3} ms", max.as_secs_f64() * 1e3);
-    eprintln!("  avg: {mean_ms:.3} ms");
+    eprintln!("Nub::hyperlight() cached singleton borrow across {N} samples:");
+    eprintln!("  min: {:.3} us", min.as_secs_f64() * 1e6);
+    eprintln!("  p50: {:.3} us", p50.as_secs_f64() * 1e6);
+    eprintln!("  p90: {:.3} us", p90.as_secs_f64() * 1e6);
+    eprintln!("  max: {:.3} us", max.as_secs_f64() * 1e6);
+    eprintln!("  avg: {mean_us:.3} us");
 }
 
 #[test]

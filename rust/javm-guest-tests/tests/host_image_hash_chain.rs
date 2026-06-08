@@ -87,7 +87,7 @@ fn parent_image(child_hash: CapHash) -> Image {
 /// Publish the parent instance and invoke endpoint 0 with the given
 /// (src, dst) slot args, returning the JIT exit_reason / exit_arg.
 ///
-/// `Nub::new_hyperlight()` reserves a fixed host VA range, so only one sandbox
+/// `Nub::hyperlight()` reserves a fixed host VA range, so only one sandbox
 /// can exist at a time; the single `#[test]` below threads one `nub` through
 /// both cases (the harness would otherwise race two sandboxes — see
 /// `conformance.rs`'s shared-sandbox note).
@@ -128,7 +128,7 @@ fn run(nub: &mut Nub, src: u8, dst: u8) -> (u32, u32) {
 
 #[test]
 fn image_hash_chain_traps_on_pinned_and_halts_on_valid() {
-    let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
+    let mut nub = Nub::hyperlight().expect("Hyperlight sandbox");
 
     // 1. Writing the identity DataCap into a PINNED dst slot traps.
     // JIT codegen ABI: `ExitReason::Trap` surfaces as exit_reason 7.

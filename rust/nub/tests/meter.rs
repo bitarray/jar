@@ -94,12 +94,12 @@ fn publish_metered(nub: &mut Nub, meter_key: &Key) -> nub::AbiCapHash {
     nub.put_cap(&inst).unwrap()
 }
 
-fn meter_drives_gas(mut nub: Nub) {
+fn meter_drives_gas(nub: &mut Nub) {
     const BUDGET: u64 = 1_000_000;
     const WRONG: u64 = BUDGET + 5_000_000;
 
     // Reference: a plain instance run on `BUDGET` directly (no meter).
-    let plain = publish_plain(&mut nub);
+    let plain = publish_plain(nub);
     let ref_run = nub.invoke_cached(plain, 0, [0; 4], BUDGET).unwrap();
     assert_eq!(ref_run.exit_reason, 4, "ecalli 42 → HostCall");
     let ref_remaining = ref_run.gas_remaining;
@@ -110,7 +110,7 @@ fn meter_drives_gas(mut nub: Nub) {
     // at the same remaining as the reference.
     let meter_key = Key::from(&[0xAB, 0xCD, 0xEF][..]);
     nub.set_meter(meter_key.clone(), BUDGET);
-    let metered = publish_metered(&mut nub, &meter_key);
+    let metered = publish_metered(nub, &meter_key);
     let run = nub.invoke_cached(metered, 0, [0; 4], WRONG).unwrap();
 
     assert_eq!(
@@ -126,12 +126,14 @@ fn meter_drives_gas(mut nub: Nub) {
 
 #[test]
 fn meter_drives_gas_local() {
-    meter_drives_gas(Nub::new_local());
+    let mut nub = Nub::new_local();
+    meter_drives_gas(&mut nub);
 }
 
 #[test]
 fn meter_drives_gas_hyperlight() {
-    meter_drives_gas(Nub::new_hyperlight().expect("hyperlight"));
+    let mut nub = Nub::hyperlight().expect("hyperlight");
+    meter_drives_gas(&mut nub);
 }
 
 #[test]

@@ -18,24 +18,18 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use nub::Nub;
 use nub_arch_x86::test_abi::FN_ID_BENCH_ARC_PAGE_ALLOC;
-use std::sync::{Mutex, OnceLock};
-
-fn nub_handle() -> &'static Mutex<Nub> {
-    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
-    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight_benches().expect("bench guest binary")))
-}
 
 fn bench(c: &mut Criterion) {
     // Warm up: instantiate the Nub so the first sample doesn't pay
     // sandbox-boot cost.
-    drop(nub_handle().lock().expect("nub mutex"));
+    drop(Nub::hyperlight_benches().expect("bench guest binary"));
 
     let mut group = c.benchmark_group("arc_page_alloc");
     for &n in &[16u32, 256, 1024, 4096] {
         group.throughput(Throughput::Elements(u64::from(n)));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
-                let mut nub = nub_handle().lock().expect("nub mutex");
+                let mut nub = Nub::hyperlight_benches().expect("bench guest binary");
                 let payload = n.to_le_bytes();
                 let bytes = nub
                     .call_raw(FN_ID_BENCH_ARC_PAGE_ALLOC, &payload)

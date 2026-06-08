@@ -21,6 +21,8 @@
 pub mod test_support;
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use javm_cap::{
@@ -64,6 +66,55 @@ pub struct HeapStats {
 /// Path to the cross-compiled Hyperlight guest blob. Set by
 /// `build.rs` via [`nub_build::build`].
 const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
+
+#[derive(Clone, Copy)]
+pub(crate) struct HyperlightBlob {
+    pub(crate) label: &'static str,
+    pub(crate) path: &'static str,
+}
+
+struct HyperlightSingleton {
+    blob: HyperlightBlob,
+    nub: Nub,
+}
+
+static HYPERLIGHT_NUB: Mutex<Option<HyperlightSingleton>> = Mutex::new(None);
+
+/// Guard for the process-wide Hyperlight-backed [`Nub`].
+///
+/// The KVM backend maps the guest at fixed host virtual addresses, so the high
+/// level `nub` API exposes exactly one live Hyperlight sandbox per process. The
+/// guard serializes access to that singleton and dereferences to [`Nub`] for the
+/// normal publish/invoke methods.
+///
+/// TODO(parallel-nub): future parallel execution should keep this single host
+/// Nub and schedule parallel work inside the guest microkernel, not by creating
+/// multiple KVM sandboxes in one host process.
+pub struct HyperlightNubGuard {
+    guard: MutexGuard<'static, Option<HyperlightSingleton>>,
+}
+
+impl Deref for HyperlightNubGuard {
+    type Target = Nub;
+
+    fn deref(&self) -> &Self::Target {
+        &self
+            .guard
+            .as_ref()
+            .expect("Hyperlight Nub singleton initialized")
+            .nub
+    }
+}
+
+impl DerefMut for HyperlightNubGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self
+            .guard
+            .as_mut()
+            .expect("Hyperlight Nub singleton initialized")
+            .nub
+    }
+}
 
 /// Uniform handle to the nub microkernel.
 pub struct Nub {
@@ -125,17 +176,45 @@ impl Nub {
         }
     }
 
-    /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
-    /// from the `nub-arch-x86` guest blob.
-    pub fn new_hyperlight() -> Result<Self> {
-        Self::new_hyperlight_with_blob_path(NUB_ARCH_X86_BLOB_PATH)
+    /// Borrow the process-wide Hyperlight-backed Nub loaded from the
+    /// `nub-arch-x86` guest blob.
+    pub fn hyperlight() -> Result<HyperlightNubGuard> {
+        Self::hyperlight_with_blob(HyperlightBlob {
+            label: "production",
+            path: NUB_ARCH_X86_BLOB_PATH,
+        })
     }
 
-    /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
-    /// from an arbitrary guest ELF on disk. Used by `test_support`
-    /// to swap in the test/bench binaries; production callers should
-    /// use [`Self::new_hyperlight`].
-    pub(crate) fn new_hyperlight_with_blob_path(path: &str) -> Result<Self> {
+    pub(crate) fn hyperlight_with_blob(blob: HyperlightBlob) -> Result<HyperlightNubGuard> {
+        let mut guard = HYPERLIGHT_NUB
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hyperlight Nub singleton mutex poisoned"))?;
+        match guard.as_ref() {
+            Some(existing) if existing.blob.path == blob.path => {}
+            Some(existing) => {
+                return Err(anyhow::anyhow!(
+                    "Hyperlight Nub singleton already initialized with {} guest ({:?}); \
+                     cannot switch to {} guest ({:?})",
+                    existing.blob.label,
+                    existing.blob.path,
+                    blob.label,
+                    blob.path,
+                ));
+            }
+            None => {
+                let nub = Self::create_hyperlight_with_blob_path(blob.path)?;
+                *guard = Some(HyperlightSingleton { blob, nub });
+            }
+        }
+        Ok(HyperlightNubGuard { guard })
+    }
+
+    /// Create the backing sandbox for the process-wide Hyperlight singleton
+    /// from an arbitrary guest ELF on disk.
+    ///
+    /// This is intentionally private: high-level callers must go through the
+    /// process singleton returned by [`Self::hyperlight`].
+    fn create_hyperlight_with_blob_path(path: &str) -> Result<Self> {
         let mut cfg = SandboxConfiguration::default();
         cfg.set_scratch_size(512 * 1024 * 1024);
         cfg.set_input_data_size(16 * 1024 * 1024);

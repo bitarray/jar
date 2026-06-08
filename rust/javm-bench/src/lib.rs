@@ -12,9 +12,8 @@
 //!
 //! - `run_interpreter` — `Nub::new_local()` drives the byte-PVM
 //!   interpreter (`javm-exec`) in-process.
-//! - `run_recompiler` — a long-lived `Nub::new_hyperlight()` sandbox
-//!   (cached in a `OnceLock`) drives the in-kernel JIT path through
-//!   the same `invoke_cached` API.
+//! - `run_recompiler` — the process-wide `Nub::hyperlight()` singleton
+//!   drives the in-kernel JIT path through the same `invoke_cached` API.
 //!
 //! `BuiltCaps` holds the pre-built `Cap` graph + its precomputed
 //! hashes. Construction happens once per workload at bench warm-up via
@@ -30,8 +29,7 @@ use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
-use nub::{InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
-use std::sync::{Mutex, OnceLock};
+use nub::{HyperlightNubGuard, InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
 /// (`ecalli 0`). Both backends surface it as `exit_reason=4,
@@ -154,38 +152,14 @@ impl BuiltCaps {
     }
 }
 
-/// RAII guard around the singleton Hyperlight Nub. Derefs to `&mut Nub`.
-///
-/// The sandbox is **never** torn down and rebuilt — doing so (the former
-/// `reset_nub_hyperlight`) re-`mmap`'d the snapshot at the same fixed guest VA
-/// while the prior KVM memslot/mapping could still alias it, which trampled
-/// host heap (the "went past end of probe sequence" corruption). One long-lived
-/// sandbox runs thousands of distinct invocations cleanly, so the guard simply
-/// holds the singleton.
-pub struct NubGuard {
-    inner: std::sync::MutexGuard<'static, Nub>,
-}
-
-impl std::ops::Deref for NubGuard {
-    type Target = Nub;
-    fn deref(&self) -> &Nub {
-        &self.inner
-    }
-}
-
-impl std::ops::DerefMut for NubGuard {
-    fn deref_mut(&mut self) -> &mut Nub {
-        &mut self.inner
-    }
-}
+/// RAII guard around the process-wide Hyperlight Nub. Derefs to `&mut Nub`.
+pub type NubGuard = HyperlightNubGuard;
 
 /// Bench-side accessor for the long-lived Hyperlight Nub. Returned
 /// guard holds the singleton mutex for the duration of one
 /// criterion `iter_batched` step (setup + routine).
 pub fn nub_hyperlight_lock() -> NubGuard {
-    NubGuard {
-        inner: nub_hyperlight().lock().expect("nub mutex"),
-    }
+    Nub::hyperlight().expect("Hyperlight sandbox")
 }
 
 /// Bench helper: drive one invocation through an already-locked Nub.
@@ -321,13 +295,6 @@ pub fn run_recompiler_raw(built: &BuiltCaps) -> RawRun {
         Ok(r) => RawRun::from_result(&r),
         Err(_) => RawRun::aborted(),
     }
-}
-
-/// The long-lived Hyperlight sandbox, shared across every invocation. Built
-/// once and never torn down (see [`NubGuard`] for why a rebuild corrupts).
-fn nub_hyperlight() -> &'static Mutex<Nub> {
-    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
-    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
 }
 
 // ============================================================================
