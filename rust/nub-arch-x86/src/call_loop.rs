@@ -2042,7 +2042,7 @@ fn dispatch_host_yield(
     } else if k == javm_cap::yield_cap::YK_MINT_GAS {
         // kernel:mint_gas(φ8=meter_key byte, φ9=dst): mint a Gas{meter_key}
         // handle (pure-cap, like mint_yield). The meter mapping it indexes is
-        // managed separately (set_gas_meter / the host meter table).
+        // task-local and managed through set_gas_meter.
         mint_unit_handle(
             frame,
             javm_cap::gas_handle(&Key::from((frame.instance.regs[8] & 0xFF) as u8)),

@@ -20,7 +20,7 @@
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,9 +28,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
-use javm_cap::{
-    CacheDirectory, CapHashOrRef, KernelImage, Key, cap::Cap, key_from_regs, recognize_kernel_image,
-};
+use javm_cap::{CacheDirectory, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
@@ -95,56 +93,9 @@ pub struct Nub {
 
 struct NubInner {
     backend: Mutex<Backend>,
-    /// The kernel-maintained gas meter mapping (`meter_key -> remaining gas`).
-    /// The interim "static meter mapping" of the kernel-assisted GasMeter
-    /// design — a later spec change moves it behind a YieldCatcher. At top-level
-    /// invoke the host resolves the running Instance's primary usable gas slot
-    /// (first non-empty valid `Gas{meter_key}`), seeds the run from this map
-    /// when non-zero, and writes the remaining primary balance back here.
-    meters: Mutex<HashMap<Key, u64>>,
-    /// The kernel-maintained storage quota mapping (`quota_key -> remaining`).
-    /// Symmetric to [`Self::meters`]; quota *charging* is not yet wired (V1),
-    /// so this is seeded/observed but not yet debited per dirty page.
-    quotas: Mutex<HashMap<Key, u64>>,
-    /// Host-side guard for top-level invokes that seed from the same kernel gas
-    /// meter. The first parallel milestone rejects concurrent reuse instead of
-    /// racing two writers on one balance.
-    in_flight_meters: Mutex<BTreeSet<Key>>,
     next_job_id: AtomicU64,
     invoke_executor: Arc<InvokeExecutor>,
     invoke_worker_count: usize,
-}
-
-struct MeterReservation {
-    inner: Arc<NubInner>,
-    key: Key,
-}
-
-impl MeterReservation {
-    fn reserve(inner: Arc<NubInner>, key: Key) -> Result<Self> {
-        {
-            let mut in_flight = match inner.in_flight_meters.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if !in_flight.insert(key.clone()) {
-                return Err(anyhow::anyhow!(
-                    "invoke_cached: gas meter is already in flight"
-                ));
-            }
-        }
-        Ok(Self { inner, key })
-    }
-}
-
-impl Drop for MeterReservation {
-    fn drop(&mut self) {
-        let mut in_flight = match self.inner.in_flight_meters.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        in_flight.remove(&self.key);
-    }
 }
 
 /// Options used when constructing the process-wide Hyperlight Nub singleton.
@@ -431,12 +382,6 @@ enum InvokeBackendTarget {
 struct HyperlightDriver {
     sandbox: MultiUseSandbox,
     state_root_cache: CapHash,
-    /// Host-side mirror of the published cap graph, used **only** to resolve an
-    /// Instance's primary usable gas slot → `Gas{meter_key}` handle host-side (the
-    /// authoritative cap directory lives guest-side). This is the host's own
-    /// `CacheDirectory` — not a deref of the guest's hashbrown (which is
-    /// unsound across the SIMD-width boundary; see `MultiUseSandbox`).
-    host_cache: Mutex<CacheDirectory>,
 }
 
 impl Nub {
@@ -452,9 +397,6 @@ impl Nub {
                     kernel: Kernel::new(LocalArch::new()),
                     cache: CacheDirectory::new(),
                 }),
-                meters: Mutex::new(HashMap::new()),
-                quotas: Mutex::new(HashMap::new()),
-                in_flight_meters: Mutex::new(BTreeSet::new()),
                 next_job_id: AtomicU64::new(1),
                 invoke_executor: Arc::new(InvokeExecutor::new()),
                 invoke_worker_count,
@@ -534,11 +476,7 @@ impl Nub {
                 backend: Mutex::new(Backend::Hyperlight(Arc::new(HyperlightDriver {
                     sandbox,
                     state_root_cache: [0; 32],
-                    host_cache: Mutex::new(CacheDirectory::new()),
                 }))),
-                meters: Mutex::new(HashMap::new()),
-                quotas: Mutex::new(HashMap::new()),
-                in_flight_meters: Mutex::new(BTreeSet::new()),
                 next_job_id: AtomicU64::new(1),
                 invoke_executor: Arc::new(InvokeExecutor::new()),
                 invoke_worker_count: options.vcpu_count.max(1),
@@ -625,19 +563,10 @@ impl Nub {
             Backend::Local { cache, .. } => cache
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
-            Backend::Hyperlight(h) => {
-                // Mirror into the host-side cache so `invoke_cached` can resolve
-                // gas_slots → meter_key host-side (best-effort; the guest cache
-                // is authoritative for execution).
-                let _ = h
-                    .host_cache
-                    .lock()
-                    .expect("Hyperlight host cache mutex poisoned")
-                    .put_cap(cap);
-                h.sandbox
-                    .put_cap(cap)
-                    .map_err(|e| anyhow::anyhow!("put_cap: {e}"))
-            }
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .put_cap(cap)
+                .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
         }
     }
 
@@ -666,86 +595,11 @@ impl Nub {
             Backend::Local { cache, .. } => cache
                 .put_cap_with_hash(hash, cap)
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
-            Backend::Hyperlight(h) => {
-                let _ = h
-                    .host_cache
-                    .lock()
-                    .expect("Hyperlight host cache mutex poisoned")
-                    .put_cap_with_hash(hash, cap);
-                h.sandbox
-                    .put_cap_with_hash(hash, cap)
-                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}"))
-            }
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .put_cap_with_hash(hash, cap)
+                .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
         }
-    }
-
-    // --- Kernel gas/quota meter mapping (`SetGasMeter` / `SetStorageQuota`) ---
-
-    /// Set the kernel gas meter `meter_key` to `value`; returns the previous
-    /// value (0 if absent). The chain-side topup / harvest primitive.
-    pub fn set_meter(&self, meter_key: Key, value: u64) -> u64 {
-        self.inner
-            .meters
-            .lock()
-            .expect("Nub meter mutex poisoned")
-            .insert(meter_key, value)
-            .unwrap_or(0)
-    }
-
-    /// Read the kernel gas meter `meter_key` (0 if absent).
-    pub fn get_meter(&self, meter_key: &Key) -> u64 {
-        self.inner
-            .meters
-            .lock()
-            .expect("Nub meter mutex poisoned")
-            .get(meter_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Set the kernel storage quota `quota_key`; returns the previous value.
-    pub fn set_quota(&self, quota_key: Key, value: u64) -> u64 {
-        self.inner
-            .quotas
-            .lock()
-            .expect("Nub quota mutex poisoned")
-            .insert(quota_key, value)
-            .unwrap_or(0)
-    }
-
-    /// Read the kernel storage quota `quota_key` (0 if absent).
-    pub fn get_quota(&self, quota_key: &Key) -> u64 {
-        self.inner
-            .quotas
-            .lock()
-            .expect("Nub quota mutex poisoned")
-            .get(quota_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Resolve the running Instance's primary usable gas `meter_key` from its
-    /// Image gas slots, via the appropriate host-side cache (the Local cache, or
-    /// the Hyperlight host mirror). Empty slots are skipped. This host-side path
-    /// is only for budget seeding; guest-side execution still performs the strict
-    /// invalid-slot checks.
-    fn resolve_gas_meter_key(&self, instance_hash: AbiCapHash) -> Option<Key> {
-        let backend = self
-            .inner
-            .backend
-            .lock()
-            .expect("Nub backend mutex poisoned");
-        let cache = match &*backend {
-            Backend::Local { cache, .. } => cache,
-            Backend::Hyperlight(h) => {
-                let cache = h
-                    .host_cache
-                    .lock()
-                    .expect("Hyperlight host cache mutex poisoned");
-                return resolve_meter_key_from(&cache, instance_hash);
-            }
-        };
-        resolve_meter_key_from(cache, instance_hash)
     }
 
     /// Submit an invocation to the singleton Nub and return a job handle. Jobs
@@ -769,12 +623,6 @@ impl Nub {
     /// Invoke a previously-published `Cap::Instance` by hash. V0 args
     /// are 4 u64s laid into φ[7..=10] on top of the published
     /// endpoint's `initial_regs` baseline.
-    ///
-    /// Meter-driven gas: if the Instance's primary usable gas slot names a `Gas`
-    /// handle whose `meter_key` has a non-zero entry in the kernel meter mapping,
-    /// the run is seeded from that meter and the remaining gas is written back at
-    /// exit. Otherwise the call-supplied `initial_gas` is used (and the meter is
-    /// left untouched), preserving the bare-budget path.
     pub fn invoke_cached(
         &self,
         instance_hash: AbiCapHash,
@@ -796,42 +644,16 @@ impl Nub {
         request: InvokeRequest,
         job_id: u64,
     ) -> Result<InvocationResult> {
-        let meter_key = self.resolve_gas_meter_key(request.instance_hash);
-        let meter_balance = meter_key.as_ref().map(|k| self.get_meter(k)).unwrap_or(0);
-        let (budget, used_meter) = match &meter_key {
-            Some(_) if meter_balance > 0 => (meter_balance, true),
-            _ => (request.initial_gas, false),
-        };
-
-        let _meter_reservation = if used_meter {
-            meter_key
-                .clone()
-                .map(|k| MeterReservation::reserve(self.inner.clone(), k))
-                .transpose()?
-        } else {
-            None
-        };
-
-        let result = self.invoke_cached_raw(
+        self.invoke_cached_raw(
             job_id,
             request.instance_hash,
             request.endpoint_idx,
             request.args,
-            budget,
-        );
-        let result = result?;
-        if used_meter && let Some(k) = meter_key {
-            self.inner
-                .meters
-                .lock()
-                .expect("Nub meter mutex poisoned")
-                .insert(k, result.gas_remaining);
-        }
-        Ok(result)
+            request.initial_gas,
+        )
     }
 
-    /// The backend dispatch for [`Self::invoke_cached`], with the gas budget
-    /// already resolved (meter-seeded or call-supplied).
+    /// The backend dispatch for [`Self::invoke_cached`].
     fn invoke_cached_raw(
         &self,
         job_id: u64,
@@ -911,83 +733,5 @@ impl Nub {
             .sandbox
             .invoke_cached_parallel(job_id, &packet)
             .map_err(|e| anyhow::anyhow!("invoke_cached_parallel: {e}"))
-    }
-}
-
-/// Walk `instance_hash → image.gas_slots[*] → cnode slot → Gas{meter_key}` in
-/// `cache`, returning the first valid non-empty `meter_key`. `None` if the
-/// Image declares no usable gas slot. This helper is intentionally soft: the
-/// guest-side kernel loop performs the strict invalid-slot hard faults.
-fn resolve_meter_key_from(cache: &CacheDirectory, instance_hash: AbiCapHash) -> Option<Key> {
-    let inst_cap = cache.get(CapHashOrRef::Hash(instance_hash))?;
-    let Cap::Instance(inst) = &*inst_cap else {
-        return None;
-    };
-    let img_cap = cache.get(CapHashOrRef::Hash(inst.image_hash))?;
-    let Cap::Image(img) = &*img_cap else {
-        return None;
-    };
-    let cnode_cap = cache.get(inst.root_cnode.clone())?;
-    let Cap::CNode(cnode) = &*cnode_cap else {
-        return None;
-    };
-    for slot in &img.gas_slots {
-        let Some(gas_ref) = cnode.get(slot) else {
-            continue;
-        };
-        let gas_cap = cache.get(gas_ref)?;
-        let Cap::Instance(g) = &*gas_cap else {
-            return None;
-        };
-        if recognize_kernel_image(g.image_hash_chain) != Some(KernelImage::Gas) {
-            return None;
-        }
-        return Some(key_from_regs(g.regs[0], g.regs[1]));
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn meter_reservation_rejects_duplicate_and_releases_on_drop() {
-        let nub = Nub::new_local();
-        let key = Key::from(&[0xCA, 0xFE][..]);
-
-        let first =
-            MeterReservation::reserve(nub.inner.clone(), key.clone()).expect("first reservation");
-        assert!(
-            MeterReservation::reserve(nub.inner.clone(), key.clone()).is_err(),
-            "a duplicate in-flight meter reservation must be rejected"
-        );
-
-        drop(first);
-        let second = MeterReservation::reserve(nub.inner.clone(), key)
-            .expect("reservation should be released on drop");
-        drop(second);
-    }
-
-    #[test]
-    fn meter_reservation_drop_tolerates_poisoned_mutex() {
-        let nub = Nub::new_local();
-        let key = Key::from(&[0xBA, 0xAD][..]);
-        let reservation =
-            MeterReservation::reserve(nub.inner.clone(), key.clone()).expect("reservation");
-
-        let inner = nub.inner.clone();
-        let _ = std::panic::catch_unwind(move || {
-            let _guard = inner
-                .in_flight_meters
-                .lock()
-                .expect("lock before intentional panic");
-            panic!("poison meter reservation mutex");
-        });
-
-        drop(reservation);
-        let second = MeterReservation::reserve(nub.inner.clone(), key)
-            .expect("drop should release even after poison");
-        drop(second);
     }
 }
