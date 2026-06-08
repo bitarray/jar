@@ -51,6 +51,7 @@
 extern crate alloc;
 
 use crate::cached_cap::CachedCap;
+use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
 use crate::page_alloc::GlobalPage;
 use crate::paging::{PAGE_SIZE, PageTable};
@@ -59,28 +60,6 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
 use javm_recompiler_x86::codegen::HelperFns;
-
-/// Maximum fixed execution lanes the guest runtime can address. The production
-/// default vCPU pool is capped at 8; this leaves room for explicit overrides
-/// while keeping lane-local hot state static and allocation-free.
-pub const MAX_EXECUTION_LANES: usize = 64;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ExecutionLane {
-    index: usize,
-}
-
-impl ExecutionLane {
-    pub const PRIMARY: Self = Self { index: 0 };
-
-    pub const fn new(index: usize) -> Self {
-        Self { index }
-    }
-
-    pub const fn index(self) -> usize {
-        self.index
-    }
-}
 
 // === Per-invocation context for the #PF handler ===========================
 //
@@ -1106,9 +1085,10 @@ pub unsafe fn enter_frame(
         (*ctx).code_base = rt.jit_va;
     }
 
-    // ---- install ring-3 GDT/IDT + JIT #PF handler ------------------------
-    // SAFETY: ring-0 mutation of GDT/IDT; serialised by Hyperlight.
-    unsafe { ring3::install_ring3_exit_gate() };
+    // ---- install ring-3 GDT/IDT + select lane-local exit state ------------
+    // SAFETY: ring-0 mutation of GDT/IDT/GS base; `lane` is owned by the
+    // current vCPU worker.
+    unsafe { ring3::prepare_ring3_entry(lane) };
 
     JIT_CODE_BASE.store(rt.jit_va, Ordering::SeqCst);
     JIT_CODE_LEN.store(rt.jit_size, Ordering::SeqCst);
@@ -1182,10 +1162,7 @@ pub unsafe fn enter_frame(
 
 fn flush_global_arena_on_image_switch(lane: ExecutionLane, next_token: u64, next_pages: u64) {
     let idx = lane.index();
-    assert!(
-        idx < MAX_EXECUTION_LANES,
-        "execution lane index exceeds guest lane table"
-    );
+    lane.assert_in_range();
     let prev_token = LAST_GLOBAL_ARENA_TOKEN[idx].load(Ordering::SeqCst);
     if prev_token != 0 && prev_token != next_token {
         let prev_pages = LAST_GLOBAL_ARENA_PAGES[idx].load(Ordering::SeqCst);

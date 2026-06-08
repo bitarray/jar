@@ -21,13 +21,14 @@
 //!                                                    mov rax, <retval>
 //!                                                    int 0x81
 //!     ring3_exit_stub:  (CPU loads IST1 stack)       .
-//!       mov [USER_RAX], rax                          .
-//!       mov rsp, [KERNEL_RESUME_RSP]                 .
-//!       mov cr3, [SAVED_CR3]                         .
+//!       swapgs                                       .
+//!       mov gs:[USER_RAX], rax                       .
+//!       mov rsp, gs:[KERNEL_RESUME_RSP]              .
+//!       mov cr3, gs:[SAVED_CR3]                      .
 //!       jmp resume                                   .
 //!     resume:                                        .
 //!       pop callee-saved                             .
-//!       mov rax, [USER_RAX]                          .
+//!       mov rax, gs:[USER_RAX]                       .
 //!       ret
 //! ```
 //!
@@ -38,34 +39,124 @@
 //!   and points TSS.IST1 at it. Using IST=1 means we don't need to
 //!   touch TSS.RSP0; the interrupt frame lands on the exception
 //!   stack and we abandon it after copying RAX out.
-//! * **Single-shot.** The static `KERNEL_RESUME_RSP` / `SAVED_CR3` /
-//!   `USER_EXIT_RAX` are global and so this code is *not* reentrant.
-//!   Stage 2.2 only has one active invocation at a time (Hyperlight
-//!   serialises host calls), but if we later add nested PVM
-//!   invocations we'll need to thread these through a per-call
-//!   context.
+//! * **Lane-local state.** [`prepare_ring3_entry`] points GS at the active
+//!   lane's [`Ring3LaneRaw`]. The entry/exit assembly stores its saved kernel
+//!   RSP, saved CR3, and user RAX through GS, so two vCPUs can take the exit
+//!   gate without racing on a process-global slot. Both `GSBase` and
+//!   `KernelGSBase` are set to the same state pointer, and the exit stub starts
+//!   with `swapgs`, because Hyperlight's exception path can leave the active GS
+//!   side swapped before the final `int 0x81`.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use core::mem::offset_of;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 
 /// Vector for the ring-3 exit gate.
 pub const RING3_EXIT_VECTOR: u8 = 0x81;
 
-/// Saved kernel RSP at the point of `iretq` in [`enter_ring3`].
-/// The exit stub overwrites RSP with this value before jumping to
-/// the resume label.
-#[unsafe(no_mangle)]
-pub static KERNEL_RESUME_RSP: AtomicU64 = AtomicU64::new(0);
+#[repr(C, align(64))]
+struct Ring3LaneRaw {
+    lane_index: u64,
+    /// Saved kernel RSP at the point of `iretq` in [`nub_enter_ring3`].
+    kernel_resume_rsp: u64,
+    /// Saved kernel CR3 at the point of CR3 swap in [`nub_enter_ring3`].
+    saved_cr3: u64,
+    /// Ring-3 RAX at the moment of the exit trap.
+    user_exit_rax: u64,
+}
 
-/// Saved kernel CR3 at the point of CR3 swap in [`enter_ring3`].
-/// The exit stub restores this before jumping to resume.
-#[unsafe(no_mangle)]
-pub static SAVED_CR3: AtomicU64 = AtomicU64::new(0);
+struct Ring3LaneState {
+    raw: UnsafeCell<Ring3LaneRaw>,
+}
 
-/// Ring-3 RAX at the moment of the exit trap. Copied out by the
-/// exit stub before the kernel reentry path tears down the
-/// interrupt frame.
-#[unsafe(no_mangle)]
-pub static USER_EXIT_RAX: AtomicU64 = AtomicU64::new(0);
+// SAFETY: each lane writes only its own slot after `prepare_ring3_entry`
+// selects it, and the assembly accesses the selected slot through GS on that
+// same vCPU. Cross-lane sharing is by static address only.
+unsafe impl Sync for Ring3LaneState {}
+
+impl Ring3LaneState {
+    const fn new() -> Self {
+        Self {
+            raw: UnsafeCell::new(Ring3LaneRaw {
+                lane_index: u64::MAX,
+                kernel_resume_rsp: 0,
+                saved_cr3: 0,
+                user_exit_rax: 0,
+            }),
+        }
+    }
+
+    fn ptr(&self) -> *mut Ring3LaneRaw {
+        self.raw.get()
+    }
+
+    /// # Safety
+    /// The caller must ensure this state belongs to the currently entering
+    /// vCPU lane, so no other CPU is concurrently mutating the same raw fields.
+    unsafe fn reset_for_entry(&self, lane: ExecutionLane) {
+        let raw = self.raw.get();
+        unsafe {
+            (*raw).lane_index = lane.index() as u64;
+            (*raw).kernel_resume_rsp = 0;
+            (*raw).saved_cr3 = 0;
+            (*raw).user_exit_rax = 0;
+        }
+    }
+}
+
+static RING3_LANES: [Ring3LaneState; MAX_EXECUTION_LANES] =
+    [const { Ring3LaneState::new() }; MAX_EXECUTION_LANES];
+
+const LANE_INDEX_OFFSET: usize = offset_of!(Ring3LaneRaw, lane_index);
+const KERNEL_RESUME_RSP_OFFSET: usize = offset_of!(Ring3LaneRaw, kernel_resume_rsp);
+const SAVED_CR3_OFFSET: usize = offset_of!(Ring3LaneRaw, saved_cr3);
+const USER_EXIT_RAX_OFFSET: usize = offset_of!(Ring3LaneRaw, user_exit_rax);
+
+const IA32_GS_BASE: u32 = 0xC000_0101;
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
+unsafe fn write_msr(msr: u32, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") lo,
+            in("edx") hi,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+unsafe fn write_gs_bases(base: u64) {
+    unsafe {
+        write_msr(IA32_GS_BASE, base);
+        // Hyperlight exception machinery may use `swapgs` while handling a
+        // ring3 #PF. Keep both sides pointed at the same lane state; the
+        // int-0x81 stub still starts with `swapgs`, which makes the active side
+        // correct even if a prior exception left it swapped.
+        write_msr(IA32_KERNEL_GS_BASE, base);
+    }
+}
+
+/// Return the lane selected by the current GS base. Valid while running in the
+/// ring3 entry/exit path or its exception handlers after [`prepare_ring3_entry`]
+/// has run on this vCPU.
+pub fn current_execution_lane() -> ExecutionLane {
+    let lane: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, qword ptr gs:[{offset}]",
+            out(reg) lane,
+            offset = const LANE_INDEX_OFFSET,
+            options(nostack, preserves_flags, readonly)
+        );
+    }
+    ExecutionLane::new(lane as usize)
+}
 
 unsafe extern "C" {
     /// Drop to ring 3 at `entry_va`, on stack `stack_va`, with page
@@ -95,9 +186,9 @@ unsafe extern "C" {
 //     at the `int 0x81` instruction in ring-3 — so it does a
 //     `mov rsp, ...; jmp resume` longjmp instead.
 //
-// The two halves communicate via the three `AtomicU64` statics
-// above; we use `mov [sym + rip]` (RIP-relative) for `pic`-correct
-// addressing.
+// The two halves communicate through the active lane's GS-base state. Rust sets
+// GS to a `Ring3LaneRaw` before entry; the interrupt gate runs on the same vCPU
+// and therefore sees the same GS base.
 core::arch::global_asm!(
     ".global nub_enter_ring3",
     ".global nub_ring3_exit_stub",
@@ -111,8 +202,8 @@ core::arch::global_asm!(
     "    push r15",
     // Snapshot current cr3 + rsp so the exit stub can restore.
     "    mov rax, cr3",
-    "    mov qword ptr [rip + {saved_cr3}], rax",
-    "    mov qword ptr [rip + {resume_rsp}], rsp",
+    "    mov qword ptr gs:[{saved_cr3}], rax",
+    "    mov qword ptr gs:[{resume_rsp}], rsp",
     // Swap to the per-invocation page table.
     "    mov cr3, rdx",
     // Push iretq frame: SS, RSP, RFLAGS, CS, RIP (last push popped first).
@@ -124,13 +215,16 @@ core::arch::global_asm!(
     "    iretq",
     "nub_ring3_exit_stub:",
     // CPU just dispatched int 0x81 from ring 3 onto the IST1 stack.
+    // If an earlier exception path left GS swapped back to the user side, bring
+    // the lane state into active GS before touching gs:[...].
+    "    swapgs",
     // RAX still holds the ring-3 value; persist it.
-    "    mov qword ptr [rip + {user_rax}], rax",
+    "    mov qword ptr gs:[{user_rax}], rax",
     // Restore the kernel context and longjmp back to the resume label
     // inside nub_enter_ring3.
-    "    mov rax, qword ptr [rip + {saved_cr3}]",
+    "    mov rax, qword ptr gs:[{saved_cr3}]",
     "    mov cr3, rax",
-    "    mov rsp, qword ptr [rip + {resume_rsp}]",
+    "    mov rsp, qword ptr gs:[{resume_rsp}]",
     "    jmp 2f",
     // Resume label: pop callee-saved, load user RAX, return.
     "2:",
@@ -140,14 +234,33 @@ core::arch::global_asm!(
     "    pop r12",
     "    pop rbp",
     "    pop rbx",
-    "    mov rax, qword ptr [rip + {user_rax}]",
+    "    mov rax, qword ptr gs:[{user_rax}]",
     "    ret",
-    saved_cr3 = sym SAVED_CR3,
-    resume_rsp = sym KERNEL_RESUME_RSP,
-    user_rax = sym USER_EXIT_RAX,
+    saved_cr3 = const SAVED_CR3_OFFSET,
+    resume_rsp = const KERNEL_RESUME_RSP_OFFSET,
+    user_rax = const USER_EXIT_RAX_OFFSET,
     user_cs = const crate::segments::USER_CODE_SEL as u64,
     user_ss = const crate::segments::USER_DATA_SEL as u64,
 );
+
+/// Prepare the current vCPU to enter ring 3 on `lane`.
+///
+/// Installs the shared exit gate once, resets the selected lane's scratch
+/// fields, and points GS at that lane's state so the assembly entry/exit path
+/// is reentrant across vCPUs.
+///
+/// # Safety
+/// Safe to call from kernel mode (CPL=0). The caller must pass the lane owned
+/// by the currently running vCPU.
+pub unsafe fn prepare_ring3_entry(lane: ExecutionLane) {
+    lane.assert_in_range();
+    unsafe { install_ring3_exit_gate() };
+    let state = &RING3_LANES[lane.index()];
+    unsafe {
+        state.reset_for_entry(lane);
+        write_gs_bases(state.ptr() as u64);
+    }
+}
 
 /// Install the ring-3 exit gate at vector 0x81 (DPL=3, IST=1).
 ///
@@ -181,8 +294,4 @@ pub unsafe fn install_ring3_exit_gate() {
             );
         }
     }
-    // Reset captured state from any prior call.
-    KERNEL_RESUME_RSP.store(0, Ordering::SeqCst);
-    SAVED_CR3.store(0, Ordering::SeqCst);
-    USER_EXIT_RAX.store(0, Ordering::SeqCst);
 }

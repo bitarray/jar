@@ -103,7 +103,8 @@ use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
-use crate::jit_run::{self, ExecutionLane, ExitInfo, FrameRuntime};
+use crate::execution_lane::ExecutionLane;
+use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::paging;
 use crate::state_cache::CACHE;
 
