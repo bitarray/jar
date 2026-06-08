@@ -113,16 +113,21 @@ static CTX_PAGE: GlobalPage = GlobalPage::new();
 static STACK_PAGE: GlobalPage = GlobalPage::new();
 
 /// PD physical addresses of the process-global CTX / STACK 1 GiB PD subtrees
-/// (PD → PT → the shared CTX/STACK page above), built + leaked once and
+/// (PD -> PT -> the shared CTX/STACK page above), built + leaked once and
 /// borrowed as the CTX/STACK entries of *every* Image's `Pml4SlotTemplate`, so
-/// those identical tables are not duplicated per Image. Lazily resolved on
-/// first compile (single-threaded guest → a plain load/store suffices).
+/// those identical tables are not duplicated per Image.
 static CTX_PD_PA: AtomicU64 = AtomicU64::new(0);
 static STACK_PD_PA: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PD_INIT: spin::Mutex<()> = spin::Mutex::new(());
 
 /// Resolve a global CTX/STACK PD PA, building + leaking the PD subtree mapping
 /// `page_pa` at `va` on first call.
 fn global_pd_pa(slot: &AtomicU64, va: u64, page_pa: u64) -> u64 {
+    let cur = slot.load(Ordering::Acquire);
+    if cur != 0 {
+        return cur;
+    }
+    let _guard = GLOBAL_PD_INIT.lock();
     let cur = slot.load(Ordering::Acquire);
     if cur != 0 {
         return cur;
