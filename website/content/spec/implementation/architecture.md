@@ -1,9 +1,9 @@
 # v3 implementation architecture
 
-A plan for how the v3 spec (this directory's README) maps onto a Rust
+A plan for how the v3 spec (this spec section) maps onto a Rust
 workspace. Captures crate boundaries, layering, the few architectural
 choices that are load-bearing for the split, and a recommended path
-from the current `~/jar/rust` codebase to the target shape.
+from the current Rust workspace to the target shape.
 
 This is a *living* design doc — it gets edited as implementation
 surfaces things the spec didn't anticipate. The spec is the source of
@@ -27,9 +27,9 @@ how the code *is organized*.
   holds both a Cap::Instance reference and PC/regs). It belongs
   one layer up, in the integration crate that combines the two.
 
-- **Backend trait for storage.** CNodes can be large (up to 2^k slots
-  for any k); the storage backing must be abstracted via a trait so
-  we can swap in-memory for merkle-tree-backed implementations later
+- **Backend trait for storage.** CNodes can be large (a sparse Key-addressed
+  map, no fixed capacity); the storage backing must be abstracted via a trait so
+  we can swap in-memory for merkle-tree-backed commitment implementations later
   without touching upstream code.
 
 - **Incremental migration.** The current `javm`-and-`jar-kernel` split
@@ -94,13 +94,23 @@ Just the structural primitives that the spec defines.
 
 ### Responsibilities
 
-- **Cap kinds.** Exactly the five v3 cap kinds per spec README §8 —
+- **Cap kinds.** Exactly the four v3 cap kinds per spec top-level spec §8 —
   a non-parameterized enum:
   - `Cap::Instance(InstanceCap)` — Frame-bound stateful unit.
   - `Cap::Image(ImageCap)`
-  - `Cap::Data(DataCap)`
-  - `Cap::CNode(CNodeCap)`
-  - `Cap::Type(TypeCap)`
+  - `Cap::Data(DataCap)` — dense, size-scaled page merkle. `DataCap` unifies the
+    immutable backing and the mutable working form as
+    `{ backing: Arc<PageSlab>, overlay }`: a copy-on-write overlay of dirtied
+    pages over the immutable `PageSlab` backing. A first write to a page
+    charges #3 CoW gas per page (depth-aware: a scattered write to a deep
+    DataCap costs O(depth) to re-hash at the periodic state root, finding A).
+    (There is no separate `Cap::DataView` variant — it was folded into
+    `Cap::Data`.)
+  - `Cap::CNode(CNodeCap)` — sparse Key-addressed cap map.
+
+  There is no `Cap::Type` kind — type identity is the kernel-attested
+  `image_hash`, read as raw bytes via `host_image_hash_chain`, not a
+  separate cap.
 
   No generic `<P>` parameter; no `Cap::Protocol` variant. The v2
   ProtocolCap mechanism does not exist in v3. JAR-specific things
@@ -109,16 +119,19 @@ Just the structural primitives that the spec defines.
   `kernel:` namespace for kernel-assisted), not as a separate
   cap variant.
 
-- **CNode.** Variable-size cap table (2^k slots). Holds `Option<Cap>`
-  per slot. Pinned-slot machinery (per Image declaration). Slot path
-  addressing for nested cnodes.
+- **CNode.** Sparse Key-addressed cap map (`Map<Key, Cap>`; no fixed
+  capacity). Pinned-slot machinery (per Image declaration). Slot path
+  addressing for nested cnodes. Commitment/proof code may derive a
+  hash-keyed Merkle/radix view from the direct Key map, but ordinary runtime
+  CNode access is direct by Key.
 
 - **CNode backend trait.** Storage abstraction. See "CNode backend"
   section below.
 
 - **Image content + image_hash chain.** Image structure
-  (code, endpoints, memory_mappings, gas_slots, quota_slots,
-  pinned_slots, yield_marker_slot). Hash chain math:
+  (code, endpoints — a sparse Key-keyed `Map<Key, EndpointDef>` —
+  memory_mappings, gas_slots, quota_slots, pinned_slots,
+  yield_receiver_slot). Hash chain math:
   `genesis = hash(image)`, `set_image extends = hash(prev || hash(new))`,
   `derive_spawn = hash(spawner_chain || hash(new))`.
 
@@ -146,10 +159,10 @@ jar-cap/
   src/
     lib.rs
     cap.rs          -- Cap enum, InstanceCap, ImageCap, DataCap,
-                       CNodeCap, TypeCap
+                       CNodeCap
     cnode.rs        -- CNode + CNodeBackend trait + default in-mem impl
     image.rs        -- Image struct, image_hash chain math
-    slot.rs         -- SlotPath, SlotIdx; pinned-slot whitelist
+    slot.rs         -- SlotPath, Key; pinned-slot whitelist
     bmt.rs          -- balanced merkle tree primitive
     hash.rs         -- Hash trait + blake2b default
     ops.rs          -- mgmt_copy / mgmt_move / mgmt_drop / mgmt_cnode_swap
@@ -185,9 +198,18 @@ cap awareness.
   semantics; explicit mapping table per "address space" (one per
   active execution context). The current javm `MemoryMap` shape.
 
-- **Gas metering.** Per-instruction counter, decremented as code
-  runs. Out-of-gas is an exit reason; not a fault here (the layer
-  above translates OOG to a yield with the kernel-issued OOGMarker).
+- **Gas metering.** Per-basic-block pre-reserve at block entry: the
+  engine checks `gas ≥ block_cost + worst_case_#3` before entering a
+  block; if it fails, the block is not entered and nothing is charged.
+  Otherwise the block's instruction cost is debited at entry and
+  copy-on-write materialization (#3) at first-write faults; read-only
+  regions are not fault-charged — their page-in is charged eagerly at the
+  CALL that maps the callee (statically from the Image). Gas never goes
+  negative. Out-of-gas
+  is an exit reason at the engine boundary; not a fault here (the layer
+  above translates OOG to the kernel yielding the `kernel:oog` yield_key,
+  carrying the `Gas{meter_key}` DataCap as payload via slot[0]). See
+  [gas-cost.md §1](../gas-cost.md).
 
 - **ExitReason.** The terminal status from an execution batch:
   `Halt`, `Trap`, `Panic`, `OutOfGas`, `PageFault`, `Ecall`, `HostCall`.
@@ -239,30 +261,40 @@ the MGMT-ecall handler, and the host-call coordination boundary.
 - **Call stack.** The kernel-internal stack of `InstanceEntry` and
   `ReferenceEntry`. Exactly one entry Running at a time. Pushes on
   CALL, pops on HALT/fault. ReferenceEntry pushed by yield routing.
-  See README §3 and discussions/data-flow-principle.md "The stack
+  See top-level spec §3 and principles/data-flow-principle.md "The stack
   model in detail."
 
 - **Frame structures.** `MainFrame` (the cnode of the currently-Running
-  Instance) and `BareFrame` (kernel-injected pinned slots — kernel-
-  issued caps like SetGasMeter, OOGMarker, etc.).
+  Instance) and `BareFrame` (kernel-injected pinned slots — the
+  scratchpad CNode of named YieldSenders, e.g.
+  `YieldSender{"kernel:set_gas_meter"}`, that the guest yields to
+  reach the kernel-as-root-receiver).
 
 - **MGMT ecall dispatch.** Translates ecalli numbers (MGMT_COPY,
   MGMT_MOVE, MGMT_DROP, MGMT_CNODE_MINT, MGMT_CNODE_SWAP, etc.) into
   calls on `jar-cap`'s pure ops. Updates registers per the ABI.
 
-- **Yield routing.** Walks the call stack matching markers against
-  each Instance's YieldCatcher. The YieldCatcher's state is read via
-  kernel short-circuit (not endpoint dispatch); javm has direct
-  access to the kernel-assisted Frame's struct.
+- **Yield routing.** `host_yield(YieldSender)` reads the
+  `yield_key`, then walks owner edges from the logical current
+  Instance toward the root, and delivers to the nearest owner edge whose
+  per-CALL-snapshotted YieldReceiver contains the key (single-resumer).
+  An edge's catch-list is read via kernel short-circuit (not endpoint
+  dispatch); javm has direct access to the snapshotted YieldReceiver.
 
-- **Per-instruction gas debit.** The execution engine reports gas
-  consumed; javm debits the meter named by the active Instance's
-  gas slot. On hit-zero: triggers OOG yield (with kernel-issued
-  OOGMarker payload).
+- **Per-block gas reserve and fault charging.** At each block entry the
+  execution engine checks the meter named by the active Instance's gas
+  slot against the block's cost plus its worst-case #3 reserve; if
+  insufficient it triggers an OOG yield (the `kernel:oog` yield_key, with
+  the `Gas{meter_key}` DataCap as payload via slot[0]) **without entering
+  the block or charging it**. Otherwise it
+  debits the block's instruction cost at entry and the actual
+  **copy-on-write** materialization (#3) at first-write faults (read-only
+  page-in is charged eagerly at the CALL, not here). Gas is never debited
+  per-instruction and never goes negative.
 
 - **InvocationKernel-equivalent API.** A `Vm` surface (renamed from
   v2's `InvocationKernel<P>` — non-generic in v3) implementing the
-  v3 spec (set_image, host_derive_spawn, host_yield-with-marker,
+  v3 spec (set_image, host_derive_spawn, host_yield-with-YieldSender,
   etc.). This is what `jar-kernel` calls into.
 
 ### Module layout
@@ -276,13 +308,16 @@ javm/
     vm.rs           -- Vm (call-stack-aware VM driver; no <P> parameter)
     ecall.rs        -- MGMT + host-call dispatch (impls EcallHandler
                        from javm-exec)
-    yield_route.rs  -- yield-marker routing
-    gas_debit.rs    -- per-instruction gas debit, OOG yield trigger
+    yield_route.rs  -- yield_key routing (owner-edge snapshot,
+                       single-resumer)
+    gas_debit.rs    -- per-block gas reserve at block entry, fault
+                       charging, OOG yield trigger
 ```
 
 No `ProtocolCap` / `ProtocolCapHost` traits — v2's generic
 protocol-payload mechanism is gone in v3. Kernel-assisted Images
-(YieldCatcher, GasMeter, etc.) are recognized by image_hash
+(`kernel:gas`, `kernel:quota`, `kernel:yieldsender`,
+`kernel:yieldreceiver`) are recognized by image_hash
 match against a fixed registry the kernel knows; no generic
 plug-in trait needed.
 
@@ -306,11 +341,16 @@ calls; defines the well-known Images for kernel-assisted Instances.
 
 ### Responsibilities
 
-- **Kernel-assisted Image definitions.** Native-code Images for
-  YieldCatcher, GasMeter, StorageQuota, Gas{meter_id},
-  Quota{quota_id}, and the factory caps (SetGasMeter,
-  SetStorageQuota, MintGas, MintQuota, CreateYieldCatcher) — all
+- **Kernel-assisted Image definitions.** Native-code Images for the
+  four uniform key-based variants — `Gas{meter_key}`, `Quota{quota_key}`,
+  `YieldSender{yield_key}`, `YieldReceiver{Vec<yield_key>}` — all
   recognized by their image_hash in the `kernel:` namespace. The
+  kernel-internal GasMeter / StorageQuota tables back the unit handles;
+  the `kernel:*` yield ops (`kernel:mint_gas`, `kernel:set_gas_meter`,
+  `kernel:mint_quota`, `kernel:set_storage_quota`, `kernel:mint_yield`,
+  `kernel:merge_yield_receiver`) are reached by yielding the named
+  YieldSenders the kernel places in the top-level scratchpad CNode (the
+  kernel is the root YieldReceiver for every `kernel:*` yield_key). The
   v3 spec encodes these as `Cap::Instance` values with kernel-known
   Images; the kernel short-circuits their state access. There is
   no separate "protocol cap" mechanism.
@@ -325,21 +365,22 @@ calls; defines the well-known Images for kernel-assisted Instances.
 
 - **State root.** Merkleization of σ. Uses jar-cap's BMT primitive
   but composes over the σ shape (registries-of-entries). State-root
-  scheme described in README §3 and §12.
+  scheme described in top-level spec §3 and §12.
 
 - **Block apply.** The `apply_block` / transact / dispatch phases.
-  Drives javm per event. Catches yields per marker. Implements the
-  lazy-load OOG-catch pattern (catch OOG → SetGasMeter topup →
-  CALL_RESUME).
+  Drives javm per event. Catches yields per yield_key (the chain
+  registers `kernel:oog` in its YieldReceiver). Implements the
+  lazy-load OOG-catch pattern (catch `kernel:oog` → emit
+  `kernel:set_gas_meter` topup → CALL_RESUME).
 
-- **Kernel-assisted Frames.** Native implementations of GasMeter,
-  StorageQuota, YieldCatcher. Kernel short-circuits these (no
-  bytecode dispatch).
+- **Kernel-assisted Frames.** Native implementations of the GasMeter
+  and StorageQuota tables and the YieldReceiver catch-list. Kernel
+  short-circuits these (no bytecode dispatch).
 
 - **Host calls.** set_image, host_derive_spawn, host_open, host_save,
   host_yield, host_mint_cnode, host_mint_data_cap, host_read_data_cap,
-  host_same_type, host_same_type_as, host_type_of, host_subtype,
-  host_type_eq, host_make_image (see "Cap::Image construction" below).
+  host_image_hash_chain, host_make_image (see "Cap::Image construction"
+  below).
 
 - **PoA / consensus** (existing) — validator scheduling, block hash,
   proposer rotation.
@@ -354,25 +395,27 @@ retirement. Major shape:
 - `vm/` module shrinks — call stack + ecall dispatch + invocation
   kernel move to `javm`.
 - `state/` mostly unchanged.
-- New: `kernel_assisted/` module for native impls of YieldCatcher,
-  GasMeter, StorageQuota.
+- New: `kernel_assisted/` module for native impls of YieldSender /
+  YieldReceiver, GasMeter, StorageQuota.
 
 ## CNode backend (the trait)
 
 Cnodes vary widely in size:
-- **Root cnode (RootCNode)**: fixed 256 slots, ~8 KiB if naive
-  `[Option<Cap>; 256]`.
-- **Cap::CNode** (variable): 2^k slots for any k. Large k (e.g., 16
-  = 64K slots, 20 = 1M slots) is plausible for chain registries.
+- **Root cnode (RootCNode)**: Key-addressed sparse cnode, same shape as
+  Cap::CNode. There is no fixed 256-slot table.
+- **Cap::CNode** (sparse): a Key-addressed map, no fixed capacity — scales
+  to large registries (e.g. millions of `address -> Cap::Instance` entries),
+  bounded by storage quota. A commitment backend may place `hash(key)` in a
+  radix/Merkle tree when calculating roots or proofs, but that is not the
+  runtime lookup representation.
 
 A 1M-slot cnode held naively as `Vec<Option<Cap>>` is ~32 MB per
 instance. Many such cnodes in flight is untenable. Hence the trait.
 
 ```rust
 pub trait CNodeBackend {
-    fn size_log(&self) -> u8;            // 2^k
-    fn get(&self, idx: u32) -> Option<&Cap>;
-    fn set(&mut self, idx: u32, cap: Option<Cap>);
+    fn get(&self, key: &Key) -> Option<&Cap>;
+    fn set(&mut self, key: Key, cap: Option<Cap>);
     fn hash(&self) -> Hash;              // content hash; cached/lazy ok
     fn snapshot(&self) -> Self where Self: Sized;
                                          // COW snapshot for working state
@@ -381,9 +424,9 @@ pub trait CNodeBackend {
 
 Two initial implementations:
 
-1. **`MemoryCNode`** (default). Simple `Vec<Option<Cap>>`, allocated
-   to size. Hash computed from full content. Snapshot = clone. Fast
-   for small cnodes; uses too much memory for large.
+1. **`MemoryCNode`** (default). Simple sparse direct `Map<Key, Cap>`.
+   Hash/root is computed from a derived commitment view when needed. Snapshot =
+   clone. Fast for small cnodes; not intended as the final large-state backend.
 
 2. **`MerkleCNode`** (lazy, for large). A balanced merkle tree where
    subtrees can be:
@@ -404,11 +447,11 @@ The primitive: a balanced binary merkle tree over a sequence of
 leaves. Used at three places in the spec:
 
 1. **State-root.** σ is hashed canonically; chain header carries
-   `state_root = root_hash(σ)`. See README §12.
+   `state_root = root_hash(σ)`. See top-level spec §12.
 
 2. **Page-merkleized DataCaps.** Large data values stored as a BMT
    of 4 KiB pages so that modifying one page is O(log num_pages)
-   to recompute the hash. See README §2 "Page-merkleized DataCap."
+   to recompute the hash. See top-level spec §2 "Page-merkleized DataCap."
 
 3. **MerkleCNode** (above; future).
 
@@ -453,7 +496,7 @@ v3 is feature-complete. Each stage ends compile- and lint-clean.
 
 - New `rust/jar-cap/` crate.
 - Write (not "move") the v3 cap system:
-  - `Cap` enum (non-generic; five v3 kinds).
+  - `Cap` enum (non-generic; four v3 kinds).
   - `CNode` + `CNodeBackend` trait + `InMemoryCNode` default impl.
   - `Image` + image_hash chain math.
   - `Hash` trait + `Blake2b256` default.
@@ -480,28 +523,34 @@ v3 is feature-complete. Each stage ends compile- and lint-clean.
   - InstanceEntry / ReferenceEntry call stack.
   - MainFrame / BareFrame.
   - MGMT ecall dispatch + host-call coordination.
-  - Yield-marker routing.
-  - Per-instruction gas debit against active Instance's gas slot.
+  - yield_key routing (owner-edge snapshot, single-resumer).
+  - Per-block gas reserve at block entry against ordered gas slots.
 
 ### Stage 4 — kernel-assisted Instances in jar-kernel-v3
 
 - Add `jar-kernel/src/kernel_assisted/`:
-  - `yield_catcher.rs` — kernel-implemented YieldCatcher image.
+  - `yield_receiver.rs` — kernel-implemented YieldReceiver catch-list image.
+  - `yield_sender.rs` — kernel-implemented YieldSender emit-right image.
   - `gas_meter.rs` — kernel-internal GasMeter table.
   - `storage_quota.rs` — kernel-internal StorageQuota table.
-  - `gas.rs` — Gas{meter_id} unit-handle image.
-  - `quota.rs` — Quota{quota_id} unit-handle image.
-- Add factory caps: SetGasMeter, SetStorageQuota, MintGas, MintQuota,
-  CreateYieldCatcher.
-- Add kernel-issued markers: OOGMarker, StorageExhaustedMarker.
-- Inject all of these into chain Instance's cnode at genesis (per
-  README §12 "Chain init: kernel-issued caps").
+  - `gas.rs` — Gas{meter_key} unit-handle image.
+  - `quota.rs` — Quota{quota_key} unit-handle image.
+- Wire the `kernel:*` yield ops (the root receiver's handlers):
+  `kernel:mint_gas`, `kernel:set_gas_meter`, `kernel:mint_quota`,
+  `kernel:set_storage_quota`, `kernel:mint_yield`,
+  `kernel:merge_yield_receiver`.
+- Define the OOG / StorageExhausted yield_keys: `kernel:oog` /
+  `kernel:storage_exhausted` (no dedicated marker caps).
+- Place the named YieldSenders in the top-level scratchpad CNode and
+  register the chain's caught keys (e.g. `kernel:oog`) in its
+  YieldReceiver at genesis (per top-level spec §12 "Chain init: scratchpad
+  YieldSenders").
 
 ### Stage 5 — wire up the lazy-load OOG-catch pattern
 
-- jar-kernel's apply_block catches OOG yields, calls SetGasMeter to
-  top up, CALL_RESUMEs.
-- Reference: discussions/kernel-assisted-instances.md "The lazy-load
+- jar-kernel's apply_block catches `kernel:oog` yields, emits
+  `kernel:set_gas_meter` to top up, CALL_RESUMEs.
+- Reference: principles/kernel-assisted-instances.md "The lazy-load
   OOG-catch pattern."
 
 ### Stage 6 — state-root via BMT
@@ -537,9 +586,11 @@ fill-in-the-gap defaults.
 
 ```
 host_make_image(code, endpoints, mappings, gas_slots, quota_slots,
-                pinned_slots, yield_marker_slot, dst: SlotPath) → ()
+                pinned_slots, yield_receiver_slot, dst: SlotPath) → ()
   Validates the input (bytecode parseable; slot indices in range;
   no pinned-slot collisions with declared gas/quota/yield slots).
+  endpoints is a Map<Key, EndpointDef> (sparse, Key-keyed; no fixed
+  256 capacity).
   Constructs an Image; computes hash(image); places Cap::Image at dst.
 ```
 
@@ -550,31 +601,33 @@ Alternative considered: pre-image-construction at genesis only.
 Rejected because chains need to construct new Images during apply
 (e.g., when minting new subject types).
 
-### 2. Yieldref cap representation
+### 2. YieldSender / YieldReceiver cap representation
 
-**Question:** Is the yield-marker cap a distinct kind (Cap::YieldRef)
-or just a Cap::Instance with a specific image_hash chain?
+**Question:** Are the emit/catch rights a distinct kind (Cap::YieldRef)
+or just Cap::Instances with a specific image_hash chain?
 
-**Recommendation:** Just a Cap::Instance. No new cap kind.
+**Recommendation:** Just Cap::Instances. No new cap kind.
 
-The marker is a Frame derived via `host_derive_spawn(MarkerImage)`;
-its `instance_hash` is the routing key. The kernel does no special
-validation beyond `instance_hash` equality. There's no per-marker
-behavior — markers are pure routing keys. So no need for a distinct
-cap kind; Cap::Instance suffices.
+The emit right is a `YieldSender{yield_key}` Cap::Instance (the
+`kernel:yieldsender` image); the catch right is a
+`YieldReceiver{Vec<yield_key>}` Cap::Instance (the `kernel:yieldreceiver`
+image, held in the Instance's `yield_receiver_slot`). The pair is minted
+together via the `kernel:mint_yield` yield op — there is no
+`host_derive_spawn(MarkerImage)`. Routing is by `yield_key` along owner
+edges to the nearest snapshotted YieldReceiver that contains the key
+(single-resumer); the kernel does no special validation beyond yield_key
+set-membership. So no need for a distinct cap kind; Cap::Instance suffices.
 
-### 3. CNode size constraints on host_derive_spawn
+### 3. CNode shape for host_derive_spawn
 
-**Question:** Must the cnode argument to host_derive_spawn be exactly
-256 slots? Or auto-pad smaller? Or accept variable size?
+**Resolved:** the cnode argument to host_derive_spawn is a sparse,
+Key-addressed Cap::CNode. There is no exact-size requirement and no
+auto-padding rule.
 
-**Recommendation:** Exactly 256 slots (matching RootCNode). Caller is
-responsible. host_derive_spawn returns an error if size mismatches.
-
-Auto-padding is convenient but ambiguous (which slots are pinned?).
-Variable-size root cnodes complicate the address-space-mapping
-machinery. Exact size is simplest and not onerous (caller just
-host_mint_cnode's a 256-slot cnode).
+Pinned keys from the spawned Image overlay the input cnode; collisions
+with non-pinned content follow the top-level pinned-slot collision
+policy. Well-known compact byte keys such as slot[0] remain conventions,
+not a root-cnode capacity limit.
 
 ### 4. Recursion depth limit
 
@@ -626,7 +679,7 @@ state_root = bmt_root([
   bmt_root(images, sorted by ImageId),
   bmt_root(data_blobs, sorted by FileId),
   bmt_root(code_blobs, sorted by CodeId),
-  bmt_root(storage_quotas, sorted by QuotaId),
+  bmt_root(storage_quotas, sorted by Key),
   bmt_root(transact_endpoints, indexed),
   bmt_root(dispatch_endpoints, indexed),
   bmt_root(validators, indexed),
@@ -650,27 +703,31 @@ Block-end: any still-Waiting stack entries fault their corresponding
 Instances (block-end is a hard boundary). Chain that wants multi-
 block continuation explicitly DROP_RESUMEs.
 
-### 9. Cap::Type vs Cap::Image canonical form
+### 9. Type identity vs Cap::Image
 
-**Question:** Both reference image_hash chains. What's the difference?
+**Question:** How is an Instance's type identity represented, given that
+`Cap::Image` already references an image_hash chain?
 
-**Recommendation:** They stay distinct.
+**Recommendation:** Type identity is the kernel-attested `image_hash`
+itself — it is NOT a separate cap kind.
 
 - `Cap::Image` carries the full Image spec (code, endpoints,
   mappings, pinned_slots, etc.) — content-addressed by its content
   hash.
-- `Cap::Type` carries just an image_hash chain — opaque identifier
-  for "the type produced by deriving image X1 ∘ ... ∘ Xn from
-  genesis."
+- An Instance's *type* is just its cumulative `image_hash` chain value
+  ("the type produced by deriving image X1 ∘ ... ∘ Xn from genesis").
+  There is no opaque `Cap::Type` wrapper around it.
 
-You can compute Cap::Type from any Cap::Instance (via
-host_type_of) or from another Cap::Type extended by Images (via
-host_subtype). You can never go the other way — a Cap::Type doesn't
-let you recover the Images.
+You read the raw `image_hash` bytes of any `Cap::Instance` (or
+`Cap::Image`) via `host_image_hash_chain`, which places a `Cap::Data`
+holding those bytes. You can never go the other way — the image_hash
+value doesn't let you recover the Images.
 
-Tests for type equality use `host_type_eq` (image_hash equality).
-Authority uses Cap::Instance possession + yield-marker pattern (per
-README §14), not Cap::Type.
+Type equality is a userspace `memcmp` of two `host_image_hash_chain`
+results; a subtype check folds the chain extension yourself
+(`hash(acc || hash(image))`). Authority uses YieldSender possession +
+YieldReceiver interposition (per top-level spec §14), not type matching — type
+identifies, possession authorizes.
 
 ## Smaller fill-in-the-gap decisions
 
@@ -685,16 +742,16 @@ unless the user redirects.
 - **CodeId: blake2b-256 of code blob.** Content-addressed; auto-dedup.
   (Already in the current implementation.)
 
-- **FileId / QuotaId / VaultId / ImageId: monotonic u64.**
+- **FileId / Key / VaultId / ImageId: monotonic u64.**
   Chain-state-resident counters in IdCounters. Already current.
 
-- **Meter_id / quota_id: chain-chosen u64.** Per resolved decisions
-  in [discussions/kernel-assisted-instances.md](../discussions/kernel-assisted-instances.md).
+- **Meter_id / quota_key: chain-chosen u64.** Per resolved decisions
+  in [principles/kernel-assisted-instances.md](../principles/kernel-assisted-instances.md).
 
 - **Dirty-page tracking lifetime: stack-leave reset.** Per resolved
   decisions in kernel-assisted-instances.md.
 
-- **OOG payload: just the Gas{meter_id} cap.** No caller context.
+- **OOG payload: just the Gas{meter_key} cap.** No caller context.
   Per resolved decisions.
 
 - **Genesis chain Instance: derived from a `genesis_image` Cap::Image
@@ -703,7 +760,7 @@ unless the user redirects.
   fixed Image that the chain spec defines.
 
 - **Block apply gas budget: chain-spec constant.** Kernel initializes
-  `root_meter_id` to this value at block start.
+  `root_meter_key` to this value at block start.
 
 - **Block apply quota budget: chain-spec constant.** Same.
 
@@ -750,18 +807,18 @@ Map the spec sections to crate placement:
 | §1 Instance and Image | `jar-cap` (Image, image_hash); `javm` (MainFrame) |
 | §2 Memory model | `javm-exec` (pages, mapping); `jar-cap` (DataCap structure); `jar-kernel` (Pattern 4 dirty-page tracking) |
 | §3 Status state machine + call stack | `javm` (call stack); `jar-kernel` (status as σ state) |
-| §4 Kernel ABI | `javm` (CALL/CALL_RESUME/host_yield/MGMT dispatch); `jar-kernel` (host_open/host_save/etc., kernel-issued cap endpoints) |
+| §4 Kernel ABI | `javm` (CALL/CALL_RESUME/host_yield/MGMT dispatch); `jar-kernel` (host_open/host_save/etc., `kernel:*` yield_keys via the root YieldReceiver) |
 | §5 Apply terminations | `javm` (HALT/yield/fault transitions); `jar-kernel` (status propagation) |
 | §6 Operation patterns | (usage patterns; no specific code) |
 | §7 Pure-function apply | (structural invariant; enforced by the layering) |
-| §8 Cap kinds | `jar-cap` (Cap enum, the five kinds) |
+| §8 Cap kinds | `jar-cap` (Cap enum, the four kinds) |
 | §9 By-value semantics | `jar-cap` (cnode hashing, hash divergence); `javm` (working-memory cap-table updates) |
 | §10 Sub-tree atomicity | `javm` (call-stack discipline; fault unwinds) |
 | §11 Sync CALL + emits + saga | `jar-kernel` (emit handling, saga compensation) |
-| §12 Per-block kernel + chain Instance | `jar-kernel` (apply_block, chain init kernel-issued caps) |
+| §12 Per-block kernel + chain Instance | `jar-kernel` (apply_block, chain init scratchpad YieldSenders) |
 | §13 Off-chain Dispatch | `jar-kernel` (off-chain dispatch path) |
 | §14 Authority via capability flow | (chain bytecode pattern; no kernel code) |
-| §15 Attestation | `jar-kernel` (AA kernel-assisted Instance; per-attest yield handler) |
+| §15 Attestation | `jar-kernel` (AA kernel-assisted Instance; `kernel:attest` yield_key via the root YieldReceiver) |
 | §16 MintInstance | (chain bytecode pattern; same authority mechanism) |
 | §17 Footgun reduction | (structural; enforced by the layering) |
 | §22 Kernel-assisted Instances | `jar-kernel/kernel_assisted/` |
@@ -807,6 +864,6 @@ The architectural choices that are *load-bearing* for this split:
    things by image_hash match against the kernel's registry. The
    v2 ProtocolCap mechanism is retired.
 
-For the spec-level questions still open in README §18, the
+For the spec-level questions still open in top-level spec §18, the
 recommended resolutions above are defensible defaults; the user
 can redirect any individual one.

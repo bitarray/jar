@@ -1,9 +1,0 @@
-[package]
-name = "jar-fuzz"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-hex = "0.4"

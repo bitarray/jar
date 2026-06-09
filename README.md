@@ -18,7 +18,7 @@ The repository hosts two parallel tracks that converge in `rust/`:
 
 | Directory | Description |
 |-----------|-------------|
-| [`spec/`](spec/) | Lean 4 formal specification — executable, machine-checked, tested against conformance vectors |
+| [`spec/`](spec/) | Lean 4 formal specification for SSZ, PVM2, caps, SubVM, JAVM kernel core, and Genesis scoring |
 | [`website/content/spec/`](website/content/spec/) | Minimum-kernel v3 architecture spec (cap system, Image / Instance, `nub` microkernel design) |
 | [`rust/`](rust/) | Rust workspace — JAVM, recompiler, `nub`, `jar-kernel`, `scale`, `subsoil` |
 | [`components/`](components/) | Guest crates compiled to PVM blobs (bench guests; future userspace services) |
@@ -30,7 +30,7 @@ The repository hosts two parallel tracks that converge in `rust/`:
 |-------|------|
 | `javm-exec` | Pure PVM execution engine (interpreter, gas, memory pages). No cap awareness. |
 | `javm-recompiler-x86` | x86-64 JIT recompiler for PVM bytecode. |
-| `javm-cap` | Foundational cap system: the five cap kinds (Instance, Image, Data, CNode, Type), CNode, image_hash chain, `MGMT_*` semantics. |
+| `javm-cap` | Foundational cap system: the four cap kinds (Instance, Image, Data, CNode), CNode, image_hash chain, `MGMT_*` semantics. |
 | `javm` | Full JAVM = caps + execution + call stack + host-call coordination. |
 | `javm-transpiler` | RISC-V ELF → PVM bytecode transpiler. |
 | `nub` | Long-running microkernel running inside a KVM-isolated guest; hosts σ and the JIT. |
@@ -78,7 +78,6 @@ JAR uses a Proof-of-Intelligence model for its genesis token distribution. Every
 
 ```sh
 cd spec
-cd crypto-ffi && cargo build --release && cd ..
 lake build
 make test
 ```

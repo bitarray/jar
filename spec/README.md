@@ -1,6 +1,6 @@
 # JAR Spec — Lean 4 Formalization
 
-Lean 4 formalization of the JAR protocol, based on JAM (Join-Accumulate Machine).
+Lean 4 formalization of the current JAR design up to the JAVM kernel level.
 
 All commands below run from the `spec/` directory.
 
@@ -8,28 +8,24 @@ All commands below run from the `spec/` directory.
 
 JAR stands for **Join-Accumulate Refine**. It describes the core data flow of the protocol: work packages are *refined* off-chain, then *join-accumulated* on-chain into the global state.
 
-JAR is based on the JAM (Join-Accumulate Machine) protocol as specified in the Gray Paper, with independent improvements to areas such as the PVM.
-
 ## Goals
 
-1. **Correctness proofs** — prove key invariants (codec roundtrips, gas safety, state transition properties)
-2. **Readable specification** — serve as an alternative, machine-checked notation for the Gray Paper
-3. **Executable reference** — `#eval`-able definitions that can be tested against conformance vectors
+1. **Readable core spec** — keep the decided SSZ, PVM2, capability, SubVM, and kernel rules in machine-checked notation.
+2. **Executable reference fragments** — expose small definitions that can be evaluated and tested while the Rust implementation evolves.
+3. **Proof hooks** — state the invariants that matter at the JAVM kernel boundary without carrying old JAM/EVLES machinery.
 
 ## Module Structure
 
-| Module | Gray Paper | Description |
-|--------|-----------|-------------|
-| `Jar.Notation` | §3 | Custom notation matching GP conventions |
-| `Jar.Types` | §3–4 | Core types, constants, data structures |
-| `Jar.Codec` | Appendix C | JAM serialization codec |
-| `Jar.Crypto` | §3.8, App F–G | Cryptographic primitives |
-| `Jar.PVM` | Appendix A | Polkadot Virtual Machine |
-| `Jar.Merkle` | Appendices D–E | Merklization and Merkle tries |
-| `Jar.Erasure` | Appendix H | Reed-Solomon erasure coding |
-| `Jar.State` | §4–13 | State transition function |
-| `Jar.Consensus` | §6, §19 | Safrole and GRANDPA |
-| `Jar.Services` | §9, §12, §14 | Service accounts and work pipeline |
+| Module | Description |
+|--------|-------------|
+| `Jar.Basic` | Shared byte, hash, key, slot-path, memory-layout, and depth constants. |
+| `Jar.SSZ` | SSZ type descriptors, layout validity, offset monotonicity, and merkleization boundary. |
+| `Jar.PVM2.*` | RV64E register map, 32-bit memory envelope, instruction classes, basic blocks, and gas model. |
+| `Jar.Cap` | Image, data, CNode, instance capabilities and management operations. |
+| `Jar.Kernel` | Gas/quota resources and yield routing, including the kernel yield namespace. |
+| `Jar.SubVM` | Invocation, pause/well-formedness, scratchpad slot, depth, and gas-charge rules. |
+| `Jar.JAVM` | Aggregate JAVM image and execution state. |
+| `Genesis.*` | Proof-of-Intelligence genesis scoring, kept as the established standalone library. |
 
 ## Building
 
@@ -39,99 +35,16 @@ lake build
 
 ## Testing
 
-### Conformance Tests (JSON Vectors)
-
-Jar tests against JSON test vectors derived from Grey's STF conformance suite.
-Each test case is a pair of files with separate input and output:
-
-- `*.input.json` — `{ "pre_state": {...}, "input": {...} }`
-- `*.output.json` — `{ "output": {...}, "post_state": {...} }`
-
-Vectors live in `tests/vectors/<sub-transition>/tiny/`.
-
-Run all tests for a single sub-transition:
-
 ```sh
-lake build safrolejsontest && .lake/build/bin/safrolejsontest
+make test
 ```
 
-Available test targets: `safrolejsontest`, `statisticsjsontest`, `authorizationsjsontest`,
-`historyjsontest`, `disputesjsontest`, `assurancesjsontest`, `preimagesjsontest`,
-`reportsjsontest`, `accumulatejsontest`.
+This builds the `Jar` library, the `Genesis` library, and the `genesis` CLI.
 
-Run tests from a custom directory:
-
+Build the rendered Lean manual:
 ```sh
-.lake/build/bin/safrolejsontest path/to/vectors/
+make book
 ```
-
-### Bless Mode
-
-When the spec changes, recompute expected outputs from Jar and overwrite the output files:
-
-```sh
-lake build jarstf
-.lake/build/bin/jarstf --bless safrole tests/vectors/safrole/tiny
-```
-
-This reads each `*.input.json` (pre_state + input), runs the transition, and writes
-the computed output + post_state to the corresponding `*.output.json`. Input files
-are never modified.
-
-### Property Tests
-
-Property-based tests using [Plausible](https://github.com/leanprover-community/plausible)
-verify invariants (codec roundtrips, shuffle permutations, state bounds) over random inputs:
-
-```sh
-lake build propertytest && .lake/build/bin/propertytest
-```
-
-### STF Server
-
-The `jarstf` executable runs any sub-transition on a JSON input file and prints the result:
-
-```sh
-lake build jarstf
-.lake/build/bin/jarstf safrole tests/vectors/safrole/tiny/publish-tickets-no-mark-1.input.json
-```
-
-Supported sub-transitions: `safrole`, `statistics`, `authorizations`, `history`,
-`disputes`, `assurances`, `preimages`, `reports`, `accumulate`.
-
-### Differential Fuzzing
-
-The `fuzz/` directory contains a Rust harness that generates random JSON inputs,
-runs them through Jar (oracle) and an implementation-under-test, and reports divergences.
-
-```sh
-# Build the Jar STF server and the fuzzer
-lake build jarstf
-cd fuzz && cargo build --release
-
-# Generate test vectors (Jar only, no comparison)
-./target/release/jar-fuzz \
-  --jar-bin ../.lake/build/bin/jarstf \
-  --sub-transition safrole \
-  --seed 42 --steps 100 \
-  --generate-only --output-dir /tmp/vectors/
-
-# Differential test against another implementation
-./target/release/jar-fuzz \
-  --jar-bin ../.lake/build/bin/jarstf \
-  --impl-bin /path/to/other-stf \
-  --sub-transition safrole \
-  --seed 42 --steps 1000
-
-# Run fuzzer on existing test vectors
-./target/release/jar-fuzz \
-  --jar-bin ../.lake/build/bin/jarstf \
-  --impl-bin /path/to/other-stf \
-  --sub-transition safrole \
-  --input-dir ../tests/vectors/safrole/tiny
-```
-
-The implementation-under-test must accept the same CLI interface: `<binary> <sub-transition> <input.json>` and print result JSON to stdout.
 
 ## Genesis — Proof of Intelligence
 

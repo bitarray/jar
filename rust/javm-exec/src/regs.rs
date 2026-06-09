@@ -97,10 +97,10 @@ pub const REG_SLOT_LUT: [u8; 32] = {
     t
 };
 
-/// Full register state: 13 GPRs + PC.
+/// Full register state: 15 GPRs + PC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Regs {
-    /// General-purpose registers φ₀..φ₁₂.
+    /// General-purpose registers, including the two spilled x3/x4 slots.
     pub gpr: [u64; REG_COUNT],
     /// Program counter — a code byte-offset, not a memory address.
     /// (Register-held code addresses, e.g. a saved return address or an

@@ -12,21 +12,19 @@ caps are typed forgery-resistant references, conservation is bytecode
 arithmetic in canonical authorities, and snapshot/revert is universal
 via MGMT_COPY.**
 
-This document promotes the v3 design from discussion to top-level spec.
-The discussion-level exploration with linearity remains at
-[../minimum/discussions/minimal-kernel-v3.md](../minimum/discussions/minimal-kernel-v3.md)
-for reference if we want to revisit linearity later.
+This is the decided v3 kernel specification. Exploratory drafts and
+superseded alternatives are intentionally not published here.
 
 ## The shape, in one paragraph
 
-An Instance holds an Image (its current spec) and a 256-slot cnode (its
-mutable state). Image is a structured cap kind (`Cap::Image`)
+An Instance holds an Image (its current spec) and a Key-addressed root
+cnode (its mutable state). Image is a structured cap kind (`Cap::Image`)
 containing code, endpoints, memory mappings, and pinned ro caps.
 Instances evolve their Image via **`set_image`** — atomically swapping
 pinned slots and extending the cumulative `image_hash` chain. The
 canonical formula: at genesis `image_hash = hash(initial_image)`;
 after `set_image(new)`, `image_hash = hash(image_hash_before ||
-hash(new))`. All five cap kinds (Instance, Image, Data, CNode, Type) are
+hash(new))`. All four cap kinds (Instance, Image, Data, CNode) are
 **uniformly copyable** (content-addressed; MGMT_COPY shares content
 hash; mutations diverge). Conservation of resources lives in
 **authority bytecode** (ChainOrchestrator's ledgers); structural
@@ -51,12 +49,13 @@ mutations diverge per §9 case (b).
 - **Cap::Instance is uniformly copyable.** No `image.copyable` field.
   Snapshot/revert works on any Instance.
 - **No KernelInstance category — kernel-assisted Instances instead.**
-  Instances whose image is well-known to the kernel (YieldCatcher,
-  GasMeter, StorageQuota, Gas{meter_id}, Quota{quota_id},
-  AttestationAuthority) are still Cap::Instance; the kernel may
+  The four kernel-assisted variants (Gas{meter_key}, Quota{quota_key},
+  YieldSender{yield_key}, YieldReceiver{Vec<yield_key>}), plus the
+  AttestationAuthority cap, are still Cap::Instance; the kernel may
   direct-access their state for hot-path metering, but they share
-  the cap kind with everything else. See §22 and
-  [discussions/kernel-assisted-instances.md](discussions/kernel-assisted-instances.md).
+  the cap kind with everything else. (The kernel-internal GasMeter /
+  StorageQuota tables they index are not caps.) See principle 22 and
+  [principles/kernel-assisted-instances.md](principles/kernel-assisted-instances.md).
 - **By-value with content-addressed slot references.** Slots only
   update at apply termination. Sub-tree atomicity is structural:
   faulted apply leaves no observable side effect outside its working
@@ -79,11 +78,12 @@ mutations diverge per §9 case (b).
   content-addressed copyable kinds suitable for "ro spec content".
 - **Resource caps are not separate kinds.** Gas and StorageQuota
   are kernel-assisted Cap::Instances (§22): per-Instance unit handles
-  (`Cap::Instance[Gas{meter_id}]` in `gas_slots`,
-  `Cap::Instance[Quota{quota_id}]` in `quota_slots`) into kernel-
+  (`Cap::Instance[Gas{meter_key}]` in `gas_slots`,
+  `Cap::Instance[Quota{quota_key}]` in `quota_slots`) into kernel-
   internal `GasMeter` / `StorageQuota` tables. Chain accesses the
-  tables only via kernel-issued `SetGasMeter` / `SetStorageQuota`
-  caps. Custom resources are typed handles into authority ledgers.
+  tables by yielding the `kernel:set_gas_meter` /
+  `kernel:set_storage_quota` YieldSenders (from the scratchpad CNode).
+  Custom resources are typed handles into authority ledgers.
 - **Authority is conveyed by capabilities.** Cap possession is the
   right to invoke. Unforgeability via image_hash chain; unappropriability
   via cnode ownership. No per-user ACL tables; no bearer tokens (in
@@ -107,7 +107,7 @@ mutations diverge per §9 case (b).
     termination.
 
 4.  Caps are uniformly copyable.
-    All five cap kinds (Instance, Image, Data, CNode, Type) are
+    All four cap kinds (Instance, Image, Data, CNode) are
     content-addressed copyable. No kernel-level linearity. Conservation
     of resources lives in authority bytecode; structural forgery
     resistance comes from image_hash chain.
@@ -115,11 +115,20 @@ mutations diverge per §9 case (b).
 5.  Memory is static, declared by Image.
     Two purposes: ro reference data (Image-baked or pinned cnode
     DataCaps) and rw working/persistent areas (mapped via cnode
-    DataCap slots). No dynamic mapping; no lazy paging.
+    DataCap slots). The declared footprint is fixed for the
+    Instance's lifetime (no dynamic growth). Within that fixed
+    footprint, demand paging is unchanged — pages still materialize
+    lazily on first touch — but the gas attribution differs by region:
+    ro regions (pinned DataCaps, code) are materialized lazily yet their
+    page-in is **charged eagerly at the CALL** (computed statically from
+    `Image.memory_mappings`), while writable pages materialize and charge
+    **copy-on-write on first write** — see [gas-cost.md §3](gas-cost.md).
+    This is a metering mechanism, not dynamic allocation: an access
+    outside the declared mappings is a hard fault, never a lazy allocation.
 
 6.  Apply is a pure function.
     apply : (input, state, scratchpad) → (new_state, reply, emits)
-            | yield(slot, reason)
+            | yield(yield_sender)
             | fault.
     No side effects during execution. Effects are encoded as outputs.
 
@@ -129,23 +138,25 @@ mutations diverge per §9 case (b).
     updates-at-termination.
 
 8.  CALL is the only invocation primitive.
-    CALL_RESUME and DROP_PAUSED handle Paused Instances. No CALL_TO.
+    CALL_RESUME and DROP_RESUME handle Paused / Waiting continuations.
+    No CALL_TO.
 
 9.  slot[0] is the universal scratchpad channel.
     All inbound/outbound payload between instances flows through slot[0].
     CALL/CALL_RESUME move caller's slot[0] into target's slot[0]
     (down). HALT/yield/fault reflect target's slot[0] back to caller's
-    slot[0] (up). host_yield takes only a marker reference (a
-    Cap::Instance whose instance_hash is the routing key — see §14); the
-    marker's payload reflects via slot[0]. Apply discipline: keep
-    slot[0] in a safe-to-reflect state at all times (OOG can yield
-    at any instruction; mid-mutation states would expose partial
-    data).
+    slot[0] (up). host_yield takes only a YieldSender reference (a
+    Cap::Instance whose yield_key is the routing key — see §14); the
+    YieldSender's payload reflects via slot[0]. Apply discipline: keep
+    slot[0] in a safe-to-reflect state at all times (a hard fault can
+    reflect at any instruction — OOG and voluntary yields only at a
+    basic-block start; mid-mutation states would expose partial data).
 
-10. OOG is just kernel-triggered host_yield with the kernel-issued
-    OOGMarker (§4). Captures continuation; reflects a
-    Cap::Instance[Gas{meter_id}] payload to caller; caller typically
-    SetGasMeter's a topup and CALL_RESUMEs.
+10. OOG is just the kernel yielding the `kernel:oog` yield_key (§4),
+    routed by the same owner-edge rule as voluntary yield. Captures
+    continuation; reflects a Cap::Instance[Gas{meter_key}] payload to the
+    owner-side handler; the handler typically tops up via the
+    `kernel:set_gas_meter` YieldSender and CALL_RESUMEs.
 
 11. Saga is for peer coordination only.
     Sub-Instance ownership is structurally atomic. Saga (emit +
@@ -207,27 +218,25 @@ mutations diverge per §9 case (b).
     cap-runtime integrity prevent adversary from producing Instances with
     canonical image_hash chains.
 
-17. Type query is semantic, not raw; types are identification, not
+17. Type identity is the image_hash; types are identification, not
     authorization.
-    Userspace cannot read raw image_hash. Two type-query host calls:
-      host_same_type(a, b)
-                  — image_hash equality between two caps the caller
-                    holds.
-      host_same_type_as(comparer, comparee, [images])
-                  — relative-chain comparison: returns true iff
-                    comparer's image_hash equals the hash chain
-                    extension of comparee's image_hash through the
-                    given Cap::Image derivation steps.
-    Plus the Cap::Type primitives (host_type_of, host_subtype,
-    host_type_eq) for working with types as caps. See §8.
-    
-    **Type queries identify; possession authorizes.** Two Instances
-    being "the same type" doesn't grant authority. Authority requires
-    possession of Cap::Instance (the actual instance) used per the
-    yield-marker pattern (§14, userspace/generic-authority-pattern.md).
-    Raw image_hash and full lineage walking are not exposed; if
-    needed, chains track
-    ancestors in their own state.
+    An Instance's type is its kernel-attested image_hash (the cumulative
+    chain hash), read as raw bytes via one host call:
+      host_image_hash_chain(slot, dst)
+                  — place a Cap::Data holding the cap's image_hash bytes
+                    at dst.
+    Same-type = memcmp two such results; subtype = fold the chain
+    extension (hash(acc || hash(image))) yourself. See §8.
+
+    **Type identifies; possession authorizes.** Two Instances being "the
+    same type" doesn't grant authority. Authority requires possession of
+    Cap::Instance (the actual instance) used per the
+    YieldSender/YieldReceiver authority pattern (§14,
+    userspace/generic-authority-pattern.md). The image_hash *value* is
+    freely readable and freely computable (neither secret nor an
+    authority credential), so there is no separate Cap::Type kind. Full
+    lineage *walking* (enumerating ancestors) is not exposed; if needed,
+    chains track ancestors in their own state.
 
 18. Authority within σ is conveyed by capabilities.
     σ is public, but caps in v3 are not bearer tokens whose security
@@ -235,8 +244,9 @@ mutations diverge per §9 case (b).
     image_hash chain (§16 principle) plus cnode ownership discipline
     (§13). Authority is expressed by minting EndpointRefCap-style
     caps and granting them via cap-flow (§14). Possession = right
-    to invoke; intermediates can route but cannot inspect endpoints
-    that gate on caller-witness image_hash. No σ-resident signing
+    to invoke; intermediates can route a keyed yield but never see its
+    payload — owner-edge routing + single-resumer reflect it only via the
+    nearest registered owner receiver's slot[0]. No σ-resident signing
     keys; no per-user ACL tables.
 
 19. Instance creation is via MGMT_COPY (for siblings) and host_derive_spawn
@@ -258,10 +268,23 @@ mutations diverge per §9 case (b).
                                      self's apply; consumes the cnode
                                      arg.
 
-20. Instance's root cnode is fixed at 256 slots.
-    Variable-size storage uses Cap::CNode (size = 2^k slots; minted
-    via host_mint_cnode). Cap::CNode is uniformly copyable; copying a
-    populated Cap::CNode produces a content-addressed share.
+20. Instance's root cnode is Key-addressed, not a fixed 256-slot table.
+    The root cnode and Cap::CNode share the same sparse Key-addressed map
+    shape: `Key -> Cap`. There is no declared `2^k` capacity: a CNode grows
+    on demand, bounded by storage quota. Leaf values are always caps
+    (`CapHashOrRef`), never raw data — so a CNode can model
+    `address -> Cap::Instance` for native contracts. Minted via
+    host_mint_cnode; any old size argument is legacy and has no semantic
+    meaning. Cap::CNode is uniformly copyable; copying a populated Cap::CNode
+    produces a content-addressed share.
+
+    Commitment layout is not the runtime access model. A state-root/proof
+    implementation may derive a structurally-compressed binary radix Merkle
+    view by placing each logical key at `hash(key)` (EIP-7864-style minimal
+    InternalNodes, no 256-value stem subtree), but ordinary kernel execution
+    reads, writes, CALLs, MOVEs, and DROPs by direct Key lookup. The kernel
+    should not hash CNode keys at runtime except when it is actually computing
+    a CNode commitment/root/proof.
 
 21. Authority + Subject pattern for issued resources.
     Authority Instances (Kernel, MintInstances, chain-defined issuers) are
@@ -281,23 +304,26 @@ mutations diverge per §9 case (b).
     with (yield routing, gas accounting, storage accounting, future
     kernel-mediated operations), that state lives in an Instance whose
     Image is in a kernel-reserved namespace (e.g.,
-    `kernel:yieldcatcher`, `kernel:gasmeter`). Properties:
+    `kernel:yieldreceiver`, `kernel:gasmeter`). The four kernel-assisted
+    variants are `Gas{meter_key}`, `Quota{quota_key}`,
+    `YieldSender{yield_key}` (the EMIT right), and
+    `YieldReceiver{Vec<yield_key>}` (the CATCH right). Properties:
       - Userspace sees a regular Cap::Instance; cap-flow works uniformly.
       - The Image is kernel-implemented in native code (no userspace
         bytecode runs); the state layout is a kernel-known struct.
       - The kernel may short-circuit access to the state during the
-        fast path (e.g., per-instruction gas debit) — but the
-        abstraction at the user-facing level is plain Instance.
+        fast path (e.g., the per-block gas reserve at block entry) —
+        but the abstraction at the user-facing level is plain Instance.
       - Some kernel-assisted Instances live in user Instances' cnodes
-        (e.g., YieldCatcher held in an Instance's `yield_marker_slot`);
+        (e.g., a YieldReceiver held in an Instance's `yield_receiver_slot`);
         others are kernel-internal and never appear in chain hands
-        (e.g., GasMeter, StorageQuota — accessed only via kernel-
-        issued caps like SetGasMeter).
-      - Unit handles into kernel-internal tables (Gas{meter_id},
-        Quota{quota_id}) are regular Cap::Instance; conservation lives
+        (e.g., GasMeter, StorageQuota — accessed by yielding the
+        `kernel:*` YieldSenders from the scratchpad CNode).
+      - Unit handles into kernel-internal tables (Gas{meter_key},
+        Quota{quota_key}) are regular Cap::Instance; conservation lives
         in the kernel-internal table, so cap copies don't multiply
         balance.
-    See [discussions/kernel-assisted-instances.md](discussions/kernel-assisted-instances.md)
+    See [principles/kernel-assisted-instances.md](principles/kernel-assisted-instances.md)
     for the full design and rationale.
 ```
 
@@ -306,7 +332,7 @@ mutations diverge per §9 case (b).
 ```
 Instance {
   image_id:    ImageHash      -- hash of current Image
-  cnode:       RootCNode      -- fixed 256 slots; caps as values;
+  cnode:       RootCNode      -- Key-addressed sparse cnode; caps as values;
                               --   persistent state (pinned slots are
                               --   populated from Image.pinned_slots;
                               --   non-pinned slots are mutable state)
@@ -315,7 +341,8 @@ Instance {
                  regs:           ...
                  pc:             u64           -- MUST be a basic-block start
                                                --   (see "Paused.pc constraint" below)
-                 yield_marker:   Cap::Instance  -- the marker yielded with
+                 yield_sender:   Cap::Instance  -- the captured YieldSender
+                                               --   (carrying its yield_key)
                }
              | Faulted { fault_info }
 
@@ -332,35 +359,41 @@ Instance {
                               --       (preserved; not a chain extension)
 }
 
-RootCNode {                   -- the Instance's root cnode (fixed 256 slots).
-  slots:         [Option<Cap>; 256]
+RootCNode {                   -- the Instance's root cnode.
+  slots:         Map<Key, Cap>       -- sparse, Key-addressed; no fixed
+                                     -- 256-slot table.
 }
 
-CNode {                       -- variable size in Cap::CNode (2^k slots).
-  slots:         [Option<Cap>; SIZE]
+CNode {                       -- sparse Key-addressed kv-map in Cap::CNode.
+  slots:         Map<Key, Cap>       -- commitment/proof code may derive a
+                                     -- hash(key)-keyed Merkle view when needed.
 }
 
 Image {                        -- content-addressed; Cap::Image kind
                                -- the smallest unit of program specification
   code:            Bytes            -- bytecode embedded directly
-                                    -- (validated at Image construction:
-                                    --  parseable; no malformed instructions)
+                                    -- (instruction semantics are lazy:
+                                    --  illegal/reserved encodings panic only
+                                    --  when reached)
   memory_mappings: [MemoryMapping]
-  endpoints:       [Option<EndpointDef>; 256]
-  gas_slots:       [SlotIdx]        -- slots that hold Cap::Instance[Gas{meter_id}]
+  endpoints:       Map<Key, EndpointDef>
+                                    -- sparse, Key-keyed; no fixed 256 capacity.
+  gas_slots:       [Key]        -- slots that hold Cap::Instance[Gas{meter_key}]
                                     -- (kernel-assisted Instances; see §22).
-                                    -- Kernel debits the meter named by the
-                                    -- active gas slot while this Instance runs.
-                                    -- Convention: gas_slots[0] = primary
-                                    --  meter; subsequent entries are
-                                    --  fallback reserves (chain-spec policy).
-  quota_slots:     [SlotIdx]        -- slots that hold Cap::Instance[Quota{quota_id}]
+                                    -- Kernel consults slots in order while
+                                    -- this Instance runs. Empty slots are
+                                    -- skipped; present non-Gas slots fault.
+                                    -- The first valid non-empty slot is the
+                                    -- primary meter used in OOG payloads;
+                                    -- subsequent valid slots are fallback
+                                    -- reserves.
+  quota_slots:     [Key]        -- slots that hold Cap::Instance[Quota{quota_key}]
                                     -- (kernel-assisted Instances; see §22).
                                     -- Kernel debits the named quota when
                                     -- pages are dirtied by this Instance.
                                     -- Convention same as gas_slots: [0] is
                                     --  primary; rest are fallback reserves.
-  pinned_slots:    Map<SlotIdx, ContentAddressedCap>
+  pinned_slots:    Map<Key, ContentAddressedCap>
                                     -- pinned ro caps that the program
                                     -- needs. ContentAddressedCap ∈
                                     -- { Cap::Data, Cap::Image }:
@@ -368,19 +401,25 @@ Image {                        -- content-addressed; Cap::Image kind
                                     --     baked-in constants, etc.
                                     --   Cap::Image: derive_spawn target
                                     --     images for authority Instances.
-                                    -- All slot indices in [0, 256).
-  yield_marker_slot: Option<SlotIdx>
+                                    -- Slot keys are Keys; compact byte keys
+                                    -- are conventional for ABI well-known
+                                    -- slots such as slot[0].
+  yield_receiver_slot: Option<Key>
                                     -- The slot in the Instance's cnode that
-                                    -- holds Cap::Instance[YieldCatcher] — a
+                                    -- holds Cap::Instance[YieldReceiver] — a
                                     -- kernel-assisted Instance (see §22)
-                                    -- whose state is the list of markers
-                                    -- this Instance catches. On YIELD, kernel
-                                    -- walks the call stack and consults each
-                                    -- Instance's YieldCatcher via short-circuit
-                                    -- (no endpoint dispatch), matching by
-                                    -- instance_hash equality.
-                                    -- See §4 (host_yield) and §14 (yield-
-                                    -- marker authority pattern).
+                                    -- whose state is the set of yield_keys
+                                    -- this Instance offers to children it
+                                    -- owns. On CALL, the kernel snapshots the
+                                    -- caller's current YieldReceiver onto the
+                                    -- owner edge. On YIELD/OOG, routing walks
+                                    -- owner edges and the nearest edge snapshot
+                                    -- containing the key catches it
+                                    -- (single-resumer). Routing is by yield_key
+                                    -- membership, not by an instance_hash list.
+                                    -- See §4 (host_yield) and §14
+                                    -- (YieldSender/YieldReceiver authority
+                                    -- pattern).
                                     -- None = this Instance catches no yields.
 }
 
@@ -408,9 +447,29 @@ EndpointDef {
 
 Notes:
 
-- **No `rw_bytes` field.** Persistent rw memory lives as DataCaps in
-  cnode, loaded into the address space via memory_mappings at apply
-  start.
+- **Instance rw memory is a `mem: DataCap`.** The Instance carries its
+  read-write data image as a single dense `Cap::Data` covering the extent
+  `[DATA_BASE, DATA_BASE + mem.size)` — the **immutable Backing** half of the
+  Backing+View mutability model. It is built at construction by folding every
+  memory_mapping's source content (pinned and initial) at its offset; pinned VA
+  ranges are re-laid read-only at seed time, so the pinned-RO gas tier is
+  preserved without keeping pinned bytes separate. A running engine writes
+  dirtied pages straight into the **same `DataCap`'s** copy-on-write overlay
+  (`DataCap = { backing: Arc<PageSlab>, overlay }` — Backing and overlay are one
+  unified `Cap::Data`; there is no separate `Cap::DataView` type and no HALT
+  auto-mint, so the cap itself is the source of truth for its dirty pages).
+  Content-addressing flushes the overlay into a fresh backing first (`flush()`),
+  so a settled `mem` always has an empty overlay. (This replaces the earlier
+  `rw_overlays` byte-range list — same inline-content model, canonicalised into
+  one content-addressed dense DataCap.)
+- **DataCap is dense, page-multiple, and page-aligned.** A `Cap::Data`
+  is page-aligned content whose byte length is the authoritative size and
+  is always a multiple of 4 KiB. There is no separate `size` field and no
+  trailing-zero stripping: `DataCap("Hello" padded to 4 KiB)` and
+  `DataCap("Hello" padded to 8 KiB)` are distinct. No sliding window /
+  `set_offset` — programs roam large state by mapping/unmapping bounded
+  dense DataCaps; the mutable working form is the same `DataCap` carrying
+  a non-empty overlay.
 - **No `volatile` mode.** Stack/scratch live in Ephemeral mappings
   (kernel-allocated, captured into Paused on yield).
 - **No `host_set_*` for spec.** Image is mutated as a unit via
@@ -549,37 +608,27 @@ Forgery resistance comes from:
    hash on every set_image / derive_spawn; MGMT_COPY preserves it;
    userspace cannot influence.
 
-### Type queries
+### Type identity
 
-Userspace cannot read raw image_hash. Two type-query host calls:
+An Instance's type is its kernel-attested `image_hash` (the cumulative
+chain hash). Userspace reads it directly:
 
 ```
-host_same_type(a: SlotPath, b: SlotPath) → bool
-  Returns true iff a.image_hash == b.image_hash.
-
-host_same_type_as(
-    comparer: SlotPath,
-    comparee: SlotPath,
-    images:   [SlotPath of Cap::Image]
-) → bool
-  Returns true iff:
-    comparer.image_hash == fold_left(
-      images, comparee.image_hash,
-      (acc, img) -> hash(acc || hash(img))
-    )
-  i.e., comparer is what you'd get by deriving comparee through the
-  given Image steps. Relative-chain comparison; comparee must be a
-  Cap::Instance (anchor relative to known reference); absolute Cap::Image
-  anchors are deliberately not supported.
+host_image_hash_chain(slot: SlotPath, dst: SlotPath) → ()
+  Pre: slot holds a Cap::Instance (or Cap::Image); dst is empty.
+  Effect: place a Cap::Data holding the raw bytes of the cap's
+    image_hash (the cumulative chain hash) at dst.
 ```
 
 For "is this a canonical Gas Instance?": chain pins a reference Gas
-template; compare via `host_same_type`. For "is this Instance of a
-specific subtype?": use `host_same_type_as`. **For authority
-routing, do NOT use type queries — use possession of Cap::Instance
-combined with the yield-marker mechanism (§14). Type matching is
-identification, not authorization.** Lineage walking and raw hash
-inspection are not exposed.
+template; `memcmp` the two `host_image_hash_chain` results. For "is this
+Instance a specific subtype?": fold the chain extension yourself
+(`hash(acc || hash(image))`) over the reference's bytes and compare.
+**For authority routing, do NOT use type matching — use possession of
+Cap::Instance combined with the YieldSender/YieldReceiver mechanism
+(§14). Type identifies; possession authorizes.** Full lineage walking
+(enumerating ancestors) is not exposed; only the single cumulative
+image_hash value is.
 
 ## 2. Memory model
 
@@ -603,11 +652,20 @@ Image declares:
   pinned_slots = {3: Cap::Data(...), ...}
 ```
 
-At apply start: for Persistent mappings, kernel reads each source
-slot's DataCap and lays its bytes at the declared start..start+size
-in the apply's address space. Pinned source slots → mapped
-read-only. Unpinned → mapped read-write with copy-on-write per page.
-Ephemeral mappings are kernel-allocated zeroed at apply start.
+At apply start: the kernel declares the address-space regions named by
+the Image's memory_mappings, but does **not** eagerly lay their bytes.
+Pages materialize **lazily, on first touch** (read → page-in the
+content-addressed page; first write → copy-on-write a working page),
+which is how the kernel meters memory materialization (#3) — see
+[gas-cost.md §3](gas-cost.md). Pinned source slots → mapped read-only
+(a write hard-faults); their page-in is materialized lazily but **charged
+eagerly at the CALL** that maps the callee (computed statically from the
+Image's `memory_mappings`), so the RO fault itself debits no gas. Unpinned →
+read-write via copy-on-write per page (writable pages are not clustered);
+the first write to a writable page charges CoW per page (depth-aware — see
+"Depth-aware CoW" in [gas-cost.md §3](gas-cost.md)). Ephemeral mappings are
+kernel-allocated zeroed regions (also materialized on first touch, per
+page).
 
 ### DataCap shape: page-multiple content, no separate size
 
@@ -625,14 +683,14 @@ stripping trailing zeros. `DataCap("Hello\0\0...\0")` (4 KiB) and
 `DataCap("Hello\0...\0")` (8 KiB) are distinct caps with distinct
 hashes; they coexist in the cache without dedup.
 
-Rationale: the previous "trailing-zero-stripped canonical form" rule
-existed to deduplicate logically-identical short caps. In practice
+Rationale: the previous strip-canonicalization rule existed to deduplicate
+logically-identical short caps. In practice
 nothing produces caps in both stripped and padded shapes for the same
 logical content — caps come from `host_mint_data_cap` (caller-supplied
-bytes, padded up to a page boundary at mint) or from HALT auto-mint
-(page-aligned dirty-page content). Both paths produce page-multiple
-caps. Removing the strip rule simplifies the kernel without losing
-any observable dedup.
+bytes, padded up to a page boundary at mint) or from flushing a running
+`DataCap`'s overlay into a fresh backing (page-aligned dirty-page content).
+Both paths produce page-multiple caps. Removing the strip rule simplifies
+the kernel without losing any observable dedup.
 
 ### Size handling at map time
 
@@ -661,13 +719,16 @@ At HALT:
   If apply explicitly replaced the source slot via cap-table ops:
     Use the replaced cap. Discard memory modifications from this region.
   Else if any pages in the region are dirty:
-    Mint a new DataCap whose content is the modified pages verbatim
-      (page-multiple, no trailing-zero stripping). Place at source slot.
+    The region's `DataCap` overlay already holds the modified pages (the
+      engine CoW'd them in during the run — the cap is the source of truth,
+      no separate mint). Flush the overlay into a fresh backing
+      (page-multiple, no trailing-zero stripping) and place at source slot.
   Else:
     Source slot unchanged.
 ```
 
-Apply has full control: explicit slot replacement wins over auto-mint.
+Apply has full control: explicit slot replacement wins over the
+dirtied-region flush-and-persist.
 
 ### Volatile-style memory: a userspace pattern
 
@@ -702,7 +763,7 @@ balanced-merkle trees of page-sized chunks. At HALT:
 
 Mutation of mapped DataCaps dirties pages; kernel charges each
 dirty page to the StorageQuota referenced by the Instance's active
-quota_slot (the quota_id named there; see §22). Properties:
+quota_slot (the quota_key named there; see §22). Properties:
 
 - **Copy is free.** Content-addressed values can be referenced from
   multiple slots / mappings at zero cost.
@@ -716,15 +777,18 @@ quota_slot (the quota_id named there; see §22). Properties:
   dirty set is not yet finalized.
 
 If the active quota is exhausted mid-mutation, the kernel yields
-with the chain-issued `StorageExhaustedMarker` (per §4); the chain
-typically tops up via SetStorageQuota and CALL_RESUMEs.
+the `kernel:storage_exhausted` yield_key (per §4), caught by the
+chain's YieldReceiver; the chain typically tops up via the
+`kernel:set_storage_quota` YieldSender and CALL_RESUMEs.
 
 ### Memory and caps are mostly decoupled
 
 Cnode holds caps as values. Most caps (Instance, Image, CNode) are
 never mapped into the address space. The single exception: DataCaps
-in source slots of memory mappings have their content laid into
-memory at apply start.
+in source slots of memory mappings back address-space regions, whose
+pages are lazily materialized into memory on first touch (page-in /
+copy-on-write — see [gas-cost.md §3](gas-cost.md)), not laid in eagerly
+at apply start.
 
 For ad-hoc data flow:
 
@@ -733,8 +797,9 @@ host_read_data_cap(cap, dst_offset, len) → actual_len
   -- copy bytes from a DataCap into a writable mapped region.
 
 host_mint_data_cap(src_offset, len) → DataCap
-  -- read bytes from any region; strip trailing zeros; mint a fresh
-  -- DataCap; debit StorageQuota ledger entry of self's quota slot.
+  -- read len bytes from any region; page-round / zero-pad to a fresh
+  -- page-aligned DataCap; debit StorageQuota ledger entry of self's
+  -- quota slot by the minted page-multiple size.
 ```
 
 ### Rust heap
@@ -752,7 +817,8 @@ Apply:
 For programs that want the heap to persist across CALLs, use a
 Persistent mapping with a cnode DataCap. OOM is a fault; for
 graceful OOM handling, programs use try-* allocator APIs or yield
-via a chain-defined `NeedHeapSpace` marker.
+a chain-defined `NeedHeapSpace` yield_key (minted via
+`kernel:mint_yield`).
 
 ## 3. The Instance status state machine and kernel call stack
 
@@ -764,16 +830,16 @@ via a chain-defined `NeedHeapSpace` marker.
                         ▲    ▲                   │  (target.slot[0]
                         │    │                   │   reflects to caller)
                         │    │                   │
-                        │    │                   │ host_yield(marker)
+                        │    │                   │ host_yield(YieldSender)
                         │    │                   │   OR kernel OOG (= yield
-                        │    │                   │   to OOG-marker)
+                        │    │                   │   of kernel:oog)
                         │    │                   │ (target.slot[0] reflects
                         │    │                   │   to caller-handler; per
                         │    │                   │   discipline, slot[0]
                         │    │                   │   is in a safe state)
                         │    └───────────────────┤
                         │   CALL_RESUME(target): │  capture continuation
-                        │   caller's slot[0]     │  (regs, pc, marker)
+                        │   caller's slot[0]     │  (regs, pc, yield_sender)
                         │   moves into target's  │
                         │   slot[0]              │
                         │                        ┴
@@ -793,7 +859,7 @@ via a chain-defined `NeedHeapSpace` marker.
 ```
 
 - **Idle**: ready to be invoked at any Image endpoint.
-- **Paused**: continuation captured (regs, pc, marker). Resumable via
+- **Paused**: continuation captured (regs, pc, yield_sender). Resumable via
   CALL_RESUME (caller's slot[0] becomes target's new slot[0]).
 - **Faulted**: dead from a hard fault. Cannot be invoked further.
 
@@ -812,6 +878,39 @@ Stack entries are one of:
   Refers to an InstanceEntry at an earlier stack position. Same Instance
   instance, same PC as the target; PC advances together when active.
 
+**Origin-slot reservation.** An InstanceEntry owns the live Instance
+state while it is on the stack. The Instance was moved out of an owner
+CNode slot at CALL time; that origin slot is empty in the CNode but
+reserved in kernel stack metadata. The metadata records the owner frame
+and SlotPath. It is not a `Pending` cap, is not visible to hashing, and
+is never persisted. Because the slot is reserved, the owner cannot
+re-CALL, copy, move, drop, read/type-query, or overwrite the same
+Instance while the child is running or waiting. On normal HALT/REPLY the
+updated Instance is restored to the origin slot and the reservation is
+cleared. On V1 discard paths (`DROP_RESUME`, handler unwind, hard fault
+of the subtree), the reservation is cleared and the origin slot remains
+empty.
+
+**Per-CALL owner-edge snapshot of the catch-list.** At each CALL the kernel
+creates an owner edge from the logical current Instance to the callee and
+snapshots the owner's CURRENT `yield_receiver_slot` YieldReceiver onto that
+edge. The catch-list is a STATIC edge snapshot, not a live read of
+`yield_receiver_slot`:
+
+- **Per owner edge.** The same Instance can own multiple in-flight callees with
+  different snapshots. E.g. `A CALL B`, `B yield A`, `[ref A] CALL C`: the
+  physical stack is `A -> B -> ref[A] -> C`, but owner edges are `A -> B` and
+  `A -> C`. The snapshot on `A -> B` and the snapshot on `A -> C` can differ if
+  A changed its slot in between.
+- **Frozen for the sub-call.** An Instance can mutate `yield_receiver_slot`
+  between its downward CALLs (copy the old YieldReceiver out, move a
+  new/smaller one in; an empty slot catches nothing), but the snapshot for an
+  in-flight owner edge is immutable — a frame cannot shrink its catch-set
+  mid-flight to dodge a descendant's yield. Changes take effect for subtrees
+  of SUBSEQUENT CALLs.
+- **O(1) membership.** Stored as a set/index on the owner edge, so membership is
+  O(1); a yield costs O(owner depth).
+
 Invariants:
 
 - **Exactly one entry is Running at any moment** — the top of the
@@ -819,6 +918,10 @@ Invariants:
 - **Same-instance entries share PC.** If A appears multiple times on
   the stack (once as InstanceEntry from CALL, once as ReferenceEntry
   from a yield routed to A), they all reflect A's single PC.
+- **ReferenceEntry is control, not ownership.** A ReferenceEntry reactivates an
+  earlier owner frame. It does not make the waiting yielder an owner of the
+  reactivated frame. Thus in `A -> B -> ref[A] -> C`, B can never catch A's or
+  C's later yields unless B is on the owner path of the yielder.
 - **Instance state machine is σ-visible only.** Running and Waiting are
   kernel-internal call-stack accounting, not Instance states. From
   outside the kernel, an Instance in flight just shows as "not Idle yet."
@@ -849,28 +952,30 @@ one mechanism cost:
 1. **Sub-tree atomicity (§10).** An Instance's HALT/fault commits/discards
    everything in its subtree atomically. Sub-Instances called during
    this invocation are part of the parent's atomic scope.
-2. **Yield-resume linearity (§14).** A instance in Waiting has a
-   structurally unique resumer — whatever's directly above it on the
-   stack. Cap-authority routing relies on this.
+2. **Yield-resume linearity (§14).** An Instance in Waiting has a
+   structurally unique resumer — the owner-side handler ReferenceEntry
+   created by owner-edge routing. Cap-authority routing relies on this.
 3. **Reentry protection (free side effect).** Same Instance can't have
    two concurrent activations because the stack is sequential.
 
-See [discussions/data-flow-principle.md](discussions/data-flow-principle.md)
+See [principles/data-flow-principle.md](principles/data-flow-principle.md)
 for the architectural derivation: single-mutator-per-state-unit forces
 single-activation; per-context fault isolation + single-activation
 forces hierarchical structure; hierarchical structure forces orchestrator
 mediation for cross-contract calls. The chain orchestrator pattern is
-structurally required, not just a convention.
+structurally required, not just a convention. See also
+[principles/owner-edge-yield-routing.md](principles/owner-edge-yield-routing.md)
+for the precise CALL/YIELD/OOG owner-edge rule.
 
 **OOG = kernel-triggered yield, not a fault.** Same continuation
-mechanism as voluntary yield (reflects slot[0]; marker = kernel's
-canonical OOG marker).
+mechanism as voluntary yield (reflects slot[0]; routing key =
+`kernel:oog`).
 
 **Hard faults are deterministic and permanent.** Same Instance + same
 input → same fault.
 
 **Pause is opaque.** Verbs are CALL_RESUME (sends caller's slot[0] as
-the new target slot[0]) and DROP_PAUSED.
+the new target slot[0]) and DROP_RESUME.
 
 #### Paused.pc constraint
 
@@ -880,38 +985,58 @@ this on entry to CALL_RESUME — a Paused state whose `pc` is not a
 bb_start is rejected as invalid (treated as a kernel-invariant
 violation, not a soft failure).
 
-This holds naturally for both pause sources:
+This holds naturally for every pause source. Note that `ecall.jar` and
+`ecalli` are **forced block starts** — each is its own singleton gas block,
+a boundary on *both* sides — so an `ecall`'s own PC is always a bb_start
+(see [gas-cost.md §3 "ecall/ecalli blocks"](gas-cost.md)). The pause
+sources:
 
 - **Voluntary yield** (ecalli to a yielding host op) yields on the
-  instruction *following* the ecalli. The PVM2 linker classifies
-  `ecalli` as a terminator, so its successor PC is in `bb_starts`
-  by definition.
-- **OOG** fires from the per-block gas check that the JIT emits at
-  every bb_start *before* any instruction of the block executes.
-  When the meter underflows, the captured pc is the bb_start whose
-  cost would have driven it negative, not a mid-block instruction.
+  instruction *following* the ecalli. `ecalli` is a terminator, so its
+  successor PC is in `bb_starts` by definition.
+- **OOG at an ordinary block** fires from the per-block gas check the JIT
+  emits at every bb_start *before* any instruction of the block executes.
+  The check is a **pre-reservation** (`gas ≥ gas_cost(B) + worst_case_3(B)`),
+  not a charge-then-test: when it fails, the block is **not entered** and
+  **no gas is charged**, and the captured pc is that block's bb_start.
+- **OOG at an `ecall`/`ecalli`** fires from the kernel's **dynamic** charge
+  (the ecall's cost — a CALL frame, a host op's work — is unknowable at
+  compile time, so it has no static preamble). If gas is insufficient the
+  kernel yields **before doing the work**, and the captured pc is the
+  `ecall`'s **own** PC — a bb_start, because the ecall is a forced block
+  start — so the op is cleanly re-attempted after a top-up.
+
+In every case gas never goes negative and there is no mid-block instruction
+at which OOG can land. See [gas-cost.md §1 and §3](gas-cost.md).
 
 `bb_starts` is not part of the wire format; it is JIT-derived from
 `Image.code` per the PVM2 ISA spec
-([../../docs/pvm-isa/05-pvm2-rv-diff.md](../../docs/pvm-isa/05-pvm2-rv-diff.md)).
+([pvm2/rv64e-xjar-eei.md](pvm2/rv64e-xjar-eei.md)).
 The linker is required to guarantee that every PC at which the
 program can possibly pause is a bb_start; the constraint above is
 the kernel-side check that the guarantee held.
 
-**Pause-state portability.** PVM2's indirect dispatch goes through
-`br_table` (custom-0 funct3=011), which reads a per-function
-sub-table from `Image.jump_table` keyed by an encoded idx in `ra`.
-Crucially, **no PC values are ever stored in guest registers** —
-`ra` carries an opaque idx handle, not a return PC. This makes
-`Paused { pc, regs }` portable across JIT recompilations of the
-same Image: the idx is data-driven from `Image.jump_table`, and
-the same idx resolves to the same PVM2 PC regardless of the
-underlying native code layout.
+**Pause-state portability.** PVM2 has no `br_table` and no
+`Image.jump_table`; indirect dispatch is plain `jalr` (custom-0
+funct3=011 is reserved). The values `jalr` computes are **PVM2 PCs**
+— offsets into `Image.code` — never native code addresses: the target
+it jumps to, and the return address it writes into `rd`/`ra`, are both
+Image-relative. Every indirect jump validates its target lands on a
+`bb_start` and re-translates that PVM2 PC through the recompiler's dense
+dispatch table (keyed by PVM2 PC, rebuilt per recompilation). This makes
+`Paused { pc, regs }` portable across JIT recompilations of the same
+Image: `pc` and any register-held return addresses are Image-relative
+PVM2 PCs, so a paused state rebinds to the new native layout through the
+freshly-built dispatch table — the same PVM2 PC resolves to the same
+logical instruction regardless of the underlying native code layout.
 
 **slot[0] discipline.** Apply must keep slot[0] in a "safe to reflect"
 state at all times: empty, the input scratchpad, or a complete output
 Cap::CNode atomically MGMT_MOVE'd in. Never leave slot[0] mid-mutation,
-because OOG yield (or fault) can reflect at any instruction boundary.
+because a **hard fault can reflect at any instruction boundary** (an OOG
+or voluntary yield can only land at a basic-block start, but a fault
+cannot be deferred — so the safe-to-reflect rule must hold at every
+instruction).
 The canonical pattern: at apply entry, MGMT_MOVE slot[0] (input) into
 a working slot; do work in working slots; just before HALT/yield,
 atomically MGMT_MOVE the output Cap::CNode into slot[0].
@@ -921,34 +1046,55 @@ atomically MGMT_MOVE the output Cap::CNode into slot[0].
 ### CALL — invoke an Idle Instance at an endpoint
 
 ```
-CALL(target: SlotPath, endpoint_idx: u8) → result
-  Pre: target Instance is Idle.
+CALL(target: SlotPath, endpoint: Key) → result
+  Pre: target slot holds an Idle Cap::Instance and is not pinned or
+       empty-reserved by an in-flight child.
   Effect:
+    Kernel moves the target Instance out of its origin slot and into a
+      KernelFrame. The origin slot becomes physically empty, but
+      kernel-reserved/pinned by stack metadata until the callee returns
+      or is discarded.
     Caller's slot[0] moves into target's slot[0] (the scratchpad).
-    Kernel pushes an InstanceEntry for target on the call stack.
-    Kernel materializes mapped regions from cnode DataCaps.
-    Apply runs; per-instruction gas debit comes from the meter
-      named by target's active gas slot (see §22 and "Gas
-      accounting" below).
+    Kernel pushes an InstanceEntry for target on the call stack and
+      creates the owner edge from the logical current Instance to target.
+    Kernel declares mapped regions from cnode DataCaps (pages
+      materialize lazily on first touch — see gas-cost.md §3).
+    Apply runs; gas is charged per basic block at block entry,
+      against the active meter chosen from target's ordered gas slots
+      or loaned owner gas scope (see §22 and "Gas accounting" below,
+      and gas-cost.md §1).
   On HALT:    target ← Idle (new value); target's slot[0] reflects
-              to caller's slot[0].
+              to caller's slot[0]; the owner reservation is cleared
+              and the updated Instance is written back to the origin
+              slot.
   On yield:   target enters Waiting on the call stack (or Paused if
               the yield is preserved across blocks); target's
               slot[0] reflects to caller's slot[0]; phi[7] holds the
-              yield payload reference (typically a marker / unit
-              cap copy).
+              yield payload reference (typically a YieldSender / unit
+              cap copy). The origin slot remains empty-reserved.
   On fault:   target ← Faulted, then dropped; target's slot[0]
-              reflects to caller's slot[0]; phi[7] = fault info.
+              reflects to caller's slot[0]; phi[7] = fault info. The
+              reservation is cleared and the origin slot remains empty.
   Return: phi[7] = (return value | yield payload ref | fault info);
           phi[8] = status.
 ```
 
-CALL takes no gas_budget. Gas is metered against the meter named by
-the target Instance's active gas slot (Image-declared `gas_slots[0]`).
-The caller controls the available gas by ensuring the target's gas
-slot points to a meter with sufficient balance — typically by
-populating the target's gas slot before CALL (cap-flow or
-host_derive_spawn-time initialization).
+CALL takes no gas_budget. Gas is metered against the target Instance's
+ordered Image-declared `gas_slots`. Empty declared slots are skipped;
+present non-Gas slots hard-fault the target. The first valid non-empty
+slot is primary, later valid slots are fallback reserves, and an Image
+with no declared gas slots loans its owner's gas scope. The caller
+controls available gas by ensuring the target's gas slots point to
+meters with sufficient balance — typically by populating those slots
+before CALL (cap-flow or host_derive_spawn-time initialization).
+
+While a callee is on the kernel call stack, its origin slot is empty but
+reserved. The reservation is not a CNode value and is never persisted.
+Any guest operation that tries to CALL, MGMT_COPY, MGMT_MOVE, MGMT_DROP,
+read/type-query, or write into that SlotPath faults like pinned-slot
+misuse. `CALL_RESUME` resumes the stack continuation directly; it does
+not look up the origin slot and therefore does not require the origin cap
+to be present.
 
 ### CALL_RESUME — resume a Paused or Waiting Instance
 
@@ -958,80 +1104,100 @@ CALL_RESUME(target: SlotPath) → result
        chain on the call stack expecting resumption.
        If Paused: Paused.pc ∈ bb_starts(target.image.code).
   Effect:
+    If target is Waiting on the kernel call stack, resume the recorded
+      continuation directly; do not read the target's origin slot.
     Caller's slot[0] moves into target's slot[0] (same as CALL).
     Continuation restored; apply resumes from saved pc.
     Apply reads the response (caller's prepared scratchpad) from slot[0].
   Termination semantics same as CALL.
 ```
 
-### DROP_PAUSED — give up on a Paused Instance
+### DROP_RESUME — detach an in-flight continuation
 
 ```
-DROP_PAUSED(target: SlotPath)
-  Pre: target Instance is Paused.
-  target slot becomes empty (Instance and its cnode discarded).
-  Caller's slot[0] unchanged (no reflection).
-```
-
-### host_yield — voluntary yield with marker routing
-
-```
-host_yield(marker: SlotPath)   -- does not return to apply
-  Pre: marker holds a Cap::Instance (the yield marker; see §14).
+DROP_RESUME(target: SlotPath)
+  Pre: target is Paused, or target is at the top of a Waiting chain on
+       the kernel call stack expecting resumption.
   Effect:
-    Read marker; compute marker.instance_hash.
-    Walk kernel call stack from top (yielder) toward bottom (root).
-    For each InstanceEntry F encountered:
-      If F.image.yield_marker_slot is set, F's cnode at that slot
-      holds a Cap::Instance[YieldCatcher] (a kernel-assisted Instance;
-      §22). Kernel short-circuits into the YieldCatcher's state —
-      its marker list — and tests each entry:
-        If entry is Cap::Instance and entry.instance_hash == marker.instance_hash:
-          Match. Push ReferenceEntry pointing to F. F resumes at its
-          post-CALL continuation with the marker payload reflected
-          into slot[0].
-          Return; control transfers to F.
-    No match found: fault yielder with "unhandled marker."
+    If target is Waiting: pop the corresponding resumption frame from the
+      kernel call stack and materialize the target continuation as a
+      σ-resident Paused Instance.
+    If target is already Paused: leave the Paused continuation detached.
+    The current handler continues running; caller's slot[0] is unchanged
+      unless the chain's chosen cap-delivery convention explicitly writes a
+      Paused cap there.
+```
+
+V1 implementation note: until σ-resident Paused materialization is
+implemented, `DROP_RESUME` and handler-unwind discard the affected
+in-flight frames. Any origin-slot reservations owned by surviving frames
+are cleared, and the origin slots remain empty. No `Pending` cap is
+written to the CNode.
+
+### host_yield — yield_key routing
+
+```
+host_yield(sender: SlotPath)   -- does not return to apply
+  Pre: sender holds a Cap::Instance[YieldSender{yield_key}] (see §14).
+  Effect:
+    Read yield_key from the YieldSender.
+    Let E be the logical current InstanceEntry (following a ReferenceEntry
+      to its target if needed).
+    Walk owner edges from E toward the root. For each edge child -> owner
+      (nearest first):
+      child.owner_catch_set is the YieldReceiver snapshot taken from owner
+        at the CALL that created child (§3).
+      If the snapshot's set contains yield_key:
+        Match (single-resumer). Push ReferenceEntry pointing to owner. The
+        owner resumes at its post-CALL continuation with the YieldSender's
+        payload reflected into slot[0].
+        Return; control transfers to owner.
+    The kernel is the implicit ROOT YieldReceiver for kernel:* keys
+      (bottom of the stack).
+    No match found: fault the emitter with "unhandled yield_key."
 
     Per slot[0] discipline: the yielder's slot[0] should be in a safe
     state before calling host_yield, since on resume it will hold the
     handler's response.
 
-  Capture continuation (regs, pc) for the yielder.
+  Capture continuation (regs, pc, yield_sender) for the yielder.
   Yielder transitions to Waiting on the kernel stack.
-  Gas debited for the yielder (STM-exempt; debited from the meter
-    named by yielder's active gas slot).
+  Gas debited for the yielder (STM-exempt; debited from the active meter
+    chosen from the yielder's ordered gas slots / loaned owner gas scope).
 
   On CALL_RESUME from the handler:
     Caller-handler's slot[0] reflects to yielder's slot[0].
     Yielder's apply resumes from saved pc.
     Returns: phi[7..] = registered args; phi[8] = status.
 
-Kernel-issued markers (placed in chain's initial YieldCatcher at
-boot; see §12):
-  OOGMarker             -- kernel-injected on gas exhaustion. Payload:
-                           a Cap::Instance[Gas{meter_id}] copy naming
+Kernel:* yields caught by the kernel-as-root-receiver (the chain
+registers these in its YieldReceiver at init; see §12):
+  kernel:oog            -- kernel-injected on gas exhaustion. Payload:
+                           a Cap::Instance[Gas{meter_key}] copy naming
                            the meter that ran out. Nothing else (no
                            caller context — see "OOG payload" below).
-  StorageExhaustedMarker
+  kernel:storage_exhausted
                         -- kernel-injected on quota exhaustion.
-                           Payload: Cap::Instance[Quota{quota_id}] copy.
+                           Payload: Cap::Instance[Quota{quota_key}] copy.
 
-Chain-defined markers: per chain spec; minted by chain orchestrator
-via host_derive_spawn and distributed via cap-flow.
+Chain-defined yield_keys: per chain spec; minted via kernel:mint_yield
+(returns a YieldSender/YieldReceiver pair) and distributed via cap-flow.
 ```
 
-The yield marker mechanism replaces the old "yield reason code." A
-yield is routed to a specific handler in the call stack based on the
-marker's `instance_hash`. The handler must have a matching marker in its
-YieldCatcher's marker list.
+The yield_key mechanism replaces the old "yield reason code." A
+yield is routed to a specific owner-side handler by its `yield_key`:
+the kernel walks owner edges, and the nearest edge whose snapshotted
+YieldReceiver contains the key catches it. Physical stack frames that
+are not on the owner path are invisible to routing.
 
 **OOG payload — just the Gas cap, nothing else.** The OOG yield
-payload is *only* the `Cap::Instance[Gas{meter_id}]` copy. No "which
-call was running," no caller instance_hash, no stack context.
+payload is *only* the primary usable `Cap::Instance[Gas{meter_key}]`
+copy. Before emitting OOG, the kernel exhaustively consults every
+usable gas slot in order. No "which call was running," no caller
+identity, no stack context.
 Encoding "which call ran out" would reintroduce CALLER information
 into a capability-only system — which is precisely what v3 avoids.
-The meter_id alone is sufficient: chain looks meter_id up in its
+The meter_key alone is sufficient: chain looks meter_key up in its
 own ledger to find the owning user; that's all the context needed
 to decide topup vs fail. Same shape for StorageExhausted.
 
@@ -1048,9 +1214,9 @@ host_read_data_cap(cap: SlotPath, dst_offset: u64, len: u64) → actual_len
 host_mint_data_cap(src_offset: u64, len: u64, quota_slot: SlotPath,
                    dst: SlotPath) → ()
   Read len bytes from any region starting at src_offset.
-  Strip trailing zeros to get canonical content.
-  Read quota_slot (holds Cap::Instance[Quota{quota_id}]); debit
-    kernel-internal StorageQuota[quota_id] by stripped size.
+  Page-round / zero-pad to get page-multiple, page-aligned content.
+  Read quota_slot (holds Cap::Instance[Quota{quota_key}]); debit
+    kernel-internal StorageQuota[quota_key] by minted page-multiple size.
   Mint a fresh Cap::Data; place at dst.
 ```
 
@@ -1065,7 +1231,7 @@ set_image(new_image: SlotPath) → ()
 host_derive_spawn(image: SlotPath, cnode: SlotPath, dst: SlotPath) → ()
   Pre: caller is running self's apply.
        image holds a Cap::Image.
-       cnode holds a Cap::CNode of size 256.
+       cnode holds a Key-addressed Cap::CNode.
        dst is empty.
   Effect:
     Constructs a fresh Instance:
@@ -1078,51 +1244,16 @@ host_derive_spawn(image: SlotPath, cnode: SlotPath, dst: SlotPath) → ()
     copyable; reading it doesn't consume).
     Places Cap::Instance at dst.
 
-host_same_type(a: SlotPath, b: SlotPath) → bool
-  Returns true iff a.image_hash == b.image_hash.
-  
-  USE FOR IDENTIFICATION ONLY. Two Instances being "the same type" does
-  not grant authority — possession of a Cap::Instance is what grants
-  authority. See §14 for the proper authority pattern.
+host_image_hash_chain(slot: SlotPath, dst: SlotPath) → ()
+  Pre: slot holds a Cap::Instance (or Cap::Image); dst is empty.
+  Effect: place a Cap::Data holding the raw bytes of the cap's
+    image_hash (the cumulative chain hash) at dst.
 
-host_same_type_as(
-    comparer: SlotPath,
-    comparee: SlotPath,
-    images:   [SlotPath of Cap::Image]
-) → bool
-  Returns true iff comparer.image_hash equals the chain extension
-  of comparee.image_hash through the given Image derivation steps.
-  
-  USE FOR IDENTIFICATION ONLY. Same caveat as host_same_type: type
-  matching is not an authority proof. Use Cap::Instance possession for
-  authority.
-
--- Cap::Type ops (see §8 for Cap::Type definition):
-
-host_type_of(instance: SlotPath, dst: SlotPath) → ()
-  Pre: instance holds a Cap::Instance; dst is empty.
-  Effect: extract the Instance's image_hash; place Cap::Type{image_hash}
-  at dst.
-  
-  USE FOR IDENTIFICATION ONLY. Possession of Cap::Type does not grant
-  authority equivalent to possession of Cap::Instance. See §8 and §14.
-
-host_subtype(
-    base: SlotPath,
-    images: [SlotPath of Cap::Image],
-    dst: SlotPath
-) → ()
-  Pre: base holds a Cap::Type; dst is empty; images are Cap::Images.
-  Effect: compute the chain-extended image_hash:
-    result_hash = fold(base.image_hash, hashes(images),
-                       (acc, h) -> hash(acc || h))
-  Place Cap::Type{result_hash} at dst.
-  
-  Pure computation. No Instance derivation. No authority granted.
-
-host_type_eq(a: SlotPath, b: SlotPath) → bool
-  Pre: a, b hold Cap::Type.
-  Returns true iff a.image_hash == b.image_hash.
+  USE FOR IDENTIFICATION ONLY. Two Instances being "the same type"
+  (equal image_hash) does not grant authority — possession of a
+  Cap::Instance is what grants authority. Same-type = memcmp the two
+  hashes; subtype = fold hash(acc || hash(image)) over a reference's
+  bytes yourself. See §14 for the proper authority pattern.
 ```
 
 For **same-type Instance creation** (siblings of self's type), use
@@ -1145,8 +1276,8 @@ There is **no** `host_set_pinned` — pinning is determined by
 There is **no** `host_is_template_of` — lineage walking is off-chain
 or userspace.
 
-There is **no** raw image_hash exposure — the only type query is
-`host_same_type`.
+The image_hash *value* is readable via `host_image_hash_chain`
+(identification only); full lineage *walking* is not exposed.
 
 ### Cap-table operations
 
@@ -1165,7 +1296,7 @@ MGMT_DROP(src: SlotPath) → Result
 host_mint_cnode(slot: SlotPath, cnode_size_log: u8, quota_slot: SlotPath)
   -- Mints a fresh empty Cap::CNode of size 2^cnode_size_log slots.
   -- Places at the given slot in self's cnode (slot must be empty).
-  -- Debits StorageQuota[quota_slot's quota_id] by metadata size.
+  -- Debits StorageQuota[quota_slot's quota_key] by metadata size.
 
 MGMT_CNODE_SWAP(a: SlotPath, b: SlotPath)
   -- Swap contents of two slots. Both slots must be either both in
@@ -1226,83 +1357,120 @@ Gas is accounted via the kernel-assisted GasMeter pattern (§22):
 ```
 GasMeter (kernel-internal, kernel-assisted Instance):
   Image: kernel:gasmeter
-  State: meters: Map<MeterId, RemainingGas>
+  State: meters: Map<Key, RemainingGas>
   Lifecycle: kernel initializes at block start with
-    { root_meter_id: <chain-spec block budget> }; all other meters
-    are populated lazily by chain via SetGasMeter; kernel discards
-    GasMeter at block end (kernel is stateless across blocks).
+    { root_meter_key: <chain-spec block budget> }; all other meters
+    are populated lazily by chain via kernel:set_gas_meter; kernel
+    discards GasMeter at block end (kernel is stateless across blocks).
 
-Gas{meter_id} (per-Instance unit handle, kernel-assisted Instance):
+Gas{meter_key} (per-Instance unit handle, kernel-assisted Instance):
   Image: kernel:gas
-  State: meter_id: u64
-  Created via Cap::Instance[MintGas].mint(meter_id) — caller supplies
-    the meter_id (chain-chosen; kernel cannot assign uniquely
+  State: meter_key: Key
+  Created by emitting kernel:mint_gas(meter_key) — caller supplies
+    the meter_key (chain-chosen; kernel cannot assign uniquely
     without persistent state).
   Conservation lives in GasMeter, not in the cap — cap copies all
     name the same meter; debiting any copy debits the same meter.
 ```
 
 During execution of an Instance:
-- Kernel reads the meter_id from the Instance's active gas slot
-  (`gas_slots[0]`).
-- Per-instruction metering decrements `GasMeter[meter_id]` directly
-  via kernel short-circuit (no endpoint dispatch).
-- When the meter reaches 0 mid-execution, kernel triggers a yield
-  with the well-known `OOGMarker` (kernel-issued at chain init;
-  placed in chain's initial YieldCatcher). Payload: a
-  `Cap::Instance[Gas{meter_id}]` copy.
+- Kernel resolves the Instance's ordered `gas_slots`. Empty slots are skipped;
+  present non-Gas slots hard-fault. The first valid non-empty slot is primary;
+  later valid slots are fallback reserves. If no gas slots are declared, the
+  Instance loans its owner's gas scope.
+- Metering is **per basic block, at block entry** (not per-instruction).
+  At each bb_start the kernel/JIT pre-reserves the block's cost against
+  the active GasMeter via kernel short-circuit (no endpoint dispatch): if
+  `gas < gas_cost(B) + worst_case_3(B)`, the block is **not entered**. The
+  kernel then tries the next usable gas slot, if any; only after all usable
+  slots are exhausted does it trigger a yield of the well-known `kernel:oog`
+  key — charging **nothing** for the un-entered block. Otherwise the block's
+  instruction cost is debited at entry and the **copy-on-write** share of memory
+  materialization (#3) is debited as write-faults occur; gas never goes
+  negative. The remaining #3 cost — the CALL frame (JIT compile + eager
+  read-only page-in) — is **not** fault-driven: it is charged dynamically at the
+  CALL, to the caller (see the ecall note below), and host-call `ecalli`s that
+  write guest memory are charged at the `ecalli` itself (finding B), since those
+  writes bypass the guest #PF.
+  See [gas-cost.md §1](gas-cost.md).
+- **`ecall.jar`/`ecalli` are the exception**: each is its **own** gas block
+  (a forced block start) with **no** static preamble, because its cost — a
+  CALL frame, a host op's work — is unknowable at compile time. The kernel
+  charges it **dynamically** when the ecall executes: if `gas < actual`, it
+  OOG-yields **before** doing the work and captures the ecall's **own** PC
+  (re-attempt cleanly after top-up); otherwise it debits `actual` and
+  proceeds. Same check-before-charge discipline; gas still never goes
+  negative. See [gas-cost.md §3 "ecall/ecalli blocks"](gas-cost.md).
+- The `kernel:oog` key is registered in the chain's YieldReceiver at chain
+  init (the kernel is its root receiver); its payload is the primary usable
+  `Cap::Instance[Gas{meter_key}]` copy. The captured continuation is the
+  un-entered block's bb_start (or, for an ecall, the ecall's own PC). On
+  CALL_RESUME after OOG, execution retries from the primary meter so a top-up of
+  the payload meter is deterministic.
 
-Per-instruction metering is invisible to userspace; debits don't
+Per-block metering is invisible to userspace; debits don't
 go through the CALL/yield mechanism. STM-exempt: gas already
 consumed by a faulted apply is not refunded.
 
-### Kernel-issued caps for resource management
+### Scratchpad CNode of kernel YieldSenders
 
-The kernel injects a small set of caps into the top-level chain
-Instance at chain init. These are how userspace interacts with
-kernel-internal kernel-assisted Instances (GasMeter, StorageQuota)
-and how userspace creates per-Instance YieldCatchers.
+All kernel interaction is a yield. The kernel is the implicit ROOT
+YieldReceiver for every `kernel:*` yield_key. At top-level invocation the
+kernel places a CNode in the scratchpad (slot[0]) mapping descriptive
+names -> YieldSenders. These are how userspace interacts with kernel-
+internal kernel-assisted Instances (GasMeter, StorageQuota) and how
+userspace composes per-Instance YieldReceivers.
 
-Each is a regular Cap::Instance (kernel-assisted); userspace invokes
-its endpoints via CALL.
+To invoke a syscall the guest places the named YieldSender in the
+yield-scratchpad and `host_yield`s it (payload via slot[0]); the kernel
+(root receiver) catches the `kernel:*` key and performs the op.
 
 ```
-Cap::Instance[SetGasMeter] (kernel-internal access):
-  endpoint set(meter_id: u64, value: u64) → u64
-    Atomically GasMeter[meter_id] := value; return previous value.
+kernel:mint_gas (YieldSender):
+  emit kernel:mint_gas(meter_key) → Cap::Instance[Gas{meter_key}]
+    Returns a fresh Gas unit handle naming the given meter_key.
+    Chain is responsible for meter_key uniqueness (collisions
+    silently alias).
+
+kernel:set_gas_meter (YieldSender, kernel-internal access):
+  emit kernel:set_gas_meter(meter_key, value: u64) → u64
+    Atomically GasMeter[meter_key] := value; return previous value.
     If no entry exists, "previous" is 0 and the entry is created.
     The atomic set+read enables the "harvest remaining" idiom.
 
-Cap::Instance[SetStorageQuota] (kernel-internal access):
-  endpoint set(quota_id: u64, value: u64) → u64
-    Same semantics as SetGasMeter for StorageQuota.
+kernel:mint_quota (YieldSender):
+  emit kernel:mint_quota(quota_key) → Cap::Instance[Quota{quota_key}]
+    Symmetric to kernel:mint_gas over StorageQuota.
 
-Cap::Instance[MintGas] (factory):
-  endpoint mint(meter_id: u64) → Cap::Instance[Gas{meter_id}]
-    Constructs a fresh Gas unit handle naming the given meter_id.
-    Chain is responsible for meter_id uniqueness (collisions
-    silently alias).
+kernel:set_storage_quota (YieldSender, kernel-internal access):
+  emit kernel:set_storage_quota(quota_key, value: u64) → u64
+    Same semantics as kernel:set_gas_meter for StorageQuota.
 
-Cap::Instance[MintQuota] (factory):
-  endpoint mint(quota_id: u64) → Cap::Instance[Quota{quota_id}]
-    Symmetric.
+kernel:mint_yield (YieldSender):
+  emit kernel:mint_yield(raw yield_key)
+       → (YieldSender{key}, YieldReceiver{[key]})
+    Returns the PAIR. UNRESTRICTED: it can mint for ANY key, including
+    kernel:* keys — this enables full interposition / virtualization of
+    kernel syscalls. Userspace restricts it by INTERPOSING (§14).
 
-Cap::Instance[CreateYieldCatcher] (factory):
-  endpoint create() → Cap::Instance[YieldCatcher]
-    Constructs a fresh empty YieldCatcher (no markers).
+kernel:merge_yield_receiver (YieldSender):
+  emit kernel:merge_yield_receiver(YieldReceiver A, YieldReceiver B)
+       → YieldReceiver{A.keys ∪ B.keys}
+    Composes two catch-sets; the result is placed in yield_receiver_slot.
 
-Cap::Instance[YieldCatcher] (per-Instance, kernel-assisted):
-  endpoint add(marker: Cap::Instance) → ()
-    Add a marker template to the catch list.
-  endpoint remove(marker: Cap::Instance) → ()
-    Remove a marker template.
-  endpoint read() → Cap::Data
-    Serialize the marker list as a DataCap for inspection.
+kernel:attest (YieldSender):
+  emit kernel:attest(key, blob) → AttestStatus
+    Attestation request (§15). Caught by the kernel as implicit ROOT
+    YieldReceiver for kernel:* keys; the AA cap holds this YieldSender.
 ```
+
+A YieldReceiver is a SET of yield_keys (held in the Instance's
+`yield_receiver_slot`). It is composed via `kernel:mint_yield` +
+`kernel:merge_yield_receiver` — there are NO add/remove/read endpoints.
 
 For the full design and rationale (lazy-load OOG-catch, why no
 narrow linearity, etc.), see
-[discussions/kernel-assisted-instances.md](discussions/kernel-assisted-instances.md).
+[principles/kernel-assisted-instances.md](principles/kernel-assisted-instances.md).
 
 ## 5. Apply terminations
 
@@ -1315,16 +1483,16 @@ HALT(phi[7] = return_value)
   → Caller: phi[8] = Ok.
   → Gas debited.
 
-host_yield(marker)              -- includes kernel-triggered OOG
+host_yield(YieldSender)         -- includes kernel-triggered OOG
   → Instance becomes Waiting on the call stack (or Paused if the yield
     is preserved across blocks).
   → Target's slot[0] reflects to caller's slot[0] (carrying the
-    marker's payload — typically a unit cap copy like
-    Cap::Instance[Gas{meter_id}] for OOG, per §4).
+    YieldSender's payload — typically a unit cap copy like
+    Cap::Instance[Gas{meter_key}] for OOG, per §4).
   → Emits returned for orchestrator processing.
   → Caller: phi[8] = Paused; phi[7] = yield payload reference.
   → Caller may CALL_RESUME (with new scratchpad in caller's slot[0])
-    or DROP_PAUSED.
+    or DROP_RESUME.
   → Gas debited (from the active gas meter).
 
 panic / illegal access / memory fault / write to pinned region / ...
@@ -1341,7 +1509,7 @@ panic / illegal access / memory fault / write to pinned region / ...
 | Outcome | Instance.status after | Re-CALL OK? | Caller's slot[0] |
 |---|---|---|---|
 | HALT  | Idle    | Yes (new state) | reflected from target |
-| Paused (yield/OOG) | Waiting on call stack (or Paused if preserved) | No (must RESUME) | reflected from target (marker payload) |
+| Paused (yield/OOG) | Waiting on call stack (or Paused if preserved) | No (must RESUME) | reflected from target (YieldSender payload) |
 | Fault | Faulted, then dropped | No | reflected from target at fault point |
 
 ## 6. Operation patterns
@@ -1354,25 +1522,25 @@ Orchestrator (chain Instance's apply) processes events:
 for event in block_body:
   -- prepare scratchpad in self.slot[0]
   build event-specific Cap::CNode into self.slot[0]
-  -- ensure target's gas_slots[0] names a meter with enough balance
-  -- (typically chain has already done SetGasMeter for this user's
-  -- meter_id; see §22 lazy-load OOG-catch pattern).
+  -- ensure target's ordered gas_slots name meters with enough balance
+  -- (typically chain has already emitted kernel:set_gas_meter for this
+  -- user's meter_key; see §22 lazy-load OOG-catch pattern).
   match CALL(target_slot, endpoint):
     Ok:
       target updated; self.slot[0] now has target's reply.
       proceed.
-    Paused via OOGMarker:
-      -- payload (slot[0]) holds Cap::Instance[Gas{meter_id}].
-      -- Chain looks meter_id up in its GasLedger.
+    Paused via kernel:oog:
+      -- payload (slot[0]) holds Cap::Instance[Gas{meter_key}].
+      -- Chain looks meter_key up in its GasLedger.
       record / decide topup-or-fail; if topup:
-        SetGasMeter(meter_id, more); CALL_RESUME.
-      else DROP_PAUSED (fault propagation).
-    Paused via StorageExhaustedMarker:
-      -- payload holds Cap::Instance[Quota{quota_id}].
-      analogous; SetStorageQuota then CALL_RESUME, or fail.
-    Paused via chain-defined marker:
-      marker-specific handling per chain spec.
-      (self.slot[0] has the marker's payload from yield.)
+        emit kernel:set_gas_meter(meter_key, more); CALL_RESUME.
+      else DROP_RESUME (fault propagation / persistent pause handoff).
+    Paused via kernel:storage_exhausted:
+      -- payload holds Cap::Instance[Quota{quota_key}].
+      analogous; emit kernel:set_storage_quota then CALL_RESUME, or fail.
+    Paused via chain-defined yield_key:
+      key-specific handling per chain spec.
+      (self.slot[0] has the YieldSender's payload from yield.)
     Faulted:
       drop target; chain-spec policy decides (log, governance, etc.).
       (self.slot[0] has whatever target had at fault.)
@@ -1437,22 +1605,16 @@ Cap::Instance   — Instance value reference. Content-addressed copyable.
                authority. Use this for authority routing.
 Cap::Image   — Image (spec, including bytecode) reference.
                Content-addressed copyable.
-Cap::Data    — Bytes (trailing-zero-stripped). Content-addressed
-               copyable.
-Cap::CNode   — Variable-size cnode (size = 2^k slots).
+Cap::Data    — page-multiple, page-aligned Bytes. Content-addressed
+               copyable. Trailing zeros are state.
+Cap::CNode   — Sparse Key-addressed cap map (no fixed capacity).
                Content-addressed copyable.
-Cap::Type    — Cumulative image_hash chain identifier.
-               Content-addressed copyable. Opaque to bytecode reads;
-               equality-comparable via host calls; composable via
-               host_subtype.
-               IDENTIFICATION-ONLY. NOT an authority credential.
-               See "Cap::Type vs Cap::Instance" below.
 ```
 
-Five cap kinds. All uniformly copyable. No conditional linearity.
+Four cap kinds. All uniformly copyable. No conditional linearity.
 No `linear_count`. No drop endpoints.
 
-### Why these five
+### Why these four
 
 - **Cap::Instance**: the unit of state. Copyable; MGMT_COPY produces a
   content-shared reference. Mutations via CALL into the Instance's
@@ -1462,54 +1624,54 @@ No `linear_count`. No drop endpoints.
   addressed; copyable. Image embeds bytecode directly. Multiple
   Instances can share an Image via the content-addressed hash.
 - **Cap::Data**: arbitrary bytes. The general data carrier.
-- **Cap::CNode**: variable-size cnode (size = 2^k slots). Used by
-  Instances that need more than 256 slots, for nested storage, and as
-  the **constructor argument** for `host_derive_spawn`.
-- **Cap::Type**: a type identifier — a Cap holding a single
-  `image_hash` value (the cumulative chain hash). Used for runtime
-  type-checking and type-based dispatch. **Never used standalone for
-  authority.**
+- **Cap::CNode**: sparse Key-addressed cap map (`Key -> Cap`; no fixed
+  capacity). Used for root cnodes, nested storage, state snapshots, and as
+  the **constructor argument** for `host_derive_spawn`. Content hashing and
+  proof generation may derive a hash-keyed Merkle/radix commitment view, but
+  that view is not the runtime storage model.
 
-### Cap::Type vs Cap::Instance — identification vs authorization
+A type identifier is not a separate cap kind: an Instance's type *is*
+its kernel-attested `image_hash`, read as raw bytes via
+`host_image_hash_chain` (§4) and compared in userspace. **Type
+identifies; possession of a `Cap::Instance` authorizes.**
+
+### Type vs Instance — identification vs authorization
 
 This distinction is load-bearing and must be understood clearly:
 
-> **Cap::Type identifies an Instance's type.**
-> **Cap::Instance authorizes invocation of a specific Instance.**
+> **An image_hash identifies an Instance's type.**
+> **A Cap::Instance authorizes invocation of a specific Instance.**
 >
-> These are NOT interchangeable. Cap::Type is derivable from any
-> Cap::Instance whose chain is a prefix (via host_type_of + host_subtype);
-> Cap::Instance can only be obtained via legitimate cap-flow originating
-> from an Instance's actual derivation.
+> These are NOT interchangeable. An image_hash value is freely readable
+> (via `host_image_hash_chain`) and freely computable (fold the chain
+> extension yourself); a Cap::Instance can only be obtained via
+> legitimate cap-flow originating from an Instance's actual derivation.
 
 **Forgery resistance for Cap::Instance:** An Instance with image_hash X can
 only be produced by derivation through the kernel-mediated
-`host_derive_spawn`, which extends the deriver's chain. Adversary
+`host_derive_spawn`, which extends the deriver's chain. An adversary
 cannot fabricate a Cap::Instance with a chain that doesn't include
 their own derivation history. The image_hash chain is forgery-
 resistant.
 
-**Cap::Type is NOT forgery-resistant in the same sense.** Anyone
-holding a Cap::Instance whose chain prefix is X can compute
-Cap::Type{X} via host_type_of. They can further compute
-Cap::Type{X + derive_steps} via host_subtype. The Cap::Type
-"identifies the type" but doesn't prove the holder has the
-corresponding Cap::Instance.
+**An image_hash *value* is NOT forgery-resistant in the same sense — and
+that is exactly why exposing it is safe.** Anyone can read X's image_hash
+and compute any `X + derive_steps` extension; the value is neither secret
+(σ is public) nor an authority credential. A type identifier carries no
+authority to protect, so there is nothing to hide — which is why
+`Cap::Type` (an opaque wrapper around this freely-computable value) is
+not a separate cap kind.
 
-**Authority must use Cap::Instance, not Cap::Type.** A pattern like
-"if I hold Cap::Type{X}, I have authority X" is WRONG. The correct
-pattern is "if I hold Cap::Instance whose type is X, I have authority X"
-— and this is what §14 (yield-marker authority pattern) uses.
+**Authority must use Cap::Instance possession, not type matching.** A
+pattern like "if a cap's image_hash == X, it has authority X" is WRONG.
+The correct pattern is "if I hold a Cap::Instance and route via the
+yield mechanism, I exercise authority" — and this is what §14
+(YieldSender/YieldReceiver authority pattern) uses.
 
-**When to use Cap::Type:**
-- Runtime type-checking (e.g., "is this Instance of type X?").
-- Type-based dispatch in bytecode logic.
-- Composing types abstractly without materializing Instances.
-
-**When NOT to use Cap::Type:**
-- As a routing key for authority operations (use Cap::Instance).
-- As a stand-in for an actual Instance.
-- As proof of identity (it's only proof of *knowing the type*).
+**When to read image_hash:** runtime type-checking ("is this Instance of
+type X?"), type-based dispatch, composing type identifiers abstractly
+without materializing Instances. **When NOT to:** as a routing key or
+proof of authority — use Cap::Instance possession + the yield pattern.
 
 ### Resource caps as kernel-assisted Instances or userspace patterns
 
@@ -1520,20 +1682,21 @@ In v3, these are NOT cap kinds. They split into two families:
 
 - **Gas**: tracked in a kernel-internal `GasMeter` (kernel-assisted
   Instance, never in chain hands). Each Instance holds
-  `Cap::Instance[Gas{meter_id}]` in its `gas_slots`; per-instruction
-  metering decrements `GasMeter[meter_id]` directly via kernel
-  short-circuit. Conservation lives in GasMeter, not in the Gas
-  cap, so copies all name the same meter (no narrow linearity
-  needed). OOG triggers a yield with `OOGMarker`.
+  `Cap::Instance[Gas{meter_key}]` in its `gas_slots`; per-basic-block
+  metering reserves the block cost against `GasMeter[meter_key]` at
+  block entry via kernel short-circuit (gas-cost.md §1). Conservation
+  lives in GasMeter, not in the Gas cap, so copies all name the same
+  meter (no narrow linearity needed). OOG (an entry-gate failure that
+  charges nothing) triggers a yield of `kernel:oog`.
 - **StorageQuota**: symmetric — kernel-internal `StorageQuota`
-  table, `Cap::Instance[Quota{quota_id}]` unit handles held in
+  table, `Cap::Instance[Quota{quota_key}]` unit handles held in
   `quota_slots`, dirty-page tracking debits per Pattern 4 (§2).
-  Exhaustion triggers a yield with `StorageExhaustedMarker`.
+  Exhaustion triggers a yield of `kernel:storage_exhausted`.
 
-Chain interacts with kernel-internal tables via the kernel-issued
-caps `SetGasMeter` / `SetStorageQuota` (set+return-previous);
-mints unit handles via `MintGas` / `MintQuota` (chain-chosen ids).
-See §4 for the cap endpoints.
+Chain interacts with kernel-internal tables by yielding the scratchpad
+YieldSenders `kernel:set_gas_meter` / `kernel:set_storage_quota`
+(set+return-previous); mints unit handles via `kernel:mint_gas` /
+`kernel:mint_quota` (chain-chosen ids). See §4 for the yield ops.
 
 **Userspace resources (chain-bytecode-managed):**
 
@@ -1659,7 +1822,7 @@ AttestationAuthority Instance the apply produces (§15).
 ### Pinned cnode slots
 
 Pinning is determined by the Instance's current `Image.pinned_slots` —
-a Map<SlotIdx, ContentAddressedCap> declaring which slots hold
+a Map<Key, ContentAddressedCap> declaring which slots hold
 pinned ro caps. ContentAddressedCap ∈ { Cap::Data, Cap::Image }.
 
 A pinned slot:
@@ -1681,26 +1844,47 @@ Use cases:
   Authority Instances pin the Cap::Image references for the subject
   types they mint.
 
+### Empty-reserved origin slots
+
+When CALL moves an Instance into a KernelFrame, its origin SlotPath is
+empty in the owner's CNode and reserved by kernel stack metadata. It is
+not a cap value and must not be serialized, hashed, copied, or persisted.
+
+An empty-reserved origin slot has the same guest-visible protection as a
+pinned slot for operations against that SlotPath:
+
+- CALL faults.
+- MGMT_COPY / MGMT_MOVE / MGMT_DROP faults.
+- read/type-query operations such as `host_image_hash_chain` fault.
+- Writes, mints, swaps, or moves into the slot fault.
+
+The private kernel restore path is the only operation that may write the
+updated Instance back into the slot; it first clears the reservation. V1
+discard paths clear the reservation and leave the slot empty.
+
 ## 9. By-value semantics with content-addressed slot references
 
 ```
 Slot's cap = reference (by hash) to a specific Instance or Data value.
 
 Apply runs:
-  Kernel materializes Instance value into apply's working memory.
+  Kernel moves the Instance value out of its origin slot into a
+    KernelFrame; the origin slot is empty-reserved.
   Apply mutates working memory (with COW per page for mapped DataCaps).
-  Slot is NOT updated yet.
+  Origin slot is NOT updated yet and cannot be reused.
 
 At termination:
   HALT  → kernel computes hash of new Instance value (with new mapped
-          DataCaps); slot updates to that hash.
+          DataCaps); reservation clears; slot updates to the new value.
   yield → kernel computes hash of Paused Instance value (with continuation);
-          slot updates.
-  fault → slot was never updated; outer's view of pre-call value is
-          preserved structurally.
+          slot updates only if/when the continuation is materialized as
+          σ-resident Paused. While Waiting on the call stack, the origin
+          slot remains empty-reserved.
+  fault/discard → reservation clears; origin slot remains empty.
 
 No explicit STM buffer; no merge-or-discard ceremony. Atomicity comes
-from "slots only update at termination."
+from "running Instances are owned by frames; origin slots restore only at
+termination."
 ```
 
 ### The two-condition hashing property
@@ -1798,9 +1982,11 @@ Hardware → Kernel: (parent chain Instance value, block_body)
 Kernel:
   Materialize chain Instance from parent state.
   Initialize per-block kernel-assisted Instances (§22):
-    GasMeter      := { root_meter_id: <chain-spec block budget> }
-    StorageQuota  := { root_quota_id: <chain-spec block budget> }
-  Place block_body Cap::CNode into kernel's slot[0].
+    GasMeter      := { root_meter_key: <chain-spec block budget> }
+    StorageQuota  := { root_quota_key: <chain-spec block budget> }
+  Kernel is the implicit ROOT YieldReceiver for all kernel:* keys.
+  Place a scratchpad CNode of named kernel:* YieldSenders (§4) plus the
+    block_body Cap::CNode into kernel's slot[0].
   CALL(chain_Frame, process_endpoint).
   Apply runs; processes events; sub-CALLs and emits chain.
   HALT.
@@ -1814,39 +2000,44 @@ If chain Instance faults: block rejected; no σ change.
 If chain Instance yields: chain Instance is now Paused; resumable next
   block.
 
-### Chain init: kernel-issued caps
+### Chain init: scratchpad YieldSenders + chain YieldReceiver
 
 At first block (genesis) — or at every block, depending on chain
-spec — the kernel injects these caps into the top-level chain
-Instance's cnode (see §4 for endpoint specs):
+spec — the kernel injects the root unit handles into the top-level
+chain Instance's cnode and places the scratchpad CNode of named
+kernel:* YieldSenders (see §4 for the yield ops):
 
 ```
 Gas / storage management:
-  Cap::Instance[Gas{root_meter_id}]      -- initial root gas budget
-  Cap::Instance[Quota{root_quota_id}]    -- initial root storage budget
-  Cap::Instance[SetGasMeter]             -- modify GasMeter (returns prev)
-  Cap::Instance[SetStorageQuota]         -- modify StorageQuota
-  Cap::Instance[MintGas]                 -- factory for Gas unit handles
-  Cap::Instance[MintQuota]               -- factory for Quota unit handles
+  Cap::Instance[Gas{root_meter_key}]      -- initial root gas budget
+  Cap::Instance[Quota{root_quota_key}]    -- initial root storage budget
+  Scratchpad CNode (slot[0]) of named YieldSenders:
+    kernel:set_gas_meter        -- modify GasMeter (returns prev)
+    kernel:set_storage_quota    -- modify StorageQuota
+    kernel:mint_gas             -- mint Gas unit handles
+    kernel:mint_quota           -- mint Quota unit handles
+    kernel:mint_yield           -- mint a YieldSender/YieldReceiver pair
+    kernel:merge_yield_receiver -- union two YieldReceiver catch-sets
+    kernel:attest               -- attestation request (§15)
 
 Yield routing:
-  Cap::Instance[CreateYieldCatcher]      -- factory for per-Instance catchers
-  
-  Pre-placed in chain's initial YieldCatcher
-  (chain.cnode[yield_marker_slot]):
-    OOGMarker                         -- caught when any meter hits 0
-    StorageExhaustedMarker            -- caught when any quota hits 0
+  Kernel is the implicit ROOT YieldReceiver for all kernel:* keys.
+
+  Registered in chain's YieldReceiver
+  (chain.cnode[yield_receiver_slot]):
+    kernel:oog                        -- caught when any meter hits 0
+    kernel:storage_exhausted          -- caught when any quota hits 0
     (others as chain spec requires)
 ```
 
 This is the entire kernel ABI for chain orchestration. Kernel
 internals (GasMeter, StorageQuota) are opaque from userspace; only
-the cap-mediated operations are visible. Persistence of gas/quota
+the yield-mediated operations are visible. Persistence of gas/quota
 balances across blocks (e.g., per-user budgets) lives in chain σ,
-not in kernel state; chain repopulates kernel tables lazily via
-`SetGasMeter` / `SetStorageQuota` in response to OOG /
-StorageExhausted yields. See
-[discussions/kernel-assisted-instances.md](discussions/kernel-assisted-instances.md)
+not in kernel state; chain repopulates kernel tables lazily by
+emitting `kernel:set_gas_meter` / `kernel:set_storage_quota` in
+response to OOG / StorageExhausted yields. See
+[principles/kernel-assisted-instances.md](principles/kernel-assisted-instances.md)
 for the lazy-load OOG-catch pattern.
 
 ## 13. Off-chain Dispatch — ephemeral per block
@@ -1889,86 +2080,95 @@ So a cap held in σ is forgery-resistant *and* unappropriable. That is
 exactly the unforgeability seL4 caps provide via kernel mediation;
 v3 reproduces it via image_hash chain plus ownership discipline.
 
-### The kernel yield-marker mechanism
+### The kernel YieldSender/YieldReceiver mechanism
 
-Authority caps are implemented via the kernel's yield-marker
-mechanism: a instance catches yields routed to it by holding matching
-marker Instances in its **YieldCatcher** (a kernel-assisted Instance
-referenced from the catcher's `yield_marker_slot`; see §22).
-Yielding bytecode places a marker Instance in a scratchpad slot; the
-kernel walks the call stack from top down, consulting each instance's
-YieldCatcher via kernel short-circuit, and routes the yield to the
-first matching instance.
+Authority caps are implemented via the kernel's YieldSender/YieldReceiver
+mechanism. `YieldSender{yield_key}` is the EMIT right; `YieldReceiver`
+is the CATCH right — the set of yield_keys an Instance catches, held in
+its **YieldReceiver** (a kernel-assisted Instance referenced from
+`yield_receiver_slot`; see §22). These are SEPARATE rights over a key,
+the seL4 endpoint Send/Receive model: a holder of only a Sender can emit
+(routed up) but cannot catch the key. Yielding bytecode places a
+YieldSender in a scratchpad slot; the kernel reads its yield_key and
+routes the yield along owner edges to the nearest per-CALL owner-edge
+snapshot (§3) whose YieldReceiver contains the key (single-resumer).
 
 ```
 Yield routing:
-  yielder.bytecode places Cap::Instance[marker_M] in scratchpad
+  yielder.bytecode places Cap::Instance[YieldSender{K}] in scratchpad
   yielder.bytecode invokes host_yield(scratchpad_slot)
   Kernel:
-    target_hash := marker_M.instance_hash
-    for each InstanceEntry F on stack from top down:
-      if F.image.yield_marker_slot is set:
-        let YC = F.cnode[F.yield_marker_slot]
-                 (a Cap::Instance[YieldCatcher])
-        for each marker template in YC.state.markers:
-          if marker.instance_hash == target_hash:
-            push ReferenceEntry(F); transfer control to F.
-            return.
-    fault yielder with "unhandled marker"
+    key := YieldSender.yield_key
+    node := logical current InstanceEntry
+    for each owner edge node -> owner from node toward root:
+      if node.owner_catch_set contains key:
+        push ReferenceEntry(owner); transfer control to owner.
+        return.
+      node := owner
+    -- kernel is the implicit root receiver for kernel:* keys
+    fault yielder with "unhandled yield_key"
 ```
 
-The marker Instance's `instance_hash` (which incorporates its full
-image_hash chain via §1) is the routing key. Adversaries cannot
-fabricate matching markers because the chain extension is kernel-
-mediated.
+The `yield_key` is the routing key; `kernel:*` keys are reserved for the
+kernel. A YieldSender is forgery-resistant because minting one for a
+restricted key requires `kernel:mint_yield`, which the top-level
+orchestrator INTERPOSES over (§14 forgery resistance) to gate which keys
+are mintable below it.
 
-A YieldCatcher's marker list is mutated via the catcher's
-`add(marker)` / `remove(marker)` endpoints (see §4). To revoke an
-authority, the holder removes the marker template — outstanding
-authority caps holding that marker fail to match on yield.
+A YieldReceiver's catch-set is composed via `kernel:mint_yield` (mints a
+Sender/Receiver pair for a key) and `kernel:merge_yield_receiver` (unions
+two catch-sets), then moved into `yield_receiver_slot` — there are no
+add/remove endpoints. To revoke an authority, drop the key from the
+receiver's catch-list (or re-mint under a fresh key and re-issue caps);
+outstanding Senders for the old key then match no receiver and fault.
+Snapshot caveat: revocation takes effect for subtrees of CALLs made
+AFTER the change (§3).
 
 ### The pattern
 
 A chain Orchestrator `O` mints **authority caps** for the operations
 it's willing to expose, and grants them to user contracts that should
-be able to invoke them. Each authority cap holds a marker Instance
-internally; the marker is opaque from outside the authority cap.
+be able to invoke them. Each authority cap holds a YieldSender
+internally; the YieldSender is opaque from outside the authority cap.
 Only the cap's own bytecode (defined by its Image) can extract the
-marker to yield with it.
+YieldSender to yield with it.
 
 ```
 Setup phase (Chain init):
 
-  -- Chain mints a marker for each authority type:
-  marker_invoke = host_derive_spawn(InvokeMarkerImage, init={})
-  
-  -- Chain adds the marker to its YieldCatcher
-  -- (chain.cnode[yield_marker_slot] holds Cap::Instance[YieldCatcher],
-  --  pre-populated at chain init per §12 with OOGMarker etc.):
-  CALL(chain.cnode[yield_marker_slot], add, marker=Cap::Instance[marker_invoke])
+  -- Chain mints a Sender/Receiver pair for each authority key
+  -- (kernel:mint_yield returns the pair; O keeps the Receiver, hands
+  --  out Senders):
+  (sender_invoke, receiver_invoke) = kernel:mint_yield("invoke")
+
+  -- Chain registers the key in its own YieldReceiver by merging it in
+  -- (chain.cnode[yield_receiver_slot] holds Cap::Instance[YieldReceiver],
+  --  pre-populated at chain init per §12 with kernel:oog etc.):
+  merged = kernel:merge_yield_receiver(chain.yield_receiver, receiver_invoke)
+  -- move `merged` into chain.cnode[yield_receiver_slot]
 
 Image EndpointRefCap (well-known image):
   state:
-    marker:         Cap::Instance[marker_invoke]    -- in self.cnode slot
+    sender:         Cap::Instance[YieldSender{"invoke"}]  -- in self.cnode
     target_address: ContractId                   -- which contract
-    endpoint_idx:   u8                           -- which endpoint
+    endpoint:       Key                          -- which endpoint
   endpoints:
     invoke(args)
       -- 1. Compose payload from self.state + args:
-      --     payload = { target_address, endpoint_idx, args }
+      --     payload = { target_address, endpoint, args }
       -- 2. Place payload in arg slot (slot for handler to read).
-      -- 3. Place self.cnode[marker_slot] (Cap::Instance[marker_invoke])
+      -- 3. Place self.cnode[sender_slot] (Cap::Instance[YieldSender])
       --    into yield-scratchpad slot.
       -- 4. host_yield(yield-scratchpad).
       -- 5. On resume, slot[0] holds the handler's response. HALT.
 
 Chain mints these:
 
-O.endpoint grant_endpoint_access(target, endpoint_idx) → Cap::Instance[EndpointRefCap]:
+O.endpoint grant_endpoint_access(target, endpoint: Key) → Cap::Instance[EndpointRefCap]:
   cap = host_derive_spawn(EndpointRefCapImage,
-                          init = { marker: Cap::Instance[marker_invoke],
+                          init = { sender: Cap::Instance[YieldSender{"invoke"}],
                                    target_address: target,
-                                   endpoint_idx: endpoint_idx })
+                                   endpoint: endpoint })
   return cap
 ```
 
@@ -1976,10 +2176,10 @@ A user contract `A` that holds the cap invokes it directly:
 
 ```
 A.endpoint do_something():
-  ref_cap = self.slot[7]   -- holds Cap::Instance[EndpointRefCap(B, 5)]
+  ref_cap = self.slot[7]   -- holds Cap::Instance[EndpointRefCap(B, "process")]
   slot[0] := args
   CALL(ref_cap, "invoke")
-  -- ref_cap's invoke endpoint runs; yields with marker; kernel
+  -- ref_cap's invoke endpoint runs; yields with YieldSender; kernel
   --   routes to Chain; Chain dispatches to B; response returns.
   result = slot[0]
   ...
@@ -1987,25 +2187,24 @@ A.endpoint do_something():
 
 ### Why this works
 
-**1. Forgery resistance is structural.** Marker instances are derived
-via `host_derive_spawn` from Chain's bytecode; their `instance_hash`
-includes Chain's image_hash chain. An adversary cannot fabricate a
-matching marker (would require Chain's chain in the derivation
-history, which kernel-mediation prevents).
+**1. Forgery resistance is structural.** An adversary cannot mint a
+YieldSender for a restricted key because `kernel:mint_yield` is
+INTERPOSED over by the top-level orchestrator, which gates (via
+key-namespace) which keys are mintable below it. A forged Sender for an
+unregistered key matches no receiver and faults.
 
 **2. Authorization is possession of the AuthorityCap, not the
-marker.** The marker is opaque inside AuthorityCap's state (only
+YieldSender.** The YieldSender is opaque inside AuthorityCap's state (only
 AuthorityCap's bytecode reads it). User contracts hold
-`Cap::Instance[EndpointRefCap]`, not the marker directly. They invoke
-EndpointRefCap; EndpointRefCap's bytecode yields with the marker on
+`Cap::Instance[EndpointRefCap]`, not the YieldSender directly. They invoke
+EndpointRefCap; EndpointRefCap's bytecode yields with the YieldSender on
 their behalf.
 
-**3. Cap::Type vs Cap::Instance distinction matters.** Holding a
-Cap::Type that *identifies* the marker's type does NOT grant the
-ability to yield with the marker. Only holding an actual
-`Cap::Instance[marker]` (i.e., the marker Instance) does. The
-yield-marker routing uses instance_hash equality on real Cap::Instance
-values, never Cap::Type. See §8.
+**3. Identifying a type is not holding the cap.** Reading a YieldSender's
+image_hash (its type) does NOT grant the ability to yield with it. Only
+holding an actual `Cap::Instance[YieldSender{key}]` does. Routing uses
+yield_key membership in snapshotted YieldReceivers on real Cap::Instance
+values, never a type identifier. See §8.
 
 **4. Delegation is automatic.** A can MGMT_COPY the EndpointRefCap
 and pass to another contract. Whoever ends up holding it can invoke.
@@ -2014,20 +2213,24 @@ AuthorityCap Image level.
 
 **5. Public σ is fine.** Anyone can read that A holds the cap.
 Nothing follows from reading. Only A can move the cap out of A's
-cnode; only the cap holder can invoke through it; the marker stays
-opaque inside AuthorityCap.
+cnode; only the cap holder can invoke through it; the YieldSender stays
+opaque inside AuthorityCap. Confidentiality from intermediates is
+structural via owner-edge routing + single-resumer: a keyed yield goes
+straight to the nearest registered owner receiver, so unregistered
+intermediates never see the payload.
 
 **6. No per-user table at O.** O's state is the contracts themselves
-plus O's own facets and YieldCatcher marker list. Per-user
+plus O's own facets and YieldReceiver catch-set. Per-user
 authorization lives in *which caps A holds*, which is A's own cnode
 contents.
 
-**7. Revocation via marker rotation.** Chain can remove the marker
-from its YieldCatcher via `YieldCatcher.remove(marker)` (or replace
-it with a new marker by minting a fresh one and adding it). All
-outstanding AuthorityCaps holding the old marker fail to match.
-Mint new AuthorityCaps with the new marker if needed. Structural
-revocation without per-cap tracking.
+**7. Revocation via key rotation.** Chain can drop the key from its
+YieldReceiver catch-set (re-merge a receiver that omits it), or re-mint
+under a fresh key via `kernel:mint_yield` and re-issue caps. All
+outstanding AuthorityCaps holding a YieldSender for the old key then
+match no receiver and fault (snapshot caveat: takes effect for subtrees
+of CALLs made AFTER the change). Mint new AuthorityCaps with the new key
+if needed. Structural revocation without per-cap tracking.
 
 ### Where policy attaches
 
@@ -2095,26 +2298,25 @@ documented in [userspace/generic-authority-pattern.md](userspace/generic-authori
 ```
 Image AttestationAuthority (well-known image; minted by kernel):
   state:
-    marker: Cap::Instance[attest_marker]    -- in self.cnode
+    sender: Cap::Instance[YieldSender{"kernel:attest"}]   -- in self.cnode
   endpoints:
     attest(key, blob) → AttestStatus
       -- 1. Compose payload: { key, blob }, place in arg slot.
-      -- 2. Place Cap::Instance[attest_marker] in yield-scratchpad.
+      -- 2. Place Cap::Instance[YieldSender{"kernel:attest"}] in
+      --    yield-scratchpad.
       -- 3. host_yield(yield-scratchpad).
       -- 4. On resume, slot[0] holds the kernel's response (status).
       -- 5. HALT returning status to caller.
 
 Setup (kernel/chain init):
-  attest_marker = host_derive_spawn(AttestMarkerImage, init={})
-  -- Add to the kernel handler instance's YieldCatcher
-  -- (kernel's handler is a kernel-internal instance whose
-  --  yield_marker_slot points to its own YieldCatcher):
-  CALL(kernel_handler.YieldCatcher, add,
-       marker=Cap::Instance[attest_marker])
-  -- Now kernel catches yields with this marker.
+  -- "kernel:attest" is a reserved kernel:* key; the kernel is its
+  --  implicit ROOT YieldReceiver, so no add ceremony is needed.
+  --  The kernel:attest YieldSender lives in the top-level scratchpad
+  --  CNode (§4).
 
-  -- AA caps are minted with marker in their state:
-  aa_cap = host_derive_spawn(AAImage, init={ marker: Cap::Instance[attest_marker] })
+  -- AA caps are minted with the YieldSender in their state:
+  aa_cap = host_derive_spawn(AAImage,
+                  init={ sender: Cap::Instance[YieldSender{"kernel:attest"}] })
   -- Distribute aa_cap to chain code that needs to attest.
 
 enum AttestStatus {
@@ -2128,12 +2330,12 @@ enum AttestStatus {
 }
 ```
 
-The mechanism follows the canonical authority pattern (§14, §17):
-attest_marker's image_hash chain is rooted in the kernel; user code
-holding Cap::Instance[AA] can invoke AA which yields with the marker;
-kernel catches via yield_marker_slot match; kernel processes mode-
-aware and returns mode-invariant status. The marker is opaque inside
-AA — only AA's bytecode reads it.
+The mechanism follows the canonical authority pattern (§14, principle 17):
+`kernel:attest` is a reserved kernel:* key with the kernel as root
+receiver; user code holding Cap::Instance[AA] can invoke AA which yields
+with the YieldSender; the kernel root receiver catches it; the kernel
+processes mode-aware and returns mode-invariant status. The YieldSender
+is opaque inside AA — only AA's bytecode reads it.
 
 Userspace never sees a signature. The return value of `AA.attest` is
 a status enum, identical in produce and verify modes for the same
@@ -2171,12 +2373,12 @@ Apply (or downstream Instances receiving AA via cap-flow) calls
 AA.attest(key, blob) at every signature obligation.
 
 Per-attest yield handling:
-  - AA's bytecode yields with attest_marker; kernel walks the call
-    stack and consults each InstanceEntry's YieldCatcher (via short-
-    circuit). Match found at kernel handler instance.
-  - Intermediates don't catch (their YieldCatcher's marker list
-    doesn't contain attest_marker). They have no access to the
-    yielded payload — it never lands in their slot[0].
+  - AA's bytecode yields with YieldSender{"kernel:attest"}; the kernel
+    walks AA's owner edges toward the root. The kernel is the root receiver
+    for kernel:* keys, so it catches.
+  - Intermediates don't catch (their snapshotted YieldReceiver lacks
+    "kernel:attest"). They have no access to the yielded payload — it
+    never lands in their slot[0] (single-resumer + owner-edge routing).
   - The kernel reads the payload (key, blob) from the yield's arg
     slot — these are part of AA's payload composition, not part of
     AA's identity.
@@ -2215,11 +2417,13 @@ Apply HALTs. At HALT, kernel knows:
 
 ### AA presence and chain integrity
 
-Kernel verifies on receipt of every Attest yield that the request's
-`image_hash_chain` extends from a kernel-minted AA. A fabricated
-Attest from userspace would have a chain that doesn't match; rejected
-structurally. This is what forgery resistance buys; no presence-check
-machinery beyond chain validation is required.
+An adversary cannot emit a `kernel:attest` yield because it cannot
+obtain `YieldSender{"kernel:attest"}` — the top-level orchestrator
+interposes over the unrestricted `kernel:mint_yield` and gates the
+`kernel:*` yield_key namespace below it. An emitter without that Sender
+matches no `kernel:attest` receiver and faults. This is what forgery
+resistance buys; no presence-check machinery beyond key-namespace
+gating is required.
 
 The chain orchestrator's bytecode is responsible for ensuring AA
 flows through cap-flow to the Instances that need to attest. If the
@@ -2233,8 +2437,8 @@ A separate AA endpoint follows the same yield-mediated pattern:
 
 ```
 AA.aggregate(group_key, partial_sig) → AggregateStatus
-  -- builds an Aggregate request Instance (state: { group_key, partial_sig });
-  -- yields up; kernel collects partials per group;
+  -- composes { group_key, partial_sig } into slot[0]; yields the attest
+  --   YieldSender; the kernel root receiver collects partials per group;
   -- at block finalization, kernel BLS-aggregates and appends final
   -- sig to block sidecar.
   -- Returns mode-invariant status.
@@ -2253,8 +2457,9 @@ MintInstance (issuance authority for typed values) is owned by the
 chain Orchestrator. User contracts that should be able to mint hold
 **MintRefCap** — a capability minted by O that, on invocation, yields
 a Mint request up the cascade to O. Same yield-mediated authority
-pattern as AA; same forgery resistance via image_hash chain. No
-auth_table lookup; no user-keyed ACL.
+pattern as AA; same forgery resistance via interposition over
+`kernel:mint_yield` (a user cannot mint `YieldSender{"mint"}` because O
+gates the key namespace below it). No auth_table lookup; no user-keyed ACL.
 
 ```
 Image MintInstance (owned by O, well-known image):
@@ -2269,16 +2474,16 @@ Image MintInstance (owned by O, well-known image):
 Image MintRefCap (granted by O to user contracts that may mint):
   state:
     domain: DomainId                       -- which mint domain this cap is for
-    marker: Cap::Instance[mint_marker]        -- in self.cnode
+    sender: Cap::Instance[YieldSender{"mint"}]   -- in self.cnode
     -- possibly: policy fields (rate limits, etc.) baked in per §14
   endpoints:
     mint(content) → MintStatus
-      -- Per the canonical authority pattern (§14, §17):
+      -- Per the canonical authority pattern (§14, principle 17):
       -- 1. Compose payload from { domain, content } + args.
-      -- 2. Place Cap::Instance[mint_marker] in yield-scratchpad.
+      -- 2. Place Cap::Instance[YieldSender{"mint"}] in yield-scratchpad.
       -- 3. host_yield(yield-scratchpad).
-      -- 4. Kernel routes to O (which has mint_marker in its
-      --    yield_marker_slot). O invokes MintInstance.mint internally
+      -- 4. Kernel routes to O (which has "mint" registered in its
+      --    yield_receiver_slot). O invokes MintInstance.mint internally
       --    and returns status via CALL_RESUME.
       -- 5. On resume, slot[0] holds status (and any new Issuance cap).
       -- 6. HALT to caller.
@@ -2286,10 +2491,10 @@ Image MintRefCap (granted by O to user contracts that may mint):
     transfer(...) → TransferStatus
 ```
 
-Setup: O derives mint_marker via `host_derive_spawn(MintMarkerImage)`
-and adds it to its YieldCatcher via
-`CALL(O.YieldCatcher, add, marker=Cap::Instance[mint_marker])`. Then
-mints MintRefCaps with the marker embedded. See
+Setup: O mints the "mint" Sender/Receiver pair via
+`kernel:mint_yield("mint")`, registers the key in its own YieldReceiver
+(`kernel:merge_yield_receiver` into `yield_receiver_slot`), and mints
+MintRefCaps with the YieldSender embedded. See
 `userspace/generic-authority-pattern.md` for the full pattern.
 
 ### Flow
@@ -2311,18 +2516,19 @@ Cross-contract case (A invokes an operation that mints):
   1. A holds Cap::Instance[MintRefCap(domain_X)] in its cnode (granted
      by O earlier via O's grant endpoint).
   2. A.apply calls MintRefCap.mint(content).
-  3. MintRefCap's bytecode yields with mint_marker; kernel walks
-     the call stack; finds O's YieldCatcher contains a matching
-     marker template; routes to O.
+  3. MintRefCap's bytecode yields with YieldSender{"mint"}; the kernel
+     walks owner edges toward the root; A's owner-edge snapshot lacks "mint";
+     O's owner-edge snapshot contains "mint"; routes to O.
   4. O's bytecode reads payload (domain_X, content), invokes
      MintInstance.mint(domain_X, content) → Issuance.
   5. O places result in slot[0]; CALL_RESUME. MintRefCap resumes,
      HALTs with status to A.
 
-Forgery resistance: a malicious A cannot yield with mint_marker
-without holding a real MintRefCap (the marker is in MintRefCap's
-state, opaque from outside). And A can't fabricate a MintRefCap
-because Chain's chain prefix can't be replicated.
+Forgery resistance: a malicious A cannot yield with YieldSender{"mint"}
+without holding a real MintRefCap (the YieldSender is in MintRefCap's
+state, opaque from outside). And A can't mint its own YieldSender for
+"mint" because O interposes over `kernel:mint_yield` and gates the key
+namespace.
 ```
 
 ## 17. Footgun reduction
@@ -2336,14 +2542,26 @@ Structurally eliminated:
 - **Cap-as-value confusion** — caps are content-addressed copyable;
   MGMT_COPY produces explicit shared references; mutations diverge
   per §9 case (b).
-- **Bytecode validation at Image construction** — kernel validates
-  Image's embedded bytecode for parseability when the Image is
-  constructed. Malformed bytecode rejected at construction.
+- **Bytecode admission forks** — kernel validates structural Image fields
+  at construction, but instruction semantics are lazy. Illegal/reserved
+  encodings panic only when reached, so cap admission does not fork on
+  producer-toolchain bytecode policy.
 - **Memory exhaustion mid-apply** — static memory; allocation only
   via the heap-region pattern with bounded size.
-- **Page-fault nondeterminism** — no page faults; access to undeclared
-  addresses Faults the Instance deterministically.
-- **Lazy paging consensus footguns** — no lazy paging.
+- **Page-fault nondeterminism** — page faults are used internally to
+  drive lazy materialization but are deterministic: present/writable
+  (permission) faults, never hardware Accessed/Dirty bits; consensus
+  4 KiB granule independent of host page size; both engines charge
+  identically (gas-cost.md §5). Access to undeclared addresses is a
+  terminal PVM2-level fault, deterministically.
+- **Lazy paging consensus footguns** — lazy materialization is
+  deterministic (first-touch faults are a function of the Image +
+  input; read-only page-in is charged **at the CALL** (statically, from
+  the Image — no per-fault charge) and CoW per consensus page
+  (depth-aware, per finding A)); materialization is a
+  host-level retry below the PVM2 model (a PVM2-level page fault stays
+  terminal).
+  See gas-cost.md §3 / §5.
 - **Lost continuation** — yield captures continuation in Instance value.
 - **Pinned data corruption** — kernel rejects writes to pinned regions
   and modifications to pinned cnode entries.
@@ -2361,14 +2579,16 @@ Structurally eliminated:
   prevented structurally. image_hash is a kernel-attested chain;
   genesis Instances have image_hash = hash(initial_image); post-set_image
   / post-derive_spawn image_hashes are recursive.
-- **Raw image_hash inspection footguns** — userspace cannot read raw
-  image_hash. The only type queries are semantic (`host_same_type`,
-  `host_same_type_as`).
+- **Type-as-authority footgun** — image_hash is readable (via
+  `host_image_hash_chain`) for identification, but possession of a
+  Cap::Instance (not type matching) is what authorizes. Treating "is of
+  type X" as authority is a userspace anti-pattern (caught by linting),
+  not a kernel restriction. Full lineage *walking* stays unexposed.
 - **Piecewise spec mutation inconsistency** — Image is mutated as a
   unit via `set_image`. No `host_set_code` / `host_set_endpoints`.
 - **Conservation violations via cap copying** — conservation lives
   either in kernel-internal tables (for kernel-assisted resources
-  like Gas/Quota: copies of `Cap::Instance[Gas{meter_id}]` all name
+  like Gas/Quota: copies of `Cap::Instance[Gas{meter_key}]` all name
   the same meter; debiting any copy debits the same row) or in
   authority bytecode (for userspace resources: typed handle copies
   reference the same ledger row). Either way, copying doesn't
@@ -2376,10 +2596,10 @@ Structurally eliminated:
 
 ## 18. Open questions
 
-1. **Chain-defined yield markers**: canonical patterns for chain-
-   defined markers (CooperativeCheckpoint, NeedHeapSpace, etc.)
-   and how chains extend the kernel-issued set (OOGMarker,
-   StorageExhaustedMarker).
+1. **Chain-defined yield keys**: canonical patterns for chain-defined
+   yield_keys (CooperativeCheckpoint, NeedHeapSpace, etc.) minted via
+   `kernel:mint_yield` and registered in the YieldReceiver alongside the
+   kernel:* keys (`kernel:oog`, `kernel:storage_exhausted`).
 
 2. **EndpointRefCap variants and dispatch-side policy**: which
    policy fields (rate limit, arg filter, etc.) bake into the cap
@@ -2389,7 +2609,9 @@ Structurally eliminated:
 3. **Cap::Image construction**: how chain authors construct
    Cap::Image values. Probably via a `host_make_image(code: Bytes,
    endpoints: ..., mappings: ..., pinned_slots: ...) → Cap::Image`
-   host call. Bytecode validation at construction.
+   host call. Structural fields are validated at construction;
+   instruction semantics stay lazy, so illegal/reserved encodings panic
+   only when reached.
 
 4. **gas_slots / quota_slots fallback policies**: standard
    combinations chain authors should know — single primary meter
@@ -2411,8 +2633,8 @@ Structurally eliminated:
 
 9. **Genesis seed**: what initial cnode contents does Kernel hold?
    Chains likely pin Cap::Image references for the authorities the
-   chain wants to derive at bootstrap, plus the kernel-issued caps
-   listed in §12.
+   chain wants to derive at bootstrap, plus the root unit handles and
+   scratchpad YieldSenders listed in §12.
 
 10. **Pinned-slot collision policy**: when `set_image` finds a
     target pinned slot is already occupied by non-pinned content,
@@ -2426,16 +2648,16 @@ Structurally eliminated:
     CALL?
 
 13. **`image_id`-equal but `image_hash`-different Instances**: same code,
-    different lineage — `host_same_type` returns false. Document so
-    chain authors don't conflate "same Image content" with "same
-    type".
+    different lineage — their `host_image_hash_chain` bytes differ.
+    Document so chain authors don't conflate "same Image content" with
+    "same type".
 
 14. **Off-chain Dispatch Instance's image_hash**: derived per the
     canonical formula, or absent (ephemeral, never hashed)?
 
-15. **Cap::CNode size constraints for spawn**: host_derive_spawn
-    requires a Cap::CNode of size 256. Should kernel auto-pad
-    smaller Cap::CNodes, or require exact-size?
+15. **Initial root-cnode key policy for spawn**: host_derive_spawn
+    accepts a sparse Key-addressed Cap::CNode. Which reserved keys must
+    be absent or pre-populated beyond the pinned-slot collision rules?
 
 16. **Hierarchical orchestrator patterns**: when does decomposition
     pay off? What's the minimal canonical set of orchestrators per
@@ -2444,14 +2666,15 @@ Structurally eliminated:
 Resolved decisions on the kernel-assisted Instance design (gas / quota
 / yield routing — page size, dirty-page tracking lifetime, id
 assignment policy, OOG payload shape, etc.) are captured in
-[discussions/kernel-assisted-instances.md](discussions/kernel-assisted-instances.md).
+[principles/kernel-assisted-instances.md](principles/kernel-assisted-instances.md).
 
 ## 19. Summary
 
 ```
 Instance (always Image-bound):
   image_id:     ImageHash
-  cnode:        256 slots; pinned slots per Image; non-pinned mutable
+  cnode:        Key-addressed sparse root cnode; pinned keys per Image;
+                non-pinned mutable
   status:       Idle | Paused {...} | Faulted
   image_hash:   derived; kernel-attested chain hash:
                   genesis:                  hash(initial_image)
@@ -2462,82 +2685,91 @@ Instance (always Image-bound):
                   via MGMT_COPY:            preserved
 
 Cap::Image (content-addressed, copyable):
-  - code:            Bytes  (bytecode embedded; validated at construction)
+  - code:            Bytes  (bytecode embedded; illegal/reserved encodings
+                             panic lazily when reached)
   - memory_mappings: [{start, size, source}]
-  - endpoints:       [Option<EndpointDef>; 256]
-  - gas_slots:       [SlotIdx]    -- slots holding Cap::Instance[Gas{meter_id}]
-  - quota_slots:     [SlotIdx]    -- slots holding Cap::Instance[Quota{quota_id}]
-  - pinned_slots:    Map<SlotIdx, ContentAddressedCap>
+  - endpoints:       Map<Key, EndpointDef>  (sparse, Key-keyed; no fixed 256)
+  - gas_slots:       [Key]    -- slots holding Cap::Instance[Gas{meter_key}]
+  - quota_slots:     [Key]    -- slots holding Cap::Instance[Quota{quota_key}]
+  - pinned_slots:    Map<Key, ContentAddressedCap>
                        (ContentAddressedCap ∈ { Cap::Data, Cap::Image })
-  - yield_marker_slot: Option<SlotIdx>
-                       -- slot holding Cap::Instance[YieldCatcher]
+  - yield_receiver_slot: Option<Key>
+                       -- slot holding Cap::Instance[YieldReceiver]
+                       --   (the Instance's YieldReceiver{Vec<yield_key>})
 
 Cap::CNode (uniformly copyable; mintable):
-  - size: 2^k slots
-  - slots: [Option<Cap>; size]
-  - Used for storage exceeding 256-slot Instance root cnode, for
-    state-snapshot/revert patterns, and as the cnode argument to
-    host_derive_spawn.
+  - slots: Map<Key, Cap>       -- sparse, Key-addressed; no fixed capacity
+                                -- hash(key) appears only in commitment/proof
+                                -- calculation, not runtime slot access
+  - Used for nested storage, state-snapshot/revert patterns, and as the
+    cnode argument to host_derive_spawn.
 
 Memory model:
-  - Static layout per Image; no dynamic mapping; no lazy paging.
+  - Static layout per Image (fixed footprint, no dynamic growth);
+    pages materialize lazily on first touch (gas-cost.md §3).
   - Persistent mapping = backed by cnode DataCap; mutations COW'd.
   - Ephemeral mapping = kernel-allocated; per-apply.
-  - DataCap canonical form: trailing-zero-stripped.
+  - DataCap canonical form: page-multiple, page-aligned bytes; no
+    trailing-zero stripping.
   - Size-mismatch: small DataCap zero-padded; large DataCap faults.
 
 Apply terminations (all reflect target.slot[0] to caller.slot[0]):
   HALT  → Idle (new value)
   yield → Waiting on call stack (Paused if preserved across blocks);
-          continuation is regs+pc; yield payload (typically a marker
-          / unit cap) reflects to caller via slot[0].
-          (kernel OOG = host_yield with kernel-issued OOGMarker;
-           payload is Cap::Instance[Gas{meter_id}].)
+          continuation is regs+pc+yield_sender; yield payload (typically
+          a YieldSender / unit cap) reflects to caller via slot[0].
+          (kernel OOG = host_yield of the kernel:oog key;
+           payload is Cap::Instance[Gas{meter_key}].)
   fault → Faulted, then dropped
   Gas debited STM-exempt: from the meter named by the active Instance's
-    gas slot; debits are per-instruction; no per-CALL budget.
+    gas slot; debits are per basic block at block entry (gas-cost.md §1);
+    no per-CALL budget.
   Apply discipline: keep slot[0] in a safe-to-reflect state at all
     times (input scratchpad, empty, or complete output Cap::CNode
-    atomically MGMT_MOVE'd in). OOG and fault can happen at any
-    instruction; partial slot[0] would expose mid-mutation state.
+    atomically MGMT_MOVE'd in). A hard fault can happen at any
+    instruction (OOG and voluntary yields only at a bb_start); partial
+    slot[0] would expose mid-mutation state.
 
 Kernel ABI:
-  Invocation:           CALL, CALL_RESUME, DROP_PAUSED
+  Invocation:           CALL, CALL_RESUME, DROP_RESUME
                         (no gas_budget — gas via gas_slots)
-  Yield:                host_yield (YieldCatcher-routed marker)
+  Yield:                host_yield(YieldSender) routed by yield_key
   Data:                 host_read_data_cap, host_mint_data_cap
   Cap-table:            MGMT_COPY/MOVE/DROP/CNODE_SWAP
   Image / spawn:        set_image, host_derive_spawn
-  Type-query:           host_same_type, host_same_type_as,
-                        host_type_of, host_subtype, host_type_eq
+  Type identity:        host_image_hash_chain
   CNode:                host_mint_cnode
 
-Kernel-issued caps at chain init (see §4, §12):
-  Gas/storage:          SetGasMeter, SetStorageQuota, MintGas,
-                        MintQuota, root Gas/Quota unit handles.
-  Yield routing:        CreateYieldCatcher; chain's initial
-                        YieldCatcher pre-populated with OOGMarker,
-                        StorageExhaustedMarker.
+Kernel ABI at chain init (see §4, §12):
+  Gas/storage:          scratchpad YieldSenders kernel:set_gas_meter,
+                        kernel:set_storage_quota, kernel:mint_gas,
+                        kernel:mint_quota; root Gas/Quota unit handles.
+  Yield routing:        scratchpad YieldSenders kernel:mint_yield,
+                        kernel:merge_yield_receiver, kernel:attest;
+                        chain's YieldReceiver registers kernel:oog,
+                        kernel:storage_exhausted (kernel is root
+                        receiver for kernel:* keys).
 
-Cap kinds (five; all copyable):
+Cap kinds (four; all copyable):
   Cap::Instance   — Instance value reference. AUTHORITY-BEARING.
-                 Includes kernel-assisted Instances (§22): YieldCatcher,
-                 Gas{meter_id}, Quota{quota_id}, etc.
+                 Includes the four kernel-assisted Instances (§22):
+                 Gas{meter_key}, Quota{quota_key},
+                 YieldSender{yield_key}, YieldReceiver{Vec<yield_key>}.
   Cap::Image   — spec including embedded bytecode.
   Cap::Data    — arbitrary bytes.
   Cap::CNode   — variable-size cnode (mintable).
-  Cap::Type    — image_hash chain identifier. IDENTIFICATION-ONLY;
-                 NOT for authority routing (see §8).
+  (Type identity is the image_hash, read via host_image_hash_chain —
+   not a separate cap kind; see §8.)
 
   Resource caps (Gas, StorageQuota) are NOT separate cap kinds —
   they are kernel-assisted Cap::Instances:
-    Gas{meter_id}   — per-Instance unit handle naming a meter in the
+    Gas{meter_key}   — per-Instance unit handle naming a meter in the
                       kernel-internal GasMeter table. Conservation
                       lives in the table; cap copies all name the
                       same meter; no narrow linearity needed.
-    Quota{quota_id} — symmetric for StorageQuota.
-  Chain accesses kernel-internal GasMeter/StorageQuota only via
-  the kernel-issued SetGasMeter/SetStorageQuota caps.
+    Quota{quota_key} — symmetric for StorageQuota.
+  Chain accesses kernel-internal GasMeter/StorageQuota by yielding the
+  kernel:set_gas_meter/kernel:set_storage_quota scratchpad YieldSenders.
   Custom (non-kernel-assisted) resources are typed handles into
   authority ledgers.
 
@@ -2568,11 +2800,10 @@ Authority + Subject pattern:
     kernel-assisted resources (Gas/Quota, §22).
   Forgery resistance via image_hash chain.
 
-Type query:
-  host_same_type(a, b)  → image_hash equality
-  host_same_type_as(comparer, comparee, [images])
-                        → comparer is comparee derived through images
-  Lineage walking and raw image_hash are not exposed.
+Type identity:
+  host_image_hash_chain(slot, dst) → Cap::Data of the image_hash bytes
+  Same-type = memcmp; subtype = fold hash(acc || hash(image)) yourself.
+  Full lineage walking is not exposed.
 
 Forgery resistance (structural):
   Genesis Kernel Instance has image_hash = hash(KernelImage).
@@ -2582,7 +2813,9 @@ Forgery resistance (structural):
   Cap-runtime integrity: caps not synthesizable from bytes.
 
 By-value with content-addressed slot references:
-  Slots only update at apply termination.
+  CALL moves the callee Instance into a KernelFrame; the origin slot is
+    empty-reserved until HALT restores it or discard clears the reservation.
+  Slots only restore/update at apply termination or explicit discard.
   Sub-tree atomicity structural.
   No STM buffer required.
 
@@ -2594,6 +2827,10 @@ Snapshot/revert universal:
 Pinned cnode slots: kernel-locked, declared by current Image's
   `pinned_slots`. Holds Cap::Data (baked-in ro bytes) or Cap::Image
   (derive_spawn targets).
+
+Empty-reserved origin slots: kernel-locked by call-stack metadata while a
+  child Instance is running/waiting. They are not cap values and are not
+  persisted.
 
 Pure-function apply; effects as outputs.
 Saga pattern for peer coordination via emit + on_failure.
@@ -2615,8 +2852,4 @@ Authority model:
 This is the consolidated v3 design without linearity.
 
 For a side-by-side comparison with seL4's verified security
-properties, see [discussions/sel4-mapping.md](discussions/sel4-mapping.md).
-
-For the discussion-level exploration that includes the linearity
-alternative, see
-[../minimum/discussions/minimal-kernel-v3.md](../minimum/discussions/minimal-kernel-v3.md).
+properties, see [principles/sel4-mapping.md](principles/sel4-mapping.md).

@@ -2,7 +2,7 @@
 
 //! JAR v3 capability system.
 //!
-//! Defines the five v3 cap kinds (Instance, Image, Data, CNode, Type),
+//! Defines the four v3 cap kinds (Instance, Image, Data, CNode),
 //! their content-bearing representations, a two-tier cache for
 //! identity-keyed mutable state + content-addressed blobs, and the
 //! primitives (BMT, hash) used by upstream layers.

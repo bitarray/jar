@@ -1,6 +1,6 @@
 # JAR Spec — Codebase Guide
 
-Lean 4 formalization of the JAR protocol, based on JAM (Join-Accumulate Machine).
+Lean 4 formalization of the current JAR design up to the JAVM kernel level.
 
 **This codebase is built entirely by AI agents.** Every PR is scored by the Genesis Proof-of-Intelligence protocol. See [GENESIS.md](../GENESIS.md) for the full design.
 
@@ -11,46 +11,39 @@ All commands in this file run from the `spec/` directory.
 ```
 Jar/                  Core protocol (Lean 4)
 Genesis/              Proof-of-Intelligence distribution protocol
-crypto-ffi/           Rust FFI for cryptographic primitives
-tests/vectors/        JSON conformance test vectors
-tools/                Utility scripts
-fuzz/                 Differential fuzzing (Rust)
 ```
 
 ## Build
 
 ```bash
-cd crypto-ffi && cargo build --release   # Rust crypto library
 lake build                                # Lean (default: Jar library)
-make test                                 # All tests (unified jartest binary)
+make test                                 # Jar library + Genesis library + genesis CLI
+make book                                 # Render JarBook into _out/html-multi
 ```
 
-Genesis tools build independently (no Rust needed):
+Genesis tools build independently:
 ```bash
 lake build genesis
 ```
 
 ## Jar Module — Protocol Spec
 
-| Module | GP Section | Purpose |
-|--------|-----------|---------|
-| `Jar.Types` | §3–4 | Core types: Constants, Numerics, Validators, Work, Accounts, Header, State |
-| `Jar.Notation` | §3 | Custom notation matching Gray Paper conventions |
-| `Jar.Codec` | Appendix C | Serialization: fixed-width LE ints, variable-length nats, bit packing |
-| `Jar.Crypto` | §3.8, F–G | Blake2b, Keccak256, Ed25519, Bandersnatch VRF, BLS (via FFI) |
-| `Jar.PVM` | Appendix A | Polkadot Virtual Machine: rv64em instruction set, gas metering, memory model |
-| `Jar.Merkle` | Appendix D–E | Merkle trees and tries for state commitment |
-| `Jar.Erasure` | Appendix H | Reed-Solomon erasure coding (GF(2^16), Cantor basis FFT) |
-| `Jar.Consensus` | §6, §19 | Safrole block production, GRANDPA finalization |
-| `Jar.Services` | §8, §9, §12, §14 | Service accounts, authorization, refinement, work reports |
-| `Jar.Accumulation` | §12 | On-chain accumulation: host calls Ω_0–Ω_26, gas tracking |
-| `Jar.State` | §4–13 | Block-level state transition Υ(σ, B) = σ' |
-| `Jar.Json` | — | ToJson/FromJson instances for all types (hex-encoded byte data) |
-| `Jar.Variant` | — | Protocol variant typeclass: `gp072_full`, `gp072_tiny`, `jar1` |
+| Module | Purpose |
+|--------|---------|
+| `Jar.Basic` | Shared bytes, hashes, keys, slot paths, layout constants, and depth limits |
+| `Jar.SSZ` | SSZ type descriptors, offset/layout validity, and hash-tree-root boundary |
+| `Jar.PVM2.Regs` | RV64E register map: x1-x15 plus spilled x3/x4, x0 hardwired zero, x16-x31 reserved |
+| `Jar.PVM2.Memory` | 32-bit address aliasing, code/data regions, and image arena validity |
+| `Jar.PVM2.Instruction` | Supported instruction classes, custom0 ops, reserved-register checks, basic blocks |
+| `Jar.PVM2.Gas` | Fast-path, memory, spill, ecall, yield, and frame gas fragments |
+| `Jar.Cap` | Image, data, CNode, and instance capabilities plus cap-management primitives |
+| `Jar.Kernel` | Gas/quota resources, kernel yield namespace, and yield routing |
+| `Jar.SubVM` | Invocation, pause/scratchpad invariants, call-depth and cap-nesting limits |
+| `Jar.JAVM` | Aggregate JAVM image/state surface |
 
 ## Genesis Module — PoI Distribution
 
-Standalone protocol for token distribution via ranked code review. No crypto-ffi dependency. State lives on the `genesis-state` branch (not master).
+Standalone protocol for token distribution via ranked code review. State lives on the `genesis-state` branch (not master).
 
 | File | Purpose |
 |------|---------|
@@ -72,50 +65,15 @@ CLI tools read JSON stdin, write JSON stdout. Error → `{"error": "..."}` to st
 | `cargo run -p jar-genesis -- replay --mode verify-cache` | Rebuild from git history, compare against `genesis-state` cache |
 | `cargo run -p jar-genesis -- replay --mode rebuild` | Output rebuilt cache to stdout |
 
-## crypto-ffi
-
-Rust static library (`libjar_crypto_ffi.a`) + C bridge (`bridge.c`).
-
-Provides: blake2b, keccak256, ed25519_{sign,verify}, bandersnatch_{sign,verify,ring_*}, bls_{sign,verify}.
-
-Lean declarations in `Jar/Crypto.lean` use `@[extern "jar_*"]`. Bridge in `bridge.c` marshals Lean OctetSeq ↔ raw bytes.
-
 ## Testing
 
-### JSON conformance tests
-Test vectors in `tests/vectors/<subsystem>/` with `*.input.json` / `*.output.json` pairs.
-
-Subsystems: safrole, statistics, authorizations, history, disputes, assurances, preimages, reports, accumulate.
-
-Each has a `lean_exe` (e.g., `safrolejsontest`) that loads vectors, runs the transition, compares output.
-
-### Bless mode (regenerate expected outputs)
-```bash
-lake build jarstf
-.lake/build/bin/jarstf --variant jar1 --bless accumulate tests/vectors/accumulate
-.lake/build/bin/jarstf --variant gp072_tiny --bless safrole tests/vectors/safrole
-```
-
-To rebuild PVM blobs referenced by accumulate vectors (after changing service source):
-```bash
-cd ../grey
-cargo build --release -p spec-tests
-cargo run --release -p spec-tests -- bless ../spec/tests/vectors/accumulate/blobs
-```
-
-### Property-based tests
-`Test/Properties.lean` + `Test/Arbitrary.lean` — uses Plausible for random generation + invariant checking.
-
-### Other tests
-`blocktest` (full blocks), `codectest` (roundtrips), `erasuretest` (Reed-Solomon), `trietest` (Merkle), `shuffletest` (Safrole permutations), `cryptotest` (crypto verification).
+`make test` is the Lean smoke test for this tree: it builds the Jar library, Genesis library, and `genesis` CLI. Genesis history integrity is still checked from Rust with `cargo run -p jar-genesis -- replay --mode verify`.
 
 ## Conventions
 
-- **Byte data**: `0x`-prefixed hex strings in JSON
-- **Variable naming**: follows Gray Paper (τ → timeslot, η → entropy, κ → validators)
-- **Bounded types**: `OctetSeq n`, `Fin n` for indices
-- **Error handling**: `Exceptional α` for ok/none/error (GP ∅ ∇)
-- **Maps**: `Dict K V` (sorted association lists)
+- **Byte data**: `UInt8` lists at the Lean boundary; SSZ encoders define byte layout.
+- **Strict interfaces**: fields are required; missing inputs should be caller errors.
+- **Reserved design**: delete stale JAM/EVLES modules rather than keeping unchecked placeholders.
 - **Lean toolchain**: v4.27.0 (pinned in `lean-toolchain`)
 
 ## Spec Consistency Rule
@@ -128,7 +86,7 @@ For commit N, any spec version ≥ the spec at commit N-1 must produce the same 
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci-spec.yml` | push master, PRs (spec/**) | Build crypto-ffi + `make test` |
+| `ci-spec.yml` | push master, PRs | `make test` + Genesis replay |
 | `genesis-pr-opened.yml` | `pull_request_target: [opened]` | Post comparison targets + review template |
 | `genesis-review.yml` | `/review` comment (`issue_comment`) | Parse rankings, tally merge votes, trigger merge on quorum |
 | `genesis-merge.yml` | quorum (`workflow_dispatch`) or `/merge` | Wait for CI, merge, confirm, update cache |

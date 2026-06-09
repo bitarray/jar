@@ -3,16 +3,19 @@
 This doc specifies the canonical userspace pattern for **authority
 capabilities** in v3: caps that represent the right to invoke a
 privileged operation mediated by an authoritative handler (the chain
-orchestrator, the kernel, or any layer holding the marker in its
-`yield_marker_slot`).
+orchestrator, the kernel, or any layer that has registered the
+`yield_key` in its `yield_receiver_slot`).
 
 The pattern uses only existing v3 primitives:
 
-- `host_derive_spawn` to mint marker Instances and AuthorityCap Instances.
+- `host_derive_spawn` to mint AuthorityCap Instances.
+- `kernel:mint_yield` / `kernel:merge_yield_receiver` to mint and
+  compose the (YieldSender, YieldReceiver) rights.
 - Standard Cap::Instance copyable semantics.
-- `host_yield` with the kernel's yield-marker routing mechanism (§4).
-- `yield_marker_slot` declaration in Image (§1).
-- instance_hash equality for routing — no new primitives.
+- `host_yield` with the kernel's yield_key routing mechanism (§4).
+- `yield_receiver_slot` declaration in Image (§1).
+- yield_key routing via owner-edge snapshots + single-resumer — no new
+  primitives.
 
 **No new cap kinds needed.** Earlier drafts of this doc explored
 Request/Response Instance triplets, `host_same_type_as` chain checks,
@@ -22,67 +25,73 @@ this simpler mechanism.
 ## The shape
 
 ```
-                                      ┌─────────────────────┐
-        Chain (handler)               │ yield_marker_slot   │
-        ─────────────────────         │ slots:              │
-        Image:                        │  [0] marker_invoke  │
-          yield_marker_slot = 5       │  [1] marker_attest  │
-        cnode:                        │  [2] ...            │
-          [5] CNode containing ───────┴─────────────────────┘
-              the markers Chain catches
-        
+                                      ┌──────────────────────────┐
+        Chain (handler)               │ yield_receiver_slot      │
+        ─────────────────────         │ YieldReceiver{ keys }:   │
+        Image:                        │  "invoke_key"            │
+          yield_receiver_slot = 5     │  "kernel:attest"         │
+        cnode:                        │  ...                     │
+          [5] YieldReceiver holding ──┴──────────────────────────┘
+              the yield_keys Chain catches
+
         Chain mints AuthorityCap Instances:
         ─────────────────────
         AuthorityCap (e.g. EndpointRefCap):
           state:
-            marker: Cap::Instance[marker_invoke]   <-- embedded in cnode
-            target, endpoint_idx, etc.
+            sender: YieldSender{invoke_key}   <-- embedded in cnode (opaque)
+            target, endpoint: Key, etc.
           bytecode:
             invoke(args) → status
               -- compose payload from state + args
-              -- place marker in yield scratchpad
-              -- host_yield
+              -- place YieldSender in yield scratchpad
+              -- host_yield(YieldSender)
               -- on resume, slot[0] has handler response
               -- return to caller
-        
+
         User contract holds Cap::Instance[AuthorityCap].
         User contract CALLs AuthorityCap.invoke(args).
         AuthorityCap's bytecode is what yields.
-        Kernel walks call stack; matches instance_hash; routes to Chain.
+        Kernel reads yield_key and routes along owner edges to the
+        nearest snapshotted YieldReceiver containing the key (Chain).
 ```
 
 ## The three roles
 
-| Role | Image | Constructed by | Constructed into | Purpose |
+| Role | Held as | Constructed by | Constructed into | Purpose |
 |---|---|---|---|---|
-| **Marker** | `XMarkerImage` (well-known per authority type) | Chain via `host_derive_spawn`, init typically empty | Chain's `yield_marker_slot` CNode (for catching) and inside each AuthorityCap's state (for yielding) | The routing key for yield matching |
-| **AuthorityCap** | `XAuthorityCapImage` (well-known per authority pattern) | Chain via `host_derive_spawn`, init with marker + parameters | Distributed via cap-flow to user contracts | The bytecode-mediated entry point for invoking the authority |
-| **Chain (handler)** | The chain orchestrator's own Image | Genesis / chain spec | Top of the chain's call hierarchy | The yield handler that processes requests |
+| **YieldSender** | `YieldSender{yield_key}` (the EMIT right) | Chain via `kernel:mint_yield` (returns the Sender/Receiver pair) | Embedded in each AuthorityCap's state (for yielding) | The routing key for yield matching |
+| **AuthorityCap** | `Cap::Instance[XAuthorityCapImage]` (well-known per authority pattern) | Chain via `host_derive_spawn`, init with YieldSender + parameters | Distributed via cap-flow to user contracts | The bytecode-mediated entry point for invoking the authority |
+| **Chain (handler)** | The chain orchestrator's own Image; registers the `yield_key` in its `YieldReceiver` (the CATCH right) | Genesis / chain spec | Top of the chain's call hierarchy | The yield handler that processes requests |
 
 ## The mechanism, step by step
 
 ### Setup (Chain init)
 
 ```
-1. Chain derives a marker for each authority type:
-     marker_M = host_derive_spawn(MarkerImage, init={})
-   
-   marker_M's image_hash_chain = Chain.image_hash_chain || hash(MarkerImage).
-   This chain is unforgeable (kernel-mediated extension).
+1. Chain mints a (Sender, Receiver) pair for each authority type, under
+   a fresh yield_key:
+     (sender_M, receiver_M) = kernel:mint_yield(key_M)
 
-2. Chain places Cap::Instance[marker_M] in its yield_marker_slot CNode:
-     Chain.cnode[yield_marker_slot_idx].slot[k] = Cap::Instance[marker_M]
-   
-   This declares: "I catch yields whose marker matches marker_M."
+   key_M is a string in Chain's own namespace (e.g. "invoke_key").
+   kernel:mint_yield is unrestricted, but Chain holds it in its TCB and
+   interposes to gate which keys descendants may mint (see forgery
+   resistance below).
+
+2. Chain registers key_M in its own YieldReceiver by merging receiver_M
+   into the YieldReceiver held in its yield_receiver_slot:
+     Chain.cnode[yield_receiver_slot] :=
+         kernel:merge_yield_receiver(Chain's YieldReceiver, receiver_M)
+
+   This declares: "I catch yields tagged key_M."
 
 3. (Optional, can be deferred per-grant.) Chain mints AuthorityCaps:
      auth_cap = host_derive_spawn(AuthorityCapImage,
-                                  init={ marker: Cap::Instance[marker_M],
+                                  init={ sender: sender_M,
                                          ...other state... })
-   
-   The AuthorityCap holds the marker in its state. Crucially, the
-   marker is in AuthorityCap's CNODE — accessible only to
-   AuthorityCap's bytecode, not to outside observers.
+
+   The AuthorityCap holds the YieldSender in its state. Crucially, the
+   YieldSender is in AuthorityCap's CNODE — accessible only to
+   AuthorityCap's bytecode, not to outside observers (opaque).
 
 4. Chain distributes Cap::Instance[auth_cap] via cap-flow to user
    contracts that should hold the authority.
@@ -103,17 +112,17 @@ this simpler mechanism.
    a. Read args from slot[0].
    b. Compose payload from self.state + args.
    c. Place payload in arg slot (a known slot for handler to read).
-   d. Place self.cnode[marker_slot] (Cap::Instance[marker_M]) in the
+   d. Place self.cnode[sender_slot] (YieldSender{key_M}) in the
       yield-scratchpad slot.
    e. host_yield(yield-scratchpad).
 
 5. Kernel processes the yield:
-   - Read marker instance_hash from yield-scratchpad.
-   - Walk call stack from top down.
-   - For each InstanceEntry F:
-       If F.image.yield_marker_slot is set, examine F.cnode at that
-       slot. For each cap there: if instance_hash equality, match.
-   - First match wins. Push ReferenceEntry pointing to F.
+   - Read yield_key (key_M) from the YieldSender in the yield-scratchpad.
+   - Walk owner edges from the logical current Instance toward the root.
+   - The NEAREST owner edge whose snapshotted YieldReceiver contains
+     key_M catches it (single-resumer). That owner frame is F (Chain).
+   - Push ReferenceEntry pointing to F. (No match -> the emitter faults
+     with "unhandled yield_key".)
    - F's bytecode resumes at its post-CALL continuation point with
      the payload in F's slot[0].
 
@@ -131,19 +140,25 @@ this simpler mechanism.
 8. A's bytecode receives the response in its slot[0] and continues.
 ```
 
-### Revocation (marker rotation)
+### Revocation (key rotation)
 
 ```
 Chain wants to revoke all outstanding AuthorityCaps of a type:
 
-1. Remove Cap::Instance[marker_M] from yield_marker_slot CNode.
-   (Or replace with a different marker.)
+1. Drop key_M from the YieldReceiver in Chain's yield_receiver_slot
+   (move out the old YieldReceiver, move in one without key_M).
+   (Or re-mint the authority under a fresh key_M_new.)
 
-2. From this moment, yields with marker_M no longer match. All
-   outstanding AuthorityCaps holding marker_M will fault on yield.
+2. From this moment, yields tagged key_M match no receiver. All
+   outstanding AuthorityCaps holding YieldSender{key_M} will fault on
+   yield ("unhandled yield_key"). SNAPSHOT CAVEAT: because a frame's
+   catch-list is a per-CALL snapshot, the change takes effect for the
+   subtrees of CALLs made AFTER the drop, not for sub-calls already
+   in flight.
 
-3. Mint a new marker marker_M_new for the type. Place in slot.
-4. Mint new AuthorityCaps with the new marker. Distribute.
+3. Mint a new pair (sender_M_new, receiver_M_new) via kernel:mint_yield
+   under key_M_new; merge receiver_M_new into Chain's YieldReceiver.
+4. Mint new AuthorityCaps embedding sender_M_new. Distribute.
 
 Outstanding old AuthorityCaps are structurally dead. No per-cap
 tracking needed.
@@ -151,68 +166,79 @@ tracking needed.
 
 ## Why this is forgery-resistant
 
-The forgery argument has one structural pillar: **marker
-derivation is kernel-mediated and produces a chain-extended
-image_hash that an adversary cannot replicate.**
+The forgery argument has one structural pillar: **an adversary cannot
+mint a `YieldSender` for a restricted key, because the orchestrator
+interposes over the unrestricted `kernel:mint_yield`.**
 
-To match Chain's marker, an adversary would need:
-- An Instance with image_hash equal to `hash(Chain's chain || hash(MarkerImage))`.
-- Plus byte-identical state (per instance_hash equality on full state).
+To emit a yield that Chain catches, an adversary would need a
+`YieldSender{key_M}` for Chain's key_M. There are only two ways to
+obtain one, and the chain closes both:
 
-For the chain: the adversary's derivation history would need to be
-prefixed by Chain's derivation history. host_derive_spawn extends
-the *deriver's* chain; the deriver is the adversary, not Chain. So
-the adversary's chain doesn't start with Chain's chain prefix. Hash
-mismatch. Forgery prevented.
+- Receive it from Chain. Chain only embeds it in AuthorityCaps and
+  distributes those — never the bare YieldSender. AuthorityCap's CNODE
+  is opaque, so a holder cannot extract the embedded Sender (it can only
+  invoke the bytecode, which always composes the legitimate payload).
 
-For the state: the marker is typically derived with empty state, so
-state matching is trivial. But state can be non-empty; the
-forgery-resistance argument holds at the chain level regardless.
+- Mint it itself via `kernel:mint_yield`. `kernel:mint_yield` is
+  unrestricted at the kernel root, but Chain INTERPOSES over it: Chain
+  registers `"kernel:mint_yield"` in its own YieldReceiver and hands
+  descendants only a restricted `YieldSender{"kernel:mint_yield"}` that
+  routes to Chain. Chain inspects the requested key and rejects key_M
+  (and any other key it reserves), forwarding only permitted keys to the
+  real kernel. So a descendant simply cannot mint Chain's key.
 
-## Cap::Instance vs Cap::Type — for authority routing, use Cap::Instance
+Because the YieldSender is a per-key right (not a derivable type), there
+is no "compute it from a descendant" attack: possession of the Sender is
+the whole proof, and possession is gated by the two paths above.
 
-A core principle (also documented in README §8):
+## Cap::Instance vs type identity — for authority routing, use Cap::Instance
 
-> **Cap::Type identifies an Instance's type. Cap::Instance authorizes
-> invocation of a specific Instance. These are NOT
+A core principle (also documented in top-level spec §8):
+
+> **An Instance's type identity is its `image_hash`. Cap::Instance
+> authorizes invocation of a specific Instance. These are NOT
 > interchangeable for authority purposes.**
 
-A pattern like "if I hold Cap::Type{X}, I have authority X" would be
+A pattern like "if a cap's image_hash == X, I have authority X" would be
 WRONG. Anyone with a Cap::Instance to any Instance in Chain's chain can
-compute Cap::Type{Chain.chain + derive_steps} via host_subtype.
-Cap::Type is just a type identifier, not an authority credential.
+read its `image_hash` (via `host_image_hash_chain`) and fold any
+`Chain.chain + derive_steps` extension themselves. The image_hash is
+just a type identifier, not an authority credential.
 
-The yield-marker pattern uses **Cap::Instance** (specifically, a real
-marker Instance derived via host_derive_spawn). Routing is by
-instance_hash equality of Cap::Instance values, not Cap::Type values.
+The yield_key pattern uses **Cap::Instance** (specifically, an
+AuthorityCap whose CNODE holds a `YieldSender{yield_key}`). Routing is
+by the yield_key carried in that YieldSender, not by any image_hash
+value. The positive authority mechanism is possession of the
+YieldSender for the key — a per-key right that is not derivable from a
+type.
 
-Cap::Type is useful for:
+The image_hash is useful for:
 - Runtime type-checking ("is this Instance of type X?").
 - Type-based dispatch.
-- Composing types abstractly.
+- Composing type identifiers abstractly.
 
-Cap::Type is NOT useful for:
+The image_hash is NOT useful for:
 - Authority routing.
 - Authorization checks.
 - Anywhere "possession proves something" matters.
 
-If your design has a Cap::Type stored somewhere that's being treated
-as an authority credential, that's a bug. Use Cap::Instance.
+If your design treats a cap's image_hash as an authority credential,
+that's a bug. Use Cap::Instance.
 
 ## Security properties preserved (V1–V9 mapping)
 
-See [discussions/sel4-mapping.md](../discussions/sel4-mapping.md)
-for the full V1–V9 analysis. Under the yield-marker pattern:
+See [principles/sel4-mapping.md](../principles/sel4-mapping.md)
+for the full V1–V9 analysis. Under the yield_key pattern:
 
 | Property | Status |
 |---|---|
 | V1 Authority confinement | ✓ AuthorityCap conveys one operation per cap |
-| V2 Authority unforgeability | ✓ image_hash chain prevents marker forgery |
-| V3 Revocation | ✓ Marker rotation revokes all caps holding the old marker |
-| V4 Endpoint mediation | ✓ AuthorityCap bytecode is the only path to yielding the marker |
+| V2 Authority unforgeability | ✓ Interposition over `kernel:mint_yield` prevents minting a restricted YieldSender |
+| V3 Revocation | ✓ Dropping the key from the YieldReceiver revokes all caps emitting it (snapshot caveat) |
+| V4 Endpoint mediation | ✓ AuthorityCap bytecode is the only path to the embedded YieldSender |
 | V5 Cap rights | ✓ Cap-level differentiation via state baked into AuthorityCap |
-| V6 Integrity | ✓ Marker forgery prevented; intermediates can't synthesize state changes |
-| V7 Confidentiality from intermediates | ✓ Kernel routes directly to handler; intermediates not on call path don't see payload |
+| V6 Integrity | ✓ YieldSender forgery prevented; intermediates can't synthesize state changes |
+| V7 Confidentiality from intermediates | ✓ Emitter-exclusion + single-resumer route straight to the nearest receiver; unregistered intermediates never see the payload |
 | V8 Availability | Lost from intermediates (intrinsic to layered system); mitigated by chain-level discipline |
 | V9 Determinism | ✓ All operations are deterministic |
 
@@ -224,7 +250,7 @@ state:
 ```
 Mint a per-rate-limit cap:
   rate_limited_cap = host_derive_spawn(EndpointRefCapImage,
-                                       init = { marker, target, endpoint_idx,
+                                       init = { sender, target, endpoint: Key,
                                                 rate_limit: 100/sec })
 
 The cap's bytecode reads its own state and includes rate_limit in
@@ -247,123 +273,134 @@ been superseded:
 
 | Earlier mechanism | Issue | Resolution |
 |---|---|---|
-| Request/Response Instance triplet | Required new endpoint discipline; cascade through intermediates exposed payloads | Single yield with marker; direct routing skips intermediates |
-| `host_same_type_as` chain checks | Caller witness mechanism was over-engineered | Instance_hash equality on real markers (the marker is the proof) |
-| Exemplar Instances for caller cert checks | Required deriving Instances just for type identification | Marker Instances serve both as exemplars and as routing keys |
-| Cap::TypeWitness / Cap::Type for authority | Cap::Type is derivable from any descendant Cap::Instance; doesn't prove authority | Use Cap::Instance; Cap::Type is identification-only (§8) |
-| Image_hash matching for routing | Required "fake template Instances" or Cap::Image variant; complex | Instance_hash matching with single shared marker; payload carries variations |
+| Request/Response Instance triplet | Required new endpoint discipline; cascade through intermediates exposed payloads | Single yield by key; owner-edge routing + single-resumer bypass intermediates |
+| `host_same_type_as` chain checks | Caller witness mechanism was over-engineered | yield_key routing (the YieldSender is the proof) |
+| Exemplar Instances for caller cert checks | Required deriving Instances just for type identification | A YieldSender{yield_key} serves both as authority and as routing key |
+| Cap::TypeWitness / Cap::Type for authority | A type identifier is derivable from any descendant Cap::Instance; doesn't prove authority | Use Cap::Instance; the image_hash is identification-only (§8) |
+| Image_hash matching for routing | Required "fake template Instances" or Cap::Image variant; complex | yield_key matching against the snapshotted YieldReceiver; payload carries variations |
 | Linear caps for Request/Response | Replay-during-cascade concerns | No cascade; no Request/Response wrappers; replay handled by structural routing |
-| Chain-prefix check at yield | Defense in depth that became unnecessary | Instance_hash check at the marker level is sufficient |
+| Chain-prefix check at yield | Defense in depth that became unnecessary | The yield_key check at the receiver is sufficient |
 
-The simpler mechanism (instance_hash + yield-marker routing) replaces
-all of the above. The principle: **the marker Instance itself is the
-routing key and the unforgeable proof of origin.** No separate Request,
-Response, exemplar, or witness needed.
+The simpler mechanism (yield_key routing) replaces all of the above. The
+principle: **the YieldSender{yield_key} is the routing key, and
+interposition over `kernel:mint_yield` is the unforgeable proof of
+origin.** No separate Request, Response, exemplar, or witness needed.
 
 ## Worked examples
 
 ### AttestationAuthority (AA)
 
-See [discussions/attestation-authority.md](../discussions/attestation-authority.md)
-for the full design with mode-invariance and seen-rule. In yield-
-marker terms:
+See [principles/attestation-authority.md](../principles/attestation-authority.md)
+for the full design with mode-invariance and seen-rule. In yield_key
+terms:
 
-| Role | Image | Notes |
+| Role | Held as | Notes |
 |---|---|---|
-| Marker | AttestMarkerImage | Empty state; image_hash_chain rooted in kernel |
-| AuthorityCap | AAImage | Bytecode for `attest(key, blob) → status`; embeds marker; handler is kernel itself |
-| Handler | kernel | Has AttestMarkerImage marker in its yield_marker_slot; processes mode-aware |
+| YieldSender | `YieldSender{"kernel:attest"}` | The reserved attest yield_key; the Sender lives in the top-level scratchpad CNode |
+| AuthorityCap | AAImage | Bytecode for `attest(key, blob) → status`; embeds the YieldSender; handler is kernel itself |
+| Handler | kernel | Implicit ROOT YieldReceiver for `kernel:attest`; processes mode-aware |
 
-User contract: `CALL(aa_cap, "attest", ...)`. AA's bytecode yields with
-marker; kernel catches; runs hw_verify or hw_sign per mode; returns
-AttestStatus (mode-invariant). Userspace never sees the signature.
+User contract: `CALL(aa_cap, "attest", ...)`. AA's bytecode yields
+`YieldSender{"kernel:attest"}`; the kernel (root receiver) catches; runs
+hw_verify or hw_sign per mode; returns AttestStatus (mode-invariant).
+Userspace never sees the signature.
 
 ### EndpointRefCap (chain orchestrator's user contract dispatch)
 
-See README §14. In yield-marker terms:
+See top-level spec §14. In yield_key terms:
 
-| Role | Image | Notes |
+| Role | Held as | Notes |
 |---|---|---|
-| Marker | InvokeMarkerImage | Empty state; image_hash_chain rooted in Chain |
-| AuthorityCap | EndpointRefCapImage | Bytecode for `invoke(args)`; embeds marker + target_address + endpoint_idx |
-| Handler | Chain orchestrator | Has InvokeMarkerImage marker in its yield_marker_slot; routes to target contract |
+| YieldSender | `YieldSender{invoke_key}` | invoke_key minted by Chain via `kernel:mint_yield` |
+| AuthorityCap | EndpointRefCapImage | Bytecode for `invoke(args)`; embeds the YieldSender + target_address + endpoint: Key |
+| Handler | Chain orchestrator | Has registered invoke_key in its YieldReceiver (`yield_receiver_slot`); routes to target contract |
 
-User contract A holds Cap::Instance[EndpointRefCap(B, 5)]. CALLs invoke.
-AuthorityCap's bytecode yields with marker; Chain catches; Chain
-calls B.endpoint_5; returns result.
+User contract A holds Cap::Instance[EndpointRefCap(B, "process")]. CALLs
+invoke. AuthorityCap's bytecode yields `YieldSender{invoke_key}`; Chain
+catches (nearest owner-edge snapshot containing invoke_key); Chain calls
+B's "process" endpoint; returns result.
 
 ### MintInstance
 
-See README §16. In yield-marker terms:
+See top-level spec §16. In yield_key terms:
 
-| Role | Image | Notes |
+| Role | Held as | Notes |
 |---|---|---|
-| Marker | MintMarkerImage | Empty state; image_hash_chain rooted in Chain |
-| AuthorityCap | MintRefCapImage | Bytecode for `mint(content) → status`; embeds marker + domain |
-| Handler | Chain orchestrator (with MintInstance inside it) | Catches mint yields; routes to MintInstance.mint |
+| YieldSender | `YieldSender{mint_key}` | mint_key minted by Chain via `kernel:mint_yield` |
+| AuthorityCap | MintRefCapImage | Bytecode for `mint(content) → status`; embeds the YieldSender + domain |
+| Handler | Chain orchestrator (with MintInstance inside it) | Has registered mint_key in its YieldReceiver; routes mint yields to MintInstance.mint |
 
 User contract A holds Cap::Instance[MintRefCap(domain_X)]. CALLs mint.
-AuthorityCap yields; Chain handler invokes MintInstance.mint(domain_X, content).
+AuthorityCap yields `YieldSender{mint_key}`; Chain handler invokes
+MintInstance.mint(domain_X, content).
 
 ## Glossary
 
-- **Marker / Marker Instance**: an Instance derived by Chain that serves as
-  the routing key for a class of yields. Its instance_hash is what's
-  compared during yield routing.
-- **AuthorityCap**: an Instance whose state holds a marker and whose
-  bytecode is the entry point for invoking the authority. Distributed
-  via cap-flow to grant invocation rights.
-- **Handler**: the Instance that catches the yield (has the marker in
-  its yield_marker_slot). Typically the chain orchestrator or the
-  kernel itself.
-- **yield_marker_slot**: the Image-declared slot in an Instance's cnode
-  that holds the CNode of marker Instances this Instance catches.
-- **Marker rotation**: replacing markers in the yield_marker_slot to
-  revoke outstanding AuthorityCaps.
+- **YieldSender{yield_key}**: the EMIT right over a yield_key. Possession
+  authorizes emitting a yield tagged yield_key; the yield_key is the
+  routing key compared during yield routing. Minted (with its paired
+  YieldReceiver) via `kernel:mint_yield`.
+- **YieldReceiver{Vec<yield_key>}**: the CATCH right — the set of
+  yield_keys an Instance catches. Held in the Instance's
+  `yield_receiver_slot`. Composed via `kernel:merge_yield_receiver`.
+- **AuthorityCap**: an Instance whose state holds a YieldSender (opaque
+  in its CNODE) and whose bytecode is the entry point for invoking the
+  authority. Distributed via cap-flow to grant invocation rights.
+- **Handler**: the Instance that catches the yield (has registered the
+  yield_key in its YieldReceiver). Typically the chain orchestrator or
+  the kernel itself (the kernel is the implicit root receiver for
+  `kernel:*` keys).
+- **yield_receiver_slot**: the Image-declared slot in an Instance's cnode
+  that holds the YieldReceiver listing the yield_keys this Instance
+  catches.
+- **Key rotation**: dropping a yield_key from the YieldReceiver (or
+  re-minting under a fresh key) to revoke outstanding AuthorityCaps.
 
 ## Relationship to other docs
 
-- [README.md §1](../README.md): `yield_marker_slot` field in Image.
-- [README.md §3](../README.md): kernel call stack model.
-- [README.md §4](../README.md): `host_yield` ABI with marker routing;
-  `host_type_of` / `host_subtype` / `host_type_eq` for Cap::Type.
-- [README.md §8](../README.md): Cap::Type vs Cap::Instance distinction;
-  authority is Cap::Instance.
-- [README.md §14](../README.md): authority via capability flow,
-  using the yield-marker mechanism.
-- [README.md §15](../README.md): AttestationAuthority as an instance.
-- [README.md §16](../README.md): MintInstance as an instance.
-- [discussions/attestation-authority.md](../discussions/attestation-authority.md):
+- [top-level spec §1](../_index.md): `yield_receiver_slot` field in Image.
+- [top-level spec §3](../_index.md): kernel call stack model.
+- [top-level spec §4](../_index.md): `host_yield` ABI with yield_key routing;
+  `host_image_hash_chain` for reading an Instance's type identity.
+- [top-level spec §8](../_index.md): type identity (image_hash) vs Cap::Instance
+  distinction; authority is Cap::Instance.
+- [top-level spec §14](../_index.md): authority via capability flow,
+  using the yield_key mechanism.
+- [top-level spec §15](../_index.md): AttestationAuthority as an instance.
+- [top-level spec §16](../_index.md): MintInstance as an instance.
+- [principles/attestation-authority.md](../principles/attestation-authority.md):
   AA design including mode-invariance.
-- [discussions/data-flow-principle.md](../discussions/data-flow-principle.md):
+- [principles/data-flow-principle.md](../principles/data-flow-principle.md):
   architectural derivation of why authority must go through Chain
   orchestrator under v3's single-mutator + per-context fault model.
-- [discussions/sel4-mapping.md](../discussions/sel4-mapping.md):
+- [principles/sel4-mapping.md](../principles/sel4-mapping.md):
   V1–V9 security analysis.
 
 ## Summary
 
 The v3 authority pattern is:
 
-> **A handler declares the marker types it catches in its
-> `yield_marker_slot` CNode. Marker Instances are derived by the
-> handler via `host_derive_spawn`; their image_hash chain is
-> kernel-mediated and forgery-resistant. The handler mints
-> AuthorityCap Instances that embed the marker in their state and
-> whose bytecode is the entry point for invoking the authority.
-> AuthorityCaps are distributed via cap-flow. User contracts
-> invoke AuthorityCaps; AuthorityCap bytecode yields with the
-> marker; kernel walks the call stack matching by instance_hash;
-> handler catches and processes; result returns.**
+> **A handler registers the yield_keys it catches in the YieldReceiver
+> held in its `yield_receiver_slot`. The (YieldSender, YieldReceiver)
+> pair for a key is minted via `kernel:mint_yield` (and composed via
+> `kernel:merge_yield_receiver`); forgery resistance comes from the
+> handler interposing over the unrestricted `kernel:mint_yield`. The
+> handler mints AuthorityCap Instances that embed the YieldSender in
+> their state (opaque) and whose bytecode is the entry point for
+> invoking the authority. AuthorityCaps are distributed via cap-flow.
+> User contracts invoke AuthorityCaps; AuthorityCap bytecode yields the
+> YieldSender; the kernel reads the yield_key and routes along owner edges
+> to the nearest snapshotted YieldReceiver containing the key
+> (single-resumer); handler catches and processes; result returns.**
 
 No new cap kinds. No new kernel primitives beyond `host_yield`'s
-marker routing. No Request/Response wrappers. No witness caps. No
-Cap::Type-as-authority. Just Cap::Instance, instance_hash equality, and
-yield_marker_slot.
+yield_key routing (plus the `kernel:*` syscall yields). No
+Request/Response wrappers. No witness caps. No Cap::Type-as-authority.
+Just Cap::Instance, YieldSender/YieldReceiver, and yield_receiver_slot.
 
 The architectural justification (why this is structurally required,
 not just a design choice) is in
-[discussions/data-flow-principle.md](../discussions/data-flow-principle.md):
+[principles/data-flow-principle.md](../principles/data-flow-principle.md):
 single-mutator + per-context fault → single-activation → hierarchical
 call stack → cross-contract calls must go through a common parent →
 Chain orchestrator is structurally the only place fault-isolated

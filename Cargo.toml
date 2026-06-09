@@ -42,8 +42,6 @@ members = [
     "components/tests/sub-vm-reread-recurse",
 ]
 exclude = [
-    "spec/crypto-ffi",
-    "spec/fuzz",
     # Vendored guest-bin (`#![no_std]` with its own panic_handler +
     # global_allocator). Only consumed by `nub-arch-x86` on
     # the `cfg(target_os = "none")` cross-compile; excluding it from
