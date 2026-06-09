@@ -31,7 +31,7 @@ tables, ledger arithmetic, dispatch). Both must be correct for system
 invariants to hold.
 
 This is a deliberate architectural choice; see
-[../README.md §0 principle 18](../README.md). The chain orchestrator
+[../_index.md §0 principle 18](../_index.md). The chain orchestrator
 is a small, chain-spec-defined, formally-verifiable artifact — but
 it IS in the TCB.
 
@@ -119,16 +119,19 @@ For each seL4 property, we ask:
 
 **v3 status**: not-yet-verified.
 
-**v3 analog**: v3 spec is currently informal markdown. No formal
-abstract spec exists yet; no implementation exists yet against which
-refinement could be checked.
+**v3 analog**: v3 spec is currently informal markdown. A Rust V1
+implementation exists under `the Rust workspace` for the PVM2 execution engine,
+cap structures, gas charging, and in-flight CALL / YIELD / CALL_RESUME
+stack mechanics. It is not a formal refinement target yet, and it does
+not yet implement the full state-root / per-block orchestration surface.
 
 **Path forward**: build a Lean operational semantics of v3 (Option
-A / B from the methodology discussion). Implementation refinement
-proofs are downstream work.
+A / B from the methodology discussion), then state the Rust
+implementation interface precisely enough to prove refinement. The
+existing Rust code is useful evidence and testbed, not a proof.
 
-**Gap**: the entire formalization. Functional correctness is a
-goal, not a current property.
+**Gap**: formalization and implementation-refinement proof. Functional
+correctness is a goal, not a current verified property.
 
 ---
 
@@ -247,21 +250,28 @@ For **Instance invocation** (CALL on a Cap::Instance):
 
 For **resource consumption** (gas, quota, custom tokens):
 - Bytecode-mediated. To consume gas, the apply has a `gas_budget`
-  parameter on its CALL — kernel internal.
+  parameter on its CALL — kernel internal. A meter is set/topped up by
+  emitting the `kernel:set_gas_meter` YieldSender, and minted via
+  `kernel:mint_gas`.
 - To consume quota, host_mint_data_cap takes a quota_slot arg; the
-  kernel reads quota_id from the cap and debits the orchestrator's
-  ledger. The kernel direct-accesses canonical ledgers (well-known
+  kernel reads quota_key from the cap and debits the orchestrator's
+  ledger. A quota is set/topped up by emitting the
+  `kernel:set_storage_quota` YieldSender, and minted via `kernel:mint_quota`.
+  The kernel direct-accesses canonical ledgers (well-known
   image pattern) for hot paths; otherwise CALL into authority.
 
 For **policy decisions** (which user contract can mint, which can
 transfer, which can write to certain ledgers):
 - Cap-mediated by chain orchestrator. The orchestrator mints
-  EndpointRefCap-style caps (§14) and grants them to authorized
-  contracts; possession of the cap is the authorization. Per-cap
-  policy (rate limits, arg filters) is either baked into cap
-  variants or held in a sidecar table keyed by cap identity — not
-  by user. Signature verification routes via AttestationAuthority
-  (§15) per the same yield-mediated authority pattern.
+  EndpointRefCap-style caps (§14) — each holding a `YieldSender{yield_key}`
+  internally — and grants them to authorized contracts; possession of the
+  cap (and thus the right to emit its `yield_key`) is the authorization.
+  The orchestrator registers that `yield_key` in its own YieldReceiver to
+  catch the request. Per-cap policy (rate limits, arg filters) is either
+  baked into cap variants or held in a sidecar table keyed by cap identity
+  — not by user. Signature verification routes via AttestationAuthority
+  (§15), which emits a `YieldSender{"kernel:attest"}` caught by the kernel
+  root receiver, per the same yield-mediated authority pattern.
 
 **Difference from seL4**:
 
@@ -320,20 +330,24 @@ necessary on its own merits. Walk through every plausible use case:
    So Delegate, even with kernel-level linearity, **cannot be
    implemented in userspace**. It requires the cap-invocation
    mechanism to be a kernel-mediated operation (a syscall), which is
-   exactly what our managed-cap-with-yield pattern provides
-   functionally. seL4's Delegate is syntactically a method call but
-   functionally a syscall; v3's managed cap is functionally a
+   exactly what our yield-to-kernel pattern provides functionally:
+   `host_yield` of a `kernel:*` YieldSender, caught by the kernel as
+   the root receiver. seL4's Delegate is syntactically a method call but
+   functionally a syscall; v3's `kernel:*` YieldSender is functionally a
    syscall expressed as yield-to-kernel. Same shape, different
    syntax.
 
    Therefore: **linearity doesn't enable Delegate uniquely — Delegate
-   is already kernel-managed regardless. The "Delegate vs managed
-   cap" dichotomy was a false one.**
+   is already kernel-managed regardless. The "Delegate vs kernel-yield
+   syscall" dichotomy was a false one.**
 
 2. **Singleton / identity enforcement**. Recovered in v3 via
    image_hash chain canonical pattern + chain-author discipline.
    Each canonical singleton has a unique image_hash chain;
-   `host_same_type` discrimination is structurally precise.
+   reading that image_hash via `host_image_hash_chain` and
+   comparing the raw bytes makes the discrimination structurally
+   precise (identification only — type identifies, possession
+   authorizes).
 
 3. **One-shot tickets**. Recovered in v3 via ledger entry marked
    consumed. First call decrements and marks; subsequent calls
@@ -409,14 +423,28 @@ arithmetic in authority bytecodes).
   Ephemeral kernel-allocated regions.
 - The bytecode VM rejects access to undeclared addresses; access
   Faults the Instance deterministically.
-- Page-faults are not exposed to bytecode; lazy paging is forbidden.
-- No MMU mediation needed because the VM is deterministic; access
-  control is at the bytecode-VM layer, not at hardware MMU.
+- Page-faults are not exposed to bytecode *semantically* (an undeclared
+  access is a terminal fault, not a resumable page-in). Within the fixed
+  declared footprint, the kernel uses host-level faults to materialize
+  pages lazily; demand paging is unchanged, but read-only regions have
+  their page-in **charged at the CALL** (statically), while writable pages
+  are charged via CoW per write at first-write faults. This is
+  deterministic and invisible to bytecode semantics — see
+  [gas-cost.md §3](../gas-cost.md).
+- Access control is specified at the bytecode-VM layer. The current
+  Rust implementation has both direct VM/interpreter enforcement and an
+  x86 nub that uses host page tables / faults to materialize pages and
+  enforce permissions. Those MMU faults are an implementation substrate,
+  not bytecode-visible authority or consensus-visible page-fault events.
 
-**Difference from seL4**: seL4 uses hardware MMU; v3 uses
-deterministic bytecode VM. Both achieve memory isolation. v3's is
-arguably *stronger* in some ways (no page-fault timing channels) but
-weaker in others (relies on VM correctness rather than hardware).
+**Difference from seL4**: seL4 specifies and verifies isolation through
+hardware MMU-backed VSpaces. v3 specifies isolation through the
+deterministic bytecode VM; an implementation may additionally use an MMU
+for efficient materialization and permission checks. Both achieve memory
+isolation. v3's semantic model is arguably *stronger* in some ways
+(bytecode cannot observe host page-fault timing as an authority channel)
+but weaker in others (the consensus property relies on VM / nub
+correctness rather than a seL4-style verified MMU kernel).
 
 **TCB scope**: kernel (specifically the VM correctness).
 
@@ -431,12 +459,19 @@ weaker in others (relies on VM correctness rather than hardware).
 **v3 status**: holds, with subtleties.
 
 **v3 enforcement**:
-- Kernel maintains internal gas counter; per-instruction metering.
+- Kernel maintains internal gas counter; per-basic-block metering,
+  pre-reserved at block entry (gas-cost.md §1).
 - CALL specifies `gas_budget: u64`; kernel saves parent's counter,
   sets to budget, runs callee, restores.
-- OOG → kernel-triggered yield.
+- OOG → the kernel yields the `kernel:oog` yield_key (caught by the
+  chain's YieldReceiver, which registers `kernel:oog` at init); the
+  `Gas{meter_key}` payload reflects via slot[0].
 - Apply's working memory is bounded (declared by Image's
   memory_mappings; Ephemeral allocation has explicit size).
+- Read-only region materialization is **pre-charged at the CALL**
+  (statically, from `Image.memory_mappings`) and writable-page CoW is
+  charged per write — both deterministic. The fault *sequence* stays
+  deterministic because RO faults now charge nothing.
 - State-root computation at outermost termination has bounded cost
   (O(modified pages × log num pages)).
 
@@ -454,9 +489,12 @@ larger.
 
 **Property statement (v3)**:
 > Per-block kernel work is bounded by O(gas_budget × constant) for
-> per-instruction metering, plus O(modified pages × log(num pages))
-> for state-root hashing, plus O(divergence events) for mid-block
-> hashing. All terms are bounded by the block's gas budget.
+> per-block-at-entry metering (with static footprint multipliers),
+> plus O(actual #3 faults × page-cost) for lazy materialization
+> (reserved at entry, charged at fault), plus
+> O(modified pages × log(num pages)) for state-root hashing, plus
+> O(divergence events) for mid-block hashing. All terms are bounded by
+> the block's gas budget.
 
 ---
 
@@ -475,7 +513,8 @@ properties; only "blocks complete in bounded time."
 **TCB scope**: kernel.
 
 **Property statement (v3)**:
-> Per-block latency is bounded by gas_limit × per-instruction-cost +
+> Per-block latency is bounded by the per-block-at-entry cost (#1×#2)
+> plus actual materialization (#3, reserved at entry) plus
 > setup/teardown costs. No unbounded loops in kernel.
 
 ---
@@ -490,7 +529,7 @@ properties; only "blocks complete in bounded time."
 | P4: Cap-flow integrity | Holds | Kernel | None |
 | P5: Authority confinement | Holds (split) | Kernel + orch | Resource quotas via bytecode |
 | P6: Cap exclusivity / linearity | Dropped | Orch (replaced by ledger) | Structural conservation traded for snapshot/revert |
-| P7: Memory protection | Holds | Kernel (VM) | None at the VM layer |
+| P7: Memory protection | Holds | Kernel / nub (VM semantics; MMU may be substrate) | None at the VM layer |
 | P8: Resource bounded | Holds | Kernel | Slightly larger than seL4's bound |
 | P9: Bounded latency | Holds | Kernel | No real-time MCS-style guarantees |
 
@@ -541,8 +580,11 @@ These are properties seL4 has that v3 lacks (or has weaker):
   is the genuine architectural difference. Mitigated by orch
   bytecode being chain-spec-defined, small, formally verifiable.
 
-- **L4. Hardware MMU isolation.** seL4 uses MMU; v3 uses VM.
-  Trade-off: VM is more deterministic; MMU is more battle-tested.
+- **L4. Hardware MMU isolation.** seL4's verified model centers MMU
+  VSpaces. v3's consensus model centers deterministic VM isolation;
+  current x86 code may still use MMU/page faults underneath. Trade-off:
+  VM semantics are more deterministic; seL4-style MMU isolation is more
+  mature and formally verified.
 
 - **L5. Real-time properties.** seL4 has MCS for real-time; v3 has
   bounded latency but no MCS-style guarantees.
@@ -605,17 +647,21 @@ Kernel
 ```
 
 User contracts hold caps minted by the appropriate layer
-(ProtocolOrch_AMM mints AMM-endpoint caps; DomainOrch_DeFi mints
-cross-protocol caps; ChainRoot mints cross-domain caps). Each cap's
-image_hash chain proves which layer minted it, so dispatch
-structurally lands at the right authority. Same mechanism at every
-layer.
+(ProtocolOrch_AMM mints AMM-endpoint caps holding a `YieldSender{yield_key}`;
+DomainOrch_DeFi mints cross-protocol caps; ChainRoot mints cross-domain
+caps). Each cap carries a layer-specific `yield_key`, and each layer
+registers the keys it controls in its own YieldReceiver, so a yield of that
+key routes — via per-CALL owner-edge YieldReceiver snapshots to the nearest
+registered owner receiver (single-resumer) —
+structurally to the right authority. Same mechanism at every layer.
 
 Compared to seL4: the structural property is the same — invocation
-authority is gated by cap-holding, kernel-enforced (here, gated by
-the chain-check at the dispatching layer, which is structural via
-image_hash chain that the kernel produced). The TCB for direct
-invocation is the kernel; the TCB for policy-bearing caps (rate
+authority is gated by cap-holding, kernel-enforced (here, gated by the
+receiver-registration at the dispatching layer, which is structural via the
+yield_key routing the kernel performs; forgery resistance of the authority
+itself rests on interposition over kernel:mint_yield — a descendant cannot
+mint a YieldSender for a key the layer reserves below it). The TCB for
+direct invocation is the kernel; the TCB for policy-bearing caps (rate
 limits, etc., when baked into cap variants per §14) is the
 orchestrator that mints the variant.
 
@@ -701,26 +747,32 @@ mediation. This is closer to seL4's direct-line model.
 To enforce "user A can mint at most 100 DataCaps per block":
 
 ```
-A's apply: host_yield(args, reason=NeedKernelMint)
-  Cascade up to CO. CO's bytecode receives Paused with
-    reason=NeedKernelMint.
-  CO's bytecode inspects reason; recognizes it as one CO wants to
-    intercept (rather than blindly forward).
+Setup: CO has INTERPOSED by registering "kernel:mint_quota" in its own
+  YieldReceiver (opt-in mediation; containment is what makes this safe —
+  A only holds a YieldSender{"kernel:mint_quota"}, never a Receiver).
+A's apply: host_yield(YieldSender{"kernel:mint_quota"})  (args via slot[0])
+  The yield routes along A's owner edges, and the nearest registered owner
+    receiver — CO — catches it (single-resumer), rather than reaching the
+    kernel root.
+  CO inspects the request (it registered this key precisely to mediate it).
   CO checks O.users[A].mint_count_this_block.
   If count > 100:
-    DROP_PAUSED(originating chain)
+    DROP_RESUME(originating chain)
     A's tx fails with rate-limit error.
   If count ≤ 100:
     CO increments count.
-    CO yields itself (host_yield + CALL_RESUME loop), propagating
-      to kernel.
+    CO FORWARDS by re-emitting the same key (host_yield + CALL_RESUME
+      loop); CO's owner edge for the forwarding call omits its receiver for
+      that key, so the forward reaches the kernel root receiver.
     Kernel handles. Resume cascades back. A receives DataCap.
 ```
 
-(Intermediate layers that don't want to intercept run a simple
-passthrough loop: `host_yield(...) → CALL_RESUME(child, ...)` per
-iteration. See discussions/yield-passthrough-optimization.md for
-performance commentary.)
+(Intermediate layers that don't want to intercept a key simply don't
+register it in their YieldReceiver — the yield routes past them
+structurally to the next registered receiver, with no passthrough cost.
+An interposer that *does* catch but then forwards runs the re-emit loop:
+`host_yield(sender) → CALL_RESUME(child, ...)` per iteration. See
+principles/yield-passthrough-optimization.md for performance commentary.)
 
 In seL4, achieving the same property would require adding a
 rate-limit server between user processes and kernel. The user
@@ -775,10 +827,10 @@ designs. v3 makes the layered design native.
   cnode ownership prevent unauthorized writes and unauthorized cap
   acquisition.
 - **P3 (confidentiality)**: σ is public, but Instance state is opaque
-  from outside; request Instances (Attest, MintRequest, etc.) gate
-  inspection endpoints on caller-witness image_hash, so intermediates
-  cannot read request payloads. Confidentiality from intermediates
-  preserved structurally.
+  from outside; a keyed yield (Attest, mint request, etc.) routes — via
+  owner-edge routing + single-resumer — straight to the nearest registered
+  owner YieldReceiver, so unregistered intermediates never see the payload.
+  Confidentiality from intermediates is preserved structurally.
 - **P4 (cap-flow)**: holds. Caps can't be synthesized.
 - **P5 (authority confinement)**: holds. Holder of cap can invoke
   the operation the cap names; intermediates can rate-limit but

@@ -277,7 +277,7 @@ pub struct Nub { /* enum over backends */ }
 impl Nub {
     pub fn new_local() -> Self;
     pub fn new_hyperlight() -> Result<Self>;
-    pub fn invoke(&mut self, target: InstanceRef, endpoint: u16,
+    pub fn invoke(&mut self, target: InstanceRef, endpoint: Key,
                   args: &[u8], opts: InvokeOptions) -> Result<InvokeOutcome>;
     pub fn state_root(&self) -> CapHash;
 }
@@ -328,7 +328,7 @@ pub trait Arch {
     fn create_address_space(&mut self) -> Self::Memory;
 
     /// Drive the kernel-supplied interpreter via `A::Memory`.
-    fn invoke(&mut self, target: InstanceRef, endpoint: u16,
+    fn invoke(&mut self, target: InstanceRef, endpoint: Key,
               args: &[u8], opts: InvokeOptions)
               -> Result<InvokeOutcome, Self::Error>;
 
@@ -571,6 +571,18 @@ Same shape as a database buffer pool.
 LRU-style policy with explicit memory budget. Probably tunable
 via configuration: how much guest RAM dedicated to cap cache.
 
+> **Not the consensus eviction.** This LRU is the host's
+> *content-addressed storage* buffer pool (which immutable cap blobs
+> stay resident in guest RAM vs. spill to virtio-blk). It is
+> **consensus-invisible**: a miss just reloads identical bytes from
+> disk, and it never re-triggers a memory-materialization (#3) gas
+> charge. It is distinct from the *execution memory-mapping* eviction
+> that gas metering depends on, which is **deterministic** — driven by
+> `MGMT_MOVE`/`MGMT_DROP` on unpinned mapped slots, never by cache
+> pressure (see [gas-cost.md §3](../gas-cost.md)). Keep the two layers
+> separate: LRU is fine for the storage cache, forbidden for execution
+> mappings.
+
 ### 3. In-guest cap representation
 
 The userspace-track cap structures (`Arc<InstanceInner>`,
@@ -722,7 +734,10 @@ encoding).
 Storage layout (in guest, on virtio-blk):
 
 - LSM-style content-addressed shards.
-- Hot working set in guest RAM, evicted by LRU to disk.
+- Hot working set in guest RAM, evicted by LRU to disk (the
+  consensus-invisible storage buffer pool — see the eviction note under
+  "Working-set cache + eviction"; *not* the deterministic execution-mapping
+  eviction that gas metering uses).
 - Background compaction merges old shards.
 - A small commit journal at the head of the device records the
   current consensus state root after each accepted block.
@@ -739,7 +754,7 @@ The host exposes these guest-callable functions (host-callbacks):
 The guest exposes these host-callable functions:
 
 - `apply_block(prior_root: H256, block: Bytes) → (H256, Summary)`
-- `query_endpoint(instance: H256, endpoint: u8, args: Bytes) →
+- `query_endpoint(instance: H256, endpoint: Key, args: Bytes) →
   Bytes` (for external-API dispatch)
 - `commit(root: H256)` and `rollback()` (consensus signalling)
 - `health_check() → Status`
@@ -755,7 +770,9 @@ based on latency measurements.
 // Microkernel objects, refcounted by the kernel.
 
 Image       (immutable, refcounted)
-TypeDef     (immutable, refcounted)
+// Type identity is the kernel-attested image_hash carried by each
+// Image/Instance (read via host_image_hash_chain), not a separate
+// refcounted object.
 
 Instance    {
   image:       ImageHandle,
@@ -765,7 +782,7 @@ Instance    {
 }
 
 CNode       {
-  slots:       OrdMap<SlotIdx, SlotHandle>,
+  slots:       OrdMap<Key, SlotHandle>,
   cached_hash: Option<H256>,
 }
 
@@ -798,7 +815,7 @@ fn state_root(cap: &Cap) -> H256:
     if let Some(h) = cap.cached_hash:
         return h
     h = match cap:
-        Image | TypeDef | DataCapShard:
+        Image | DataCapShard:
             blake2b(canonical_encode(cap))
         Instance { image, cnode, state }:
             blake2b(SCALE.encode {

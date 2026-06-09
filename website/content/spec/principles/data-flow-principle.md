@@ -83,23 +83,30 @@ Single-mutator-per-state-unit, in v3 terms, means:
    No state is shared in either direction beyond what's explicitly
    passed.
 
-3. **YIELD flows upward only; CALL flows downward only.** A child's
+3. **CALL transfers ownership of the callee while it runs.** The callee
+   Instance is moved from an owner CNode slot into a KernelFrame. The
+   origin slot is physically empty and kernel-reserved until the callee
+   HALTs, is resumed to completion, or is discarded. The owner therefore
+   cannot re-CALL, copy, move, drop, read, or overwrite that Instance
+   while it is in flight.
+
+4. **YIELD flows upward only; CALL flows downward only.** A child's
    YIELD sends data up to a prior instance on the stack. A CALL pushes
    a new instance on top. There is no primitive for a child to
    initiate downward work in the parent (which would create
    multi-activation).
 
-4. **In-flight invocations don't share working state.** When A
+5. **In-flight invocations don't share working state.** When A
    CALLs B, B's working mutations are in B's cnode (or in B's
    working slot[0]); A's working state is paused but untouched.
    Their states are isolated.
 
-5. **Termination commits or discards atomically.** An Instance's HALT
+6. **Termination commits or discards atomically.** An Instance's HALT
    commits its working state to its persistent cnode atomically. A
    Instance's fault discards its working state entirely. There is no
    partial commit, no nested in-progress state across Instances.
 
-These five properties, taken together, are how the
+These properties, taken together, are how the
 single-mutator-per-state-unit invariant manifests in v3's design.
 
 ## The two pillars of complexity
@@ -247,21 +254,25 @@ A by A's invocation.
 ### Yield-resume linearity
 
 When B is in Waiting state (paused, awaiting a response), the
-single entity that can resume B is structurally determined: it's
-whatever stack entry is directly above B. When that entry HALTs
-(or CALL_RESUMEs, or DROP_RESUMEs), B is the next-top and resumes.
+single entity that can resume B is structurally determined by the
+owner-edge route that caught B's yield. The kernel represents that
+handler as a ReferenceEntry on the physical stack. When that handler
+HALTs (or CALL_RESUMEs, or DROP_RESUMEs), B's continuation is resolved
+by the same routed suspension.
 
 There's no ambiguity. The kernel doesn't need to consult a registry
 or check a cap or look up a target — the stack position tells it
 exactly who resumes whom. **The linearity is structural; not a
 property we maintain via discipline.**
 
-This is what makes Authority caps (and the YIELD-via-cap pattern)
-secure. K's mint of a yieldref cap that targets K's stack position
-gives the cap-holder authority to wake K. Only K can produce the
-response. Because B's stack position is uniquely owned by K (and
-intermediates), only K's response can resume B. No party can fake
-a response from elsewhere.
+This is what makes Authority caps (and the YIELD-via-YieldSender
+pattern) secure. K registers a yield_key in its YieldReceiver and
+hands out a `YieldSender{yield_key}`; the cap-holder's emit is routed
+by key along owner edges to K (the nearest owner-edge snapshot
+containing the key). Only K can produce the response. Because the
+yield routes to whichever owner edge's snapshotted YieldReceiver
+catches the key — K's, here — only K's response can resume B. No
+party can fake a response from elsewhere.
 
 ### Why these two are inseparable
 
@@ -279,14 +290,18 @@ Then "who can resume B?" is no longer "the stack entry above B"
 broken yield-linearity. Authority caps become insecure.
 
 Suppose we tried to keep fault cascade but allow non-hierarchical
-yield routing — B could yield to any instance, not just the one
-above it on the stack. Then "what's in A's subtree?" becomes
-unclear; we'd need explicit ownership declarations beyond the
-stack structure. We'd be back to manually-maintained hierarchy.
+yield routing — B could yield to any instance, not just an owner
+ancestor. Then "what's in A's subtree?" becomes unclear; we'd need
+explicit ownership declarations beyond the call/owner structure. We'd
+be back to manually-maintained hierarchy.
 
-The stack structure provides both properties at once because both
-depend on the same fact: **stack position = nesting depth =
-ownership relation = resumer relation.**
+The stack structure provides both properties at once because physical
+stack entries carry the logical owner edge: **CALL creates ownership by
+moving a real cnode-owned Instance into a KernelFrame; ReferenceEntry
+reactivates an owner; owner relation determines the resumer relation.**
+The callee's origin slot remains empty-reserved while the frame is live,
+so the owner cannot accidentally create a second activation by re-CALLing
+or copying the same slot.
 
 ### Reentry protection: free side effect
 
@@ -454,9 +469,10 @@ So:
 
 This is the structural constraint that prevents v3 from sliding
 into multi-activation. The "Chain handle" pattern that looks like
-a downward call must be implemented as an upward yield (or as a
-kernel-routed direct dispatch that doesn't touch Chain's bytecode
-flow at all). Either way, no multi-activation.
+a downward call must be implemented as an upward yield (or by the
+kernel routing the yield by key to the registered YieldReceiver,
+without touching Chain's bytecode flow at all). Either way, no
+multi-activation.
 
 ## The stack model in detail
 
@@ -484,19 +500,29 @@ Invariants:
 
 ABI primitives:
 
-- **CALL(cap, args)** — push InstanceEntry for target; caller's
-  current Running entry becomes Waiting.
-- **YIELD(yieldref_cap, args)** — push ReferenceEntry to the stack
-  position the cap names; that instance's bytecode resumes.
+- **CALL(cap, args)** — move target out of the caller/owner CNode slot
+  into a KernelFrame, reserve the empty origin slot, push InstanceEntry
+  for target; caller's current Running entry becomes Waiting.
+- **YIELD(yield_sender, args)** — read the `yield_key` from the
+  `YieldSender{yield_key}`; route along owner edges to the nearest
+  edge whose snapshotted YieldReceiver contains the key
+  (single-resumer); push a ReferenceEntry to that owner frame and its
+  bytecode resumes.
 - **CALL_RESUME(args)** — pop current Running entry (handler);
   underlying Waiting entry becomes Running with args in slot[0].
-- **HALT(payload)** — pop current Running entry; commit Instance's
-  working state if this was the Instance's last entry. Underlying
-  entry becomes Running with payload in slot[0].
+- **HALT(payload)** — pop current Running entry; if it is an
+  InstanceEntry, fold its working state back into an Instance, clear the
+  origin reservation, and restore it to the owner slot. Underlying entry
+  becomes Running with payload in slot[0].
 - **DROP_RESUME** — bridge from in-flight Waiting to σ-resident
   Paused. Materializes the topmost Waiting sub-Instance's continuation
   as Paused-persistent; returns a cap to it; current instance continues.
 - **fault** — like HALT but with Faulted status; cascading discard.
+
+V1 implementation note: before σ-resident Paused materialization lands,
+DROP_RESUME and handler-unwind discard the affected frames. They clear
+origin reservations owned by surviving frames and leave those origin
+slots empty; no `Pending` marker is written into the CNode.
 
 Snapshot semantics:
 
@@ -576,8 +602,9 @@ cross-references that doesn't survive cross-context portability
 makes v3 work cross-context.
 
 Replaced by structural mechanisms: image_hash chain for forgery
-resistance, scope-tagged caps for ephemeral authority, kernel-
-maintained ledgers for revocable budgets (Gas, etc.).
+resistance, YieldReceiver key-drop + ephemeral kernel meter tables for
+ephemeral authority/revocation, kernel-maintained ledgers for revocable
+budgets (Gas, etc.).
 
 ### Detour 6: Per-cap-copy CDT identity
 
@@ -622,8 +649,9 @@ patterns chain authors actually need can be expressed via:
 
 - **Cap-flow** (pre-supply caps for everything callee might need).
 - **Yield-cascade** (current v3 upward request pattern).
-- **Kernel-routed direct dispatch** (authority caps that route to a
-  handler without involving caller's bytecode).
+- **Key-routed yield** (authority caps hold a `YieldSender{yield_key}`;
+  the kernel routes the yield by key to the registered YieldReceiver
+  without involving caller's bytecode).
 - **Emit/handle** (asynchronous; callee emits, caller processes
   after callee HALTs).
 - **Saga / compensating actions** (explicit cleanup logic by chain
@@ -667,12 +695,12 @@ Things that are safe (and how v3 makes them safe):
   So Cap::Instance copies don't share mutable state in the in-flight
   sense — they each address a value that evolves independently.
 
-- **Yieldref caps as references to stack entries.** These are
-  by-reference (kernel-managed lifetime tied to a specific stack
-  position) but the referenced thing (a Waiting instance's continuation)
-  has only one resumer at any time by stack discipline. The
-  reference is the routing mechanism; the resumption authority is
-  structural.
+- **YieldSenders as keyed emit rights.** A `YieldSender{yield_key}`
+  carries no mutable target — it names a key the kernel routes by.
+  The owner frame it resolves to (the nearest owner-edge snapshot
+  containing the key) has only one resumer at any time by stack
+  discipline. The key is the routing mechanism; the resumption
+  authority is structural.
 
 - **References on the call stack between InstanceEntry and ReferenceEntry
   of the same Instance.** Same PC, same cnode, but they don't run
@@ -752,17 +780,22 @@ repeated stress-testing.
 Most details have been resolved through extended discussion. What
 remains genuinely open:
 
-1. **Yieldref cap representation.** The cap carries a kernel-issued
-   stack-entry-id naming the target stack entry. Whether this is a
-   distinct cap kind (`Cap::YieldRef`) or an extension of `Cap::Instance`
-   is a spec-surface choice; behavior is the same either way.
+1. **YieldSender representation.** The emit token is a
+   `YieldSender{yield_key}` — it carries a yield_key the kernel routes
+   by, not a stack-entry-id naming a fixed stack position. (This
+   key-routing is what the redesign replaces the legacy stack-position
+   yieldref with.) Whether the YieldSender is a distinct cap kind or a
+   regular `Cap::Instance` over a `kernel:yieldsender` image is a
+   spec-surface choice; behavior is the same either way.
 
-2. **Persistence behavior for yieldref caps.** Soft-scope (cap can
-   live in persistent slots but faults on use outside target's
-   stack lifetime) vs. hard-scope (cap structurally restricted to
-   transit/working slots; kernel rejects MGMT_COPY to persistent
-   slots). Both work; hard-scope is "cleaner" in that stale caps
-   don't exist; soft-scope is simpler kernel.
+2. **Persistence behavior for YieldSenders.** A `YieldSender{yield_key}`
+   is freely persistable: it names a key, not a live stack entry, so it
+   never goes stale. What it routes to depends on the per-CALL
+   snapshots in flight at emit time — an emit whose key matches no
+   snapshotted YieldReceiver simply faults ("unhandled yield_key").
+   Whether the kernel should additionally restrict where a privileged
+   YieldSender may be MGMT_COPYd (a containment knob) is the open spec
+   question; both unrestricted and restricted variants work.
 
 3. **DROP_RESUME's cap delivery.** When DROP_RESUME promotes B to
    Paused-persistent, where does the cap to Paused-B go? Returned
@@ -778,10 +811,11 @@ Things that have been resolved through discussion:
 - **Yield is structurally a return** that pushes a reference to a
   prior stack entry. Same primitive family as CALL/HALT; not a
   separate concept.
-- **Authority caps work via YIELD on a yieldref cap.** No Request/
-  Response Instance triplet needed; structural linearity from the stack
-  gives us all the security properties (confidentiality from
-  intermediates, replay safety, single-resumer guarantee).
+- **Authority caps work via YIELD on a `YieldSender{yield_key}`.** No
+  Request/Response Instance triplet needed; key routing plus structural
+  linearity from the stack gives us all the security properties
+  (confidentiality from intermediates via owner-edge routing +
+  single-resumer, replay safety, single-resumer guarantee).
 - **Snapshot universality** is qualified: snapshot iff Instance has
   zero stack entries (Idle or Paused-persistent at σ layer). This
   is honest about what's actually true.

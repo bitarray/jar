@@ -98,7 +98,7 @@ and spills on each access. Because the worst-case host spills, `x3`/`x4`
 accesses are **gas-charged at memory-spill cost unconditionally** on every
 host. A host with spare registers may keep them resident and run faster
 than charged (permitted; gas is an upper bound, the charge is spec-fixed,
-consensus unaffected). See [08-pvm2-gas-cost.md] and [09-portability.md].
+consensus unaffected). See [gas-cost.md] and [portability.md].
 
 ## EEI configuration
 
@@ -251,4 +251,4 @@ as a convenience, not the consensus rule.
 - Gas accounting is implementation-independent (single-pass pipeline model,
   `reg_done[15]` + decode throughput, block cost `max(max_done − 3, 1)`;
   `x3`/`x4` operands additionally charge memory-spill cost). See
-  [08-pvm2-gas-cost.md].
+  [gas-cost.md].

@@ -34,16 +34,20 @@ Three orthogonal concerns require it:
 AA is an **authority cap** in the generic pattern (see
 [generic-authority-pattern.md](../userspace/generic-authority-pattern.md)).
 Possession of `Cap::Instance[AA]` is the authority to request
-attestations. The endpoint follows request/response Instance shape:
+attestations. AA holds a kernel-minted `YieldSender{"kernel:attest"}`
+internally (placed in the top-level scratchpad CNode at invocation);
+the endpoint emits a `kernel:attest` yield carrying the (key, blob)
+payload:
 
 ```
 AA.attest(key: PubKey, blob: Bytes) → AttestStatus
-  -- Builds an Attest request Instance with state {key, blob}.
-  --   image_hash_chain: ... → kernel → AA → Attest
-  -- Yields up with the Attest in slot[0]; cascade reaches kernel.
-  -- Kernel handles per-attest at the yield (mode-aware).
-  -- On resume, slot[0] holds an Attested response Instance.
-  -- CALLs Attested.get_status → returns status to caller.
+  -- Places (key, blob) in slot[0] as the yield payload.
+  -- host_yield(YieldSender{"kernel:attest"}); owner-edge routing
+  --   routes AA's yield to the nearest registered owner receiver.
+  -- Kernel is the implicit root YieldReceiver for kernel:* keys;
+  --   it catches kernel:attest and handles per-attest (mode-aware).
+  -- On resume, slot[0] reflects the mode-invariant status.
+  -- Returns status to caller.
 
 enum AttestStatus {
   Recorded,           -- request processed (signed in produce mode,
@@ -69,22 +73,20 @@ verify mode return the same status for the same apply-visible input.
 
 ## Kernel-side processing
 
-When the apply yields with an Attest request in slot[0]:
+When the apply emits a `kernel:attest` yield with (key, blob) in slot[0]:
 
 ```
-Kernel.handle_attest_yield(attest_instance, context):
+Kernel.handle_attest_yield(key, blob, context):
   -- context = which endpoint is calling, which phase (verify/process),
   --           which event in the cycle, etc. Kernel knows from call
   --           stack (caller image_hash chain).
 
-  -- Per the generic-authority pattern, kernel calls Attest's
-  -- inspection endpoint, passing a kernel-handler witness as an
-  -- argument. The endpoint runs
-  --   host_same_type_as(kernel_handler_witness, HANDLER_EXEMPLAR, [])
-  -- to verify the witness is of the expected class. Intermediates
-  -- can't mint an Instance matching the exemplar (their chain doesn't
-  -- match), so they cannot read.
-  (key, blob) = attest_instance.get_request_for(kernel_handler_witness)
+  -- The kernel is the implicit root YieldReceiver for kernel:attest:
+  -- no intermediate owner edge registered "kernel:attest" in its
+  -- YieldReceiver snapshot, so the keyed yield (single-resumer)
+  -- reached the kernel root directly.
+  -- The (key, blob) payload reflected via slot[0]; intermediates that
+  -- merely routed AA's CALL never saw it.
 
   status: AttestStatus
   if kernel.current_mode == VerifyMode (block has incoming traces):
@@ -119,13 +121,10 @@ Kernel.handle_attest_yield(attest_instance, context):
         status = Recorded
 
   -- Mode-invariant return: the same `status` value for the same
-  -- apply-visible inputs. Wrap in Attested via the attest_instance's
-  -- own fulfill endpoint (which only accepts a kernel-generated
-  -- witness).
-  answer_witness = host_derive_spawn(KernelAnswerImage,
-                                     init = { status })
-  attested = attest_instance.fulfill(answer_witness)
-  slot[0] := attested
+  -- apply-visible inputs. The kernel reflects status via slot[0] of
+  -- the captured YieldSender and resumes the yielder (single-resumer);
+  -- no answer Instance is fabricated.
+  slot[0] := status
   CALL_RESUME
 ```
 
@@ -135,13 +134,14 @@ fault (kernel discarded). Critically, the status enum is mode-
 invariant — apply cannot distinguish produce from verify mode by
 return value.
 
-Confidentiality from intermediates is preserved structurally: both
-`get_request_for(witness)` and `fulfill(answer_witness)` run
-`host_same_type_as` on the cap-passed witness against pinned
-exemplars of the kernel-handler and kernel-answer classes.
-Intermediates routing the Attest cascade cannot mint an Instance whose
-chain matches the exemplar, so they can neither inspect (key, blob)
-nor fabricate a valid fulfill.
+Confidentiality from intermediates is preserved structurally via
+owner-edge routing + single-resumer: the `kernel:attest` yield routes
+straight to the nearest registered owner YieldReceiver, which is the kernel
+root (no intermediate registers `kernel:attest` in its own receiver).
+Intermediates routing AA's CALL never appear as the resumer and never
+see the (key, blob) payload (it reflects only via the resumed
+yielder's slot[0]), so they can neither inspect (key, blob) nor
+fabricate a status. No witness/exemplar machinery is needed.
 
 ## Why this is consensus-safe
 
@@ -227,9 +227,10 @@ The phase metadata drives the kernel logic:
 
 AA is a Cap::Instance minted by kernel and injected into the scratchpad
 at the start of each verify or process invocation. AA itself has no
-meaningful state — it's a thin façade whose single endpoint
-(`attest`) builds Attest request Instances. Since each attest call
-yields independently, AA accumulates nothing across calls.
+meaningful state beyond its internal `YieldSender{"kernel:attest"}` —
+it's a thin façade whose single endpoint (`attest`) emits a
+`kernel:attest` yield. Since each attest call yields independently, AA
+accumulates nothing across calls.
 
 ```
 For per-event verify (off-chain):
@@ -239,7 +240,8 @@ For per-event verify (off-chain):
   pass AA_event in slot[0] alongside blob and chain_copy
   CALL verify_endpoint
   -- per-attest yields handled inline via the yield mechanism
-  -- (kernel sees each Attest, processes mode-aware, returns status).
+  -- (kernel catches each kernel:attest, processes mode-aware,
+  --  returns status).
   drop AA_event
 
 For per-cycle process (off-chain, block boundary):
@@ -267,11 +269,13 @@ AAImage.image_hash_chain = [kernel-bridge_hash, AAImage_hash]
                          = canonical AA chain prefix
 ```
 
-A receiver of `Cap::Instance[AA]` can verify canonicity via
-`host_same_type` against a chain-spec-known reference. Forgery
-prevention: an adversary cannot construct a Cap::Instance with a chain
-that begins with kernel-bridge — the chain extension is kernel-
-mediated and starts from the genesis kernel.
+What gives AA its authority is not its identity but the kernel-minted
+`YieldSender{"kernel:attest"}` it carries (placed by the kernel in the
+top-level scratchpad CNode at invocation). Forgery prevention: an
+adversary cannot mint a `YieldSender` for the `kernel:attest` key,
+because the top-level orchestrator interposes over the unrestricted
+`kernel:mint_yield` and gates the `kernel:*` key namespace below it. An
+emitted yield without a matching `kernel:attest` receiver faults.
 
 ## Why AA is an Instance at all (vs pure host call)
 
@@ -283,15 +287,21 @@ explicitly. Anyone reading the apply's input knows "this apply has
 attestation authority for this cycle". Without the Instance, that
 authority is implicit in being CALLed by the kernel.
 
-**Composition**: a chain author wanting to compose attestation
-(e.g., wrap with rate-limiting, audit logging, multi-validator
-aggregation) can place a wrapper Instance between the endpoint and the
-real AA. The wrapper CALLs the canonical AA after applying its
-logic. Pure host_attest doesn't compose this way.
+**Composition (interposition)**: a chain author wanting to compose
+attestation (e.g., wrap with rate-limiting, audit logging,
+multi-validator aggregation) interposes by registering `"kernel:attest"`
+in its OWN YieldReceiver. Descendants' `kernel:attest` yields then reach
+the wrapper first (nearest registered receiver); it applies its logic
+and re-emits the same `kernel:attest` key with a forwarding owner-edge
+snapshot that omits its own receiver for that key, reaching the kernel root.
+Pure host_attest doesn't compose this way.
 
-**Forgery resistance**: AA's image_hash chain proves canonicity.
-A wrapper that claims to be AA but isn't canonical: host_same_type
-detects.
+**Forgery resistance**: authority is the `kernel:attest` yield_key
+namespace, not an Instance identity. An adversary cannot mint a
+`YieldSender{"kernel:attest"}` because the top-level orchestrator
+interposes over the unrestricted `kernel:mint_yield`, gating the
+`kernel:*` key namespace below it. Without the orchestrator-granted
+sender, an emitted yield matches no `kernel:attest` receiver and faults.
 
 **Pinning**: AA Cap::Image can be pinned in chain's slots, ensuring
 chain endpoints always have access to the canonical AA reference.
@@ -404,9 +414,10 @@ No special cap kind for "external attestation."
 
 ## Summary
 
-- AA.attest(key, blob) → AttestStatus is the generic authority
-  pattern's request/response cycle: AA builds an Attest request
-  Instance, yields up, kernel handles, returns mode-invariant status.
+- AA.attest(key, blob) → AttestStatus follows the generic authority
+  pattern: AA emits a `kernel:attest` yield (via its internal
+  `YieldSender{"kernel:attest"}`) carrying (key, blob) in slot[0]; the
+  kernel root receiver catches it and returns a mode-invariant status.
 - Userspace sees no mode, no traces, no sig. Just declares a (key,
   blob) and reads back a status enum.
 - The status enum is mode-invariant — produce mode and verify mode
@@ -416,13 +427,12 @@ No special cap kind for "external attestation."
   - verify-mode: hw_verify against incoming traces; fault on failure.
   - produce-mode: seen-rule + local-key signing; fault on rule
     violation if local emit needs signing.
-- The Attest Instance's inspection endpoint
-  (`get_request_for(witness)`) and `fulfill(answer_witness)` both
-  use cap-passed witness checks via `host_same_type_as` against
-  pinned exemplars. Intermediates routing the cascade cannot mint a
-  Instance whose chain matches the exemplar, so they can neither read
-  (key, blob) nor fabricate a valid fulfill — V7 confidentiality
-  and V6 integrity preserved structurally.
+- Confidentiality is structural via owner-edge routing + single-resumer:
+  the `kernel:attest` yield routes straight to the kernel root receiver,
+  and intermediates that merely route AA's CALL never register
+  `kernel:attest`, never resume the yielder, and never see the (key,
+  blob) payload — V7 confidentiality and V6 integrity preserved
+  structurally, with no witness/exemplar machinery.
 - Early-discard: kernel can fault apply if attest can't be
   satisfied. Saves wasted computation in deterministic-failure cases.
 - AA Instance is kernel-derived per cycle/per event; transient;
@@ -433,6 +443,6 @@ No special cap kind for "external attestation."
 This is the canonical v3 attestation mechanism. It is one
 instantiation of the generic authority pattern documented in
 [../userspace/generic-authority-pattern.md](../userspace/generic-authority-pattern.md);
-see that doc for the broader request/response Instance structure,
-forgery-resistance argument via image_hash chain, and the V1–V9
-security analysis.
+see that doc for the broader YieldSender/YieldReceiver authority-cap
+structure, the yield_key-namespace forgery-resistance argument, and the
+V1–V9 security analysis.

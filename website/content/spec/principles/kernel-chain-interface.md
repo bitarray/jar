@@ -23,6 +23,35 @@ The architecture has three structural pieces:
   target role's image. They inherit Chain's state (via cnode
   content-sharing) while running their own role-specific bytecode.
 
+## Kernel ABI: the scratchpad YieldSender CNode
+
+All kernel interaction is a yield. The kernel is the implicit ROOT
+YieldReceiver for every `kernel:*` yield_key — it sits at the bottom of
+the call stack and catches any `kernel:*` key no in-stack frame caught.
+
+At top-level invocation the kernel installs a CNode in the scratchpad
+(slot[0]) mapping descriptive names → YieldSenders. This is the syscall
+surface the chain bytecode (and any kernel-assisted Instance) sees:
+
+```
+scratchpad CNode (kernel-installed at top-level invocation):
+  "kernel:mint_gas"             -> YieldSender{"kernel:mint_gas"}
+  "kernel:set_gas_meter"        -> YieldSender{"kernel:set_gas_meter"}
+  "kernel:mint_quota"           -> YieldSender{"kernel:mint_quota"}
+  "kernel:set_storage_quota"    -> YieldSender{"kernel:set_storage_quota"}
+  "kernel:mint_yield"           -> YieldSender{"kernel:mint_yield"}
+  "kernel:merge_yield_receiver" -> YieldSender{"kernel:merge_yield_receiver"}
+  "kernel:attest"               -> YieldSender{"kernel:attest"}
+```
+
+To invoke a syscall the guest places the chosen YieldSender in the
+yield-scratchpad and `host_yield`s it (payload via slot[0]); the kernel
+root receiver catches the `kernel:*` key and performs the op. The
+attestation surface (top-level spec §15) is just the `kernel:attest` entry: the
+kernel-injected AA Instance carries an internal YieldSender{"kernel:attest"}
+and `host_yield`s it on each `AA.attest(...)`, caught by the kernel root
+receiver (no marker-routed cascade).
+
 ## Kernel structure
 
 ```
@@ -37,7 +66,8 @@ Kernel (validator binary, not Cap::Instance):
   dispatch_protos     : Vec<Cap::Instance[Dispatch_k_Image]>
                         (one per chain-declared dispatch endpoint)
   aa                  : Cap::Instance[AAImage]
-                        (kernel-injected; semantics in
+                        (kernel-injected; carries an internal
+                         YieldSender{"kernel:attest"}; semantics in
                          attestation-authority.md)
   
   -- internal kernel state (off-σ):
@@ -131,8 +161,10 @@ dispatch_protos[k]:
 ```
 
 The image_hash chain proves canonical provenance: anyone holding a
-`Cap::Instance[Verify]` can verify it derives from canonical Chain via
-`host_same_type(verify_instance, chain_spec_canonical_verify_ref)`.
+`Cap::Instance[Verify]` can verify it derives from canonical Chain by
+reading both caps' `image_hash` bytes via `host_image_hash_chain`
+(`verify_instance` and `chain_spec_canonical_verify_ref`) and comparing
+them — type identifies; possession authorizes.
 
 ## Pinned-slot layout
 
@@ -182,8 +214,10 @@ Kernel.handle_incoming_event(event, dispatch_k):
   --   reads blob from slot[0]
   --   parses; validates against chain state (visible via cnode);
   --   calls AA.attest(key, blob_hash) as needed
-  --     (each attest is a yield-based kernel call; kernel processes
-  --      per attestation-authority.md; may early-fault if invalid)
+  --     (AA host_yields its YieldSender{"kernel:attest"}; the kernel,
+  --      as root YieldReceiver for kernel:* keys, catches it and
+  --      processes per attestation-authority.md; may early-fault if
+  --      invalid)
   --   if reaches HALT: constructs Cap::Instance[Transact] or
   --     Cap::Instance[Dispatch] via host_derive_spawn from Chain's
   --     pinned TransactImage / DispatchInstanceImage.
@@ -230,8 +264,9 @@ Kernel.run_cycle_process:
     -- Dispatch_k_Image.process runs:
     --   reads events from slot[0]
     --   sequentially processes each
-    --   may call AA.attest(key, emit_blob_hash) — yield-based;
-    --     kernel applies seen-rule, may fault if violation.
+    --   may call AA.attest(key, emit_blob_hash) — AA host_yields its
+    --     YieldSender{"kernel:attest"}, caught by the kernel root
+    --     receiver; kernel applies seen-rule, may fault if violation.
     --   may emit by writing to slot[0]: Cap::CNode of (target_path, blob)
     --   HALTs
     
@@ -270,7 +305,8 @@ Kernel.apply_block(prior_state, body):
   --   iterates events from slot[0]
   --   for each event: dispatches to target sub-handler
   --     (transact endpoint or Schedule slot)
-  --   may call AA.attest as needed
+  --   may call AA.attest as needed (AA host_yields its
+  --     YieldSender{"kernel:attest"}, caught by the kernel root receiver)
   --   may emit additional events (next-block dispatches)
   --   mutates chain state
   --   HALTs with emits and new state hash via slot[0]
@@ -361,7 +397,7 @@ The transform-from-Chain pattern:
 - **Lifecycle is structural**: kernel-managed transient holdings;
   drop at block end.
 
-## Comparison to legacy `~/docs/minimum` design
+## Comparison to legacy minimum design notes
 
 | Legacy concept | v3 representation |
 |---|---|
@@ -373,7 +409,7 @@ The transform-from-Chain pattern:
 | AttestationAuthority (scoped per endpoint cycle) | Kernel-injected Cap::Instance[AA]; see [attestation-authority.md] |
 | caller() returns Kernel(Verify/Process) | userspace can't observe mode; kernel knows via call-stack context |
 | emit_event host call | Apply writes emits to slot[0]; kernel reads on HALT |
-| mint_attest_cap | AA.attest yield-based kernel call; see [attestation-authority.md] |
+| mint_attest_cap | AA holds an internal YieldSender{"kernel:attest"}; AA.attest host_yields it, caught by the kernel root YieldReceiver; see [attestation-authority.md] |
 | setScore for buffering | Kernel-managed buffer ordering (chain-spec policy) |
 
 The v3 vocabulary is more uniform: everything is Cap::Instance
