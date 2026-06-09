@@ -78,7 +78,6 @@ JAR uses a Proof-of-Intelligence model for its genesis token distribution. Every
 
 ```sh
 cd spec
-cd crypto-ffi && cargo build --release && cd ..
 lake build
 make test
 ```
