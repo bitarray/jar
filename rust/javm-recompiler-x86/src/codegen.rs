@@ -956,8 +956,9 @@ fn decode_cb_imm(h: u16) -> i32 {
 }
 
 /// Expand a 2-byte RVC encoding to its 4-byte equivalent. Returns
-/// `None` for PVM2-forbidden RVC encodings (c.jr, c.jalr, c.ebreak,
-/// c.illegal) and for malformed encodings (reserved sub-cases).
+/// `None` for the forbidden RVC encodings (c.ebreak, c.illegal) and
+/// for malformed encodings (reserved sub-cases). c.jr/c.jalr expand
+/// to standard `jalr x0/x1, rs1, 0` and are not forbidden.
 ///
 /// The caller (`compile_rvc`) feeds the result through `compile_rv4`,
 /// so any shape `compile_rv4` understands is acceptable here. RVC
@@ -1537,8 +1538,9 @@ impl Compiler {
     /// 4-byte equivalent via `expand_rvc` and reuses `compile_rv4` —
     /// all the funct3/funct7 dispatch + fusion logic stays in one
     /// place, and the only RVC-specific code is the bit-shuffling of
-    /// the expansion. Forbidden RVC encodings (c.jr, c.jalr, c.ebreak,
-    /// c.illegal) return `None` from `expand_rvc` and emit a panic.
+    /// the expansion. The forbidden RVC encodings (c.ebreak, c.illegal)
+    /// return `None` from `expand_rvc` and emit a panic; c.jr/c.jalr are
+    /// standard jalr and compile normally.
     ///
     /// One contract: RVC expansion never produces a JAL with rd != 0
     /// (c.jal is RV32-only and doesn't exist in our target), so
