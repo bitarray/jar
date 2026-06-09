@@ -77,7 +77,7 @@ pub enum Cap {
 
 impl Cap {
     /// 32-byte content hash. Walks the cap tree via SSZ `HashTreeRoot`
-    /// with SHA-256 as the digest; the five variants get their domain
+    /// with SHA-256 as the digest; the four variants get their domain
     /// separation from the SSZ Union selector.
     ///
     /// **Substitution invariants** preserved by hand-written

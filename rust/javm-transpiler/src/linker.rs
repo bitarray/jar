@@ -23,10 +23,11 @@
 //!    — covers every reachable jump target. `jalr` targets are validated
 //!    against that set at *runtime*; the linker never emits a trusted
 //!    target table (the recompiler runs untrusted code).
-//! 5. **Validate**: no x3/x4 use, no remaining standard `ecall` /
-//!    `ebreak`, no CSR / atomic / FP / custom-1 / privileged encodings
-//!    (see `~/docs/pvm-isa/05-pvm2-rv-diff.md`). `auipc`/`jalr` are
-//!    standard PVM2 instructions and are accepted.
+//! 5. **Validate producer output**: no x3/x4 use, no remaining standard
+//!    `ecall` / `ebreak`, no CSR / atomic / FP / custom-1 / privileged
+//!    encodings (see `~/docs/pvm-isa/05-pvm2-rv-diff.md`). `auipc`/`jalr`
+//!    are standard PVM2 instructions and are accepted; x3/x4 are valid
+//!    runtime GPRs but outside the hot-register ABI this linker emits.
 //! 6. **Emit Image** with the raw code bytes in [`Image::code`], mapped
 //!    read-only at the fixed `CODE_BASE` by the runtime. The recompiler
 //!    consumes the raw bytes directly.
@@ -768,12 +769,12 @@ fn reg_fields_for(opcode: u32) -> RegFields {
     }
 }
 
-/// Validate that `code` contains only PVM2-conformant encodings.
+/// Validate that `code` contains only the producer-emitted PVM2 subset.
 ///
-/// Reject: any AUIPC, standard ECALL (not preceded by a marker — so
-/// any remaining ECALL after the rewrite pass is unaccounted for),
-/// EBREAK, CSR ops, atomics, FP/V, privileged, and any 5-bit reg
-/// field that actually carries a register reference to x3 or x4.
+/// Reject: standard ECALL (not preceded by a marker — so any remaining
+/// ECALL after the rewrite pass is unaccounted for), EBREAK, CSR ops,
+/// atomics, FP/V, privileged, x16..x31, and producer-forbidden references
+/// to x3/x4. The runtime still treats x3/x4 as valid spilled RV64E GPRs.
 fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
     let n = code.len();
     let mut i = 0;
@@ -847,11 +848,10 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
         let rd = (w >> 7) & 0x1F;
         let rs1 = (w >> 15) & 0x1F;
         let rs2 = (w >> 20) & 0x1F;
-        // Reserved registers: x3/x4 (PVM2-specific) and x16..x31 (do not
-        // exist in RV64E — a 16-register base — so they are illegal). This
-        // producer-side check mirrors the consensus source of truth,
-        // `javm_exec::regs::reg_is_reserved`; kept local so the transpiler
-        // need not depend on the executor crate.
+        // Producer-forbidden registers: x3/x4 are valid runtime GPRs but
+        // outside the 13-hot-register ABI this linker emits. x16..x31 do not
+        // exist in RV64E and are reserved/illegal at runtime too. Kept local
+        // so the transpiler need not depend on the executor crate.
         let check = |name: &str, r: u32| -> Result<(), TranspileError> {
             if r == 3 || r == 4 || r >= 16 {
                 return Err(TranspileError::InvalidSection(format!(
@@ -1522,7 +1522,8 @@ mod tests {
         validate_pvm2(&auipc.to_le_bytes()).unwrap();
         let jalr = (1u32 << 15) | (1 << 7) | OP_JALR; // jalr x1, x1, 0
         validate_pvm2(&jalr.to_le_bytes()).unwrap();
-        // jalr to x3/x4 is still forbidden (reserved registers).
+        // The producer ABI still forbids x3/x4 even though the runtime
+        // executes them through the spilled-register path.
         let jalr_x3 = (3u32 << 15) | (1 << 7) | OP_JALR; // jalr x1, x3, 0
         assert!(validate_pvm2(&jalr_x3.to_le_bytes()).is_err());
     }
@@ -1535,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_x3_use() {
+    fn validate_rejects_producer_x3_use() {
         // addi x3, x0, 0  (rd=3, rs1=0, imm=0, funct3=0, op=OP-IMM)
         let w = (3u32 << 7) | OP_OP_IMM;
         let code = w.to_le_bytes().to_vec();

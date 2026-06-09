@@ -48,8 +48,8 @@ pub(crate) const REG_MAP: [Reg; 13] = [
 /// Scratch register (not mapped to any PVM register).
 pub(crate) const SCRATCH: Reg = Reg::RDX;
 
-/// RV register (5-bit, 0..31) → PVM2 slot (0..12), or `0xFF` for "no
-/// slot" (x0, or a reserved register x3/x4/x16..x31). A 32-byte const LUT:
+/// RV register (5-bit, 0..31) → PVM2 slot (0..14), or `0xFF` for "no
+/// slot" (x0, or a reserved register x16..x31). A 32-byte const LUT:
 /// one load replaces the range-match (~8.8% of compile, called
 /// ~6×/instruction across codegen + gas feed). The classification is the
 /// single source [`javm_exec::regs`]; this is its const-folded copy, so

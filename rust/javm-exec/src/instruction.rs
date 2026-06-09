@@ -17,7 +17,8 @@
 //! - Standard ECALL / EBREAK (RV `SYSTEM` major) — decoder returns
 //!   `Reserved`. PVM2's ecall lives in custom-0 instead.
 //! - CSR ops, atomics, FP, vector — `Reserved`.
-//! - Any reg field of x3 or x4 (`gp`/`tp`) — `Reserved`.
+//! - Any reg field of x16..x31 — `Reserved`; x3/x4 are valid RV64E
+//!   registers and route through the spilled-register path.
 
 #![allow(dead_code)]
 

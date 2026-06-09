@@ -209,10 +209,9 @@ pub struct ImageSlotEntry {
 }
 
 /// Failure modes when converting an SSZ-encoded [`crate::image::Image`]
-/// into an [`ImageCap`]. The conversion is lossy in fields the v3 cap
-/// shape no longer carries (`gas_slots`, `quota_slots`, per-endpoint
-/// `arg_registers`) and constrained in others — these errors flag the
-/// constraint violations.
+/// into an [`ImageCap`]. The conversion preserves the slots and metadata
+/// that remain cap-resident, drops only per-endpoint `arg_registers`, and
+/// is constrained in others — these errors flag the constraint violations.
 #[derive(Debug, thiserror::Error)]
 pub enum ImageConvertError {
     #[error("code region {0} bytes exceeds MAX_CODE_SIZE ({1})")]
@@ -236,11 +235,9 @@ pub enum ImageConvertError {
 /// by slot index.
 ///
 /// **Lossy fields (intentionally dropped):**
-/// - `gas_slots` / `quota_slots`: gas is now tracked on
-///   [`super::instance::InstanceCap::gas_remaining`]; the v3 cap shape
-///   no longer pins gas/quota slots in the Image.
 /// - per-endpoint `arg_registers`: the calling convention is implicit
-///   in the new shape.
+///   in the new shape. `gas_slots` and `quota_slots` remain image
+///   metadata and are carried through unchanged.
 ///
 /// **Field mappings:**
 /// - Endpoints are stored in a sparse `Key -> EndpointDef` map (no fixed
