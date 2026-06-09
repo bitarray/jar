@@ -1096,7 +1096,7 @@ fn align_branch_targets(
                 //   (0, r, 0) r!=0  → c.jr     (= retf, terminator)
                 //   (0, r, s) both!=0 → c.mv  (NOT a terminator)
                 //   (1, 0, 0)        → c.ebreak (Reserved, terminator)
-                //   (1, r, 0) r!=0   → c.jalr (Reserved, terminator)
+                //   (1, r, 0) r!=0   → c.jalr (= callf, terminator)
                 //   (1, r, s) both!=0 → c.add (NOT a terminator)
                 let bit12 = (lo >> 12) & 1;
                 let rdrs1 = (lo >> 7) & 0x1F;
