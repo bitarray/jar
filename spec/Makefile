@@ -5,8 +5,7 @@ book:
 	.lake/build/bin/jarbook
 
 test:
-	lake build jartest
-	.lake/build/bin/jartest
+	lake build Jar Genesis genesis
 
 clean:
 	rm -rf _out

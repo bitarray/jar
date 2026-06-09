@@ -19,26 +19,12 @@ jobs:
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Lake packages
         uses: actions/cache@v4
         with:
           path: spec/.lake
           key: lake-${{ hashFiles('spec/lean-toolchain', 'spec/lake-manifest.json', 'spec/lakefile.lean') }}
           restore-keys: lake-
-
-      - name: Cache crypto-ffi build
-        uses: actions/cache@v4
-        with:
-          path: spec/crypto-ffi/target
-          key: crypto-ffi-${{ hashFiles('spec/crypto-ffi/Cargo.toml', 'spec/crypto-ffi/Cargo.lock', 'spec/crypto-ffi/src/**') }}
-          restore-keys: crypto-ffi-
-
-      - name: Build crypto-ffi
-        working-directory: spec/crypto-ffi
-        run: cargo build --release
 
       - name: Run tests
         working-directory: spec

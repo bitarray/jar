@@ -1,8 +1,0 @@
-{"post_state":
- {"psi":
-  {"wonky": [],
-   "offenders":
-   ["0x4418fb8c85bb3985394a8c2756d3643457ce614546202a2f50b093d762499ace"],
-   "good": [],
-   "bad": []}},
- "output": {"err": "offender_already_reported"}}
