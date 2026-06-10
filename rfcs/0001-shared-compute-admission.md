@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.6)                               |
+| Status     | Draft (v0.7)                               |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -135,22 +135,40 @@ QuotaCap = Cap::Instance[QuotaCapImage]
                 , ...           }
   bytecode:
     draw(requested) → status
-      -- clamp requested against limits; compose
-      -- {issuer, quota_id, grant_id, requested,
-      --  authorized: limits.per_call_max}; host_yield(sender)
-      -- `authorized` is trustworthy because only this bytecode can
-      --  yield under quota:draw; the chain stores it in the binding
-      --  to bound cumulative top-ups (§4)
+      -- clamp requested against limits (first-line only; the
+      --  GrantRecord below is authoritative); compose
+      -- {issuer, quota_id, grant_id, requested}; host_yield(sender)
     delegate(narrower_limits) → Cap::Instance[QuotaCap]
       -- validate narrower_limits ⊆ self.limits, else fault;
       -- compose {issuer, quota_id, grant_id, narrower_limits};
-      -- host_yield(dsender) — chain verifies this grant is unrevoked
-      --   and unexpired, records child→parent ancestry, returns a
+      -- host_yield(dsender) — chain verifies this grant is authorized
+      --   (below), creates the child's GrantRecord, returns the
       --   chain-issued child grant_id (else refuses);
       -- host_derive_spawn the child with both senders,
       --   self.(issuer, quota_id), the returned grant_id,
       --   narrower_limits
 ```
+
+The authoritative record of every grant is chain-side, created at
+issuance (root grants, when an issuer registers a quota) and at
+delegation (children):
+
+```
+GrantRecords : Map<GrantId, GrantRecord>      -- chain σ, like the ledger
+GrantRecord  = { issuer   : IssuerId
+               , quota_id : QuotaId
+               , limits   : { per_call_max : u64
+                            , expiry       : BlockNo }
+               , parent   : Option<GrantId>
+               , revoked  : bool }
+```
+
+A grant is **authorized** iff it and every ancestor (via `parent`) is
+unrevoked, and it is unexpired — delegation already enforces
+`child.limits ⊆ parent.limits` including `expiry`, so the child's own
+expiry suffices. The limits carried in a QuotaCap's state are a
+first-line clamp for caller convenience; the `GrantRecord` is what the
+chain enforces.
 
 - Spending authority is **possession** of the QuotaCap, conveyed by
   cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
@@ -172,20 +190,24 @@ QuotaCap = Cap::Instance[QuotaCapImage]
   endpoint MUST fault unless `narrower_limits` is equal or narrower —
   but local checks alone are not sufficient: `grant_id`s MUST be
   chain-issued, never minted by the cap. The `quota:delegate` yield
-  lets the chain verify the parent grant is unrevoked and unexpired
-  before issuing the child `grant_id`, and record the child→parent
-  ancestry. A revoked or expired grant therefore cannot launder itself
-  into a fresh one. Revoking a grant MUST revoke all its descendants
-  (ancestry walk). Narrowing MUST NOT create independent gas.
-- **Revocation** has two granularities, and the coarse one is global:
-  dropping `quota:draw` from the chain's `YieldReceiver` (the
-  cap-scopes key-drop discipline) inertizes **every** QuotaCap at once —
-  an emergency kill switch, not per-grant revocation. Per-grant
-  revocation is ledger-side: the chain maintains a revocation set of
-  `grant_id`s per `(issuer, quota_id)` and MUST refuse draws carrying a
-  revoked or expired (`expiry`) grant. An implementation MAY instead
-  mint per-grant yield keys to make key drop fine-grained, at the cost
-  of one catch-list entry per grant.
+  lets the chain verify the parent grant is authorized before creating
+  the child's `GrantRecord` (with `parent` set). A revoked or expired
+  grant therefore cannot launder itself into a fresh one, and revoking
+  a grant covers all its descendants through the ancestry check.
+  Narrowing MUST NOT create independent gas.
+- **Revocation** has two granularities, and the coarse one is global
+  but prospective: dropping `quota:draw` from the chain's
+  `YieldReceiver` (the cap-scopes key-drop discipline) inertizes every
+  QuotaCap **for future draws** — catch sets are snapshotted, and an
+  already-admitted operation's top-ups never pass through `quota:draw`
+  (§4), so in-flight reservations run to a terminal state under their
+  bindings. An implementation that needs an immediate kill switch MAY
+  add a global authorization epoch, bumped at key drop and checked at
+  every top-up. Per-grant revocation is setting
+  `GrantRecords[g].revoked`; the chain MUST refuse draws and top-ups
+  whose grant is not authorized. An implementation MAY instead mint
+  per-grant yield keys to make key drop fine-grained, at the cost of
+  one catch-list entry per grant.
 
 ### 4. Admission, Load, and Harvest
 
@@ -194,26 +216,30 @@ operation presenting a QuotaCap:
 
 ```
 1. Caller's QuotaCap.draw(requested) yields quota:draw.
-2. Chain catches; checks grant_id against the revocation set and
-   expiry; looks up GasLedger[(issuer, quota_id)].
+2. Chain catches; requires GrantRecords[grant_id] to be authorized
+   (unrevoked incl. ancestors, unexpired — §3) and to match
+   (issuer, quota_id); requires requested ≤ limits.per_call_max;
+   looks up GasLedger[(issuer, quota_id)].
 3. RESERVE: if remaining < requested → refuse admission.
    Else remaining -= requested.                   -- the reservation
 4. Chain picks a meter_key that is LIVE-UNIQUE — bound by no other
    active reservation (meter_key collisions silently alias) — and
-   records the binding, carrying the FULL authorization context:
+   records the binding; grant_id links it to the authoritative
+   GrantRecord:
      ActiveReservations[meter_key] :=
-       { issuer, quota_id, grant_id, authorized,
-         reserved: requested, residue: 0 }
+       { issuer, quota_id, grant_id, reserved: requested, residue: 0 }
    emit kernel:set_gas_meter(meter_key, requested);
    CALL target with the Gas cap in its gas_slots.
 5. Execution debits the meter per block (kernel fast path, unchanged).
    On kernel:oog the target is Waiting with its origin slot reserved;
    the chain MUST NOT CALL it again. The kernel:oog payload carries
-   only the Gas handle, so every authorization fact for a top-up
-   comes from the binding. To continue with `additional`:
+   only the Gas handle, so all authorization context for a top-up is
+   reached through the binding. To continue with `additional`:
      b = ActiveReservations[meter_key]
-     re-check b.grant_id: unrevoked, unexpired   -- else DROP_RESUME
-     require b.reserved + additional ≤ b.authorized -- else DROP_RESUME
+     g = GrantRecords[b.grant_id]
+     re-check g authorized                        -- else DROP_RESUME
+     require b.reserved + additional ≤ g.limits.per_call_max
+                                                  -- else DROP_RESUME
      RESERVE additional from GasLedger[(b.issuer, b.quota_id)] (as in 3)
      residue = emit kernel:set_gas_meter(meter_key, 0)
      emit kernel:set_gas_meter(meter_key, residue + additional)
@@ -390,9 +416,14 @@ claim of their own.
 
 **Verification has two levels, and the artifact alone gives only the
 first.** The re-fold and content checks above establish **internal
-consistency**: that `image`, `cnode`, `closure`, and the witness agree
-with one another. They do not establish that the Instance ever existed
-in any source domain — a fabricator can manufacture a mutually
+consistency**: that `image`, `cnode`, `content`, and the witness agree
+with one another. For a `Closure` artifact this is checkable locally.
+For a `Manifest` artifact it is **conditional**: hashes alone cannot
+prove the listed set is the complete transitive closure, so internal
+consistency is established only once every listed entry is resolved to
+its value — until then the artifact is a self-consistent claim over the
+root and witness only. Neither level establishes that the Instance ever
+existed in any source domain — a fabricator can manufacture a mutually
 consistent artifact wholesale. Establishing **provenance** requires
 binding the artifact to source state: the OPTIONAL `provenance` field
 carries a source `new_state_root` (the hash of the source chain's cnode
@@ -479,8 +510,9 @@ The following MUST hold before this RFC is considered satisfied:
     boundary loses no gas and gains none: pre-harvested residue equals
     the amount reloaded at resume (or refunded and re-reserved).
 13. **Top-up authorization.** A paused operation cannot, through
-    top-ups, exceed its grant's `authorized` ceiling or continue on a
-    grant that has been revoked or has expired since admission.
+    top-ups, exceed its grant's `per_call_max` ceiling or continue on a
+    grant that has been revoked (directly or via an ancestor) or has
+    expired since admission.
 
 ---
 
@@ -493,9 +525,9 @@ The following MUST hold before this RFC is considered satisfied:
 | Check/debit race on one quota | Mitigated | Reservation at admission inside sequential accumulate (§4) |
 | Meter-key collision misrouting gas | Mitigated | Live-unique keys; refunds flow only through the `ActiveReservations` binding (§4) |
 | Collective overspend through delegation | Mitigated | Delegation only via the cap's own `delegate` endpoint; clamps only narrow (§3) |
-| Coarse revocation via shared `quota:draw` key drop | Partial | Key drop is an explicit global kill switch; per-grant revocation is ledger-side by `grant_id` (§3) |
+| Coarse revocation via shared `quota:draw` key drop | Partial | Key drop halts future draws only (catch sets are snapshotted; top-ups bypass the key); in-flight reservations run to terminal unless an authorization epoch is added (§3) |
 | Revocation bypass via local delegation | Mitigated | `grant_id`s are chain-issued with recorded ancestry; revocation covers descendants (§3) |
-| Top-up bypassing grant limits or revocation | Mitigated | Binding carries `grant_id` + `authorized`; every top-up re-checks revocation/expiry and the cumulative ceiling (§4) |
+| Top-up bypassing grant limits or revocation | Mitigated | Binding links to the authoritative `GrantRecord`; every top-up re-checks authorization (revocation incl. ancestors, expiry) and the cumulative ceiling (§3–§4) |
 | Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
 | Exit artifact missing referenced state | Mitigated | Reachable content closure carried, or explicit manifest semantics (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
@@ -572,3 +604,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.4) | Second recheck: delegation chain-mediated (`quota:delegate`) with chain-issued `grant_id`s, ancestry, and descendant revocation; cross-block pauses handled by pre-boundary harvest into the persistent binding + reload at resume; exit artifact carries the reachable content closure or is an explicit manifest; reserve funding source/authority restored to Deferred Work |
 | 2026-06-10 | Draft (v0.5) | Third recheck: exit verification split into internal consistency (artifact-local) vs provenance (OPTIONAL `new_state_root` + inclusion proof against a destination-accepted root); `quota:delegate` registration made explicit alongside `quota:draw`; boundary reload resets `residue` to distinguish parked from loaded, and the entry-vs-handle wipe semantics clarified (no re-mint needed) |
 | 2026-06-10 | Draft (v0.6) | Fourth recheck: `ActiveReservations` carries the full authorization context (`grant_id`, `authorized` from the draw payload) so OOG top-ups re-check revocation/expiry and the cumulative ceiling; lineage-witness fold restated over already-hashed entries with `acc₀ = h₀` defined explicitly; artifact `content` modelled as `Closure \| Manifest` variants |
+| 2026-06-10 | Draft (v0.7) | Fifth recheck: authoritative chain-side `GrantRecord { issuer, quota_id, limits{per_call_max, expiry}, parent, revoked }` keyed by `grant_id` replaces the payload-supplied `authorized` and the revocation set — draws and top-ups both check it; key-drop claim narrowed to future draws (catch-set snapshots; top-ups bypass the key), with an optional authorization epoch for immediate halt; `Manifest` internal consistency made conditional on resolving every entry; stale `closure` field name corrected |
