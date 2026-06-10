@@ -4,9 +4,9 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.11)                              |
+| Status     | Draft (v0.12)                              |
 | Date       | 2026-06-10                                 |
-| Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
+| Affects    | Elaborates the `GasLedger` sketch in `website/content/spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `website/content/spec/principles/cap-scopes.md`; applies `website/content/spec/userspace/generic-authority-pattern.md`; positions itself against `website/content/docs/coinless.md`. Changes **no** kernel semantics: `website/content/spec/_index.md` §22, `website/content/spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
 ---
 
@@ -43,25 +43,26 @@ encoding and issuer onboarding policy are deferred.
 This RFC adds **no kernel mechanism**. It builds on four things v3
 already specifies, and changes none of them:
 
-1. **The kernel-assisted `GasMeter`** (`spec/_index.md` §22,
-   `gas-cost.md`): per-block fast-path debiting against an ephemeral
+1. **The kernel-assisted `GasMeter`** (`website/content/spec/_index.md` §22,
+   `website/content/spec/gas-cost.md`): per-block fast-path debiting against an ephemeral
    kernel table; `Gas{meter_key}` unit handles whose copies all name the
    same meter; `kernel:mint_gas` / `kernel:set_gas_meter`; the
    `kernel:oog` yield. Conservation already lives in the meter, not the
    cap. This RFC sits entirely *above* that flow.
-2. **The `GasLedger`** (`kernel-assisted-instances.md`, `cap-scopes.md`):
+2. **The `GasLedger`** (`website/content/spec/principles/kernel-assisted-instances.md`,
+   `website/content/spec/principles/cap-scopes.md`):
    the chain's own σ-resident Instance holding persistent balances,
    lazy-loaded into meters per invocation via the OOG-catch pattern, and
    harvested back with the atomic set+read of `kernel:set_gas_meter`.
    This RFC is a specification of that ledger's record structure and
    admission discipline.
 3. **The generic authority pattern**
-   (`userspace/generic-authority-pattern.md`): privileged rights are
+   (`website/content/spec/userspace/generic-authority-pattern.md`): privileged rights are
    conveyed by possession of `Cap::Instance[AuthorityCap]` with a
    `YieldSender` embedded opaquely in its cnode. Type identity
    (`image_hash`) identifies and never authorizes. Spending rights here
    follow this pattern exactly.
-4. **Coinless allocation** (`docs/coinless.md`): transactions are free by
+4. **Coinless allocation** (`website/content/docs/coinless.md`): transactions are free by
    default; validators allocate core-time under congestion through a
    bilateral market. This RFC governs *metering of admitted execution*,
    not inclusion, and does not replace that market (§7).
@@ -172,8 +173,8 @@ can be bypassed after issuance.
 
 A grant is **authorized** iff it and every ancestor (via `parent`) is
 unrevoked, it is unexpired, and its `issuer_gen` equals the issuer's
-**current accept-list generation** (§5) — which also requires current
-membership. Delegation enforces `child.limits ⊆ parent.limits`
+current generation in the **issuer registry** (§5) with the issuer
+currently `accepted`. Delegation enforces `child.limits ⊆ parent.limits`
 including `expiry` (chain-side, below), so the child's own expiry
 suffices. The limits carried in a QuotaCap's
 state are a first-line clamp for caller convenience; the `GrantRecord`
@@ -187,9 +188,11 @@ every ancestry walk at draw, delegation, or top-up is
 O(`MAX_DELEGATION_DEPTH`). An implementation MAY additionally cache
 effective authorization under a revocation **generation counter** —
 bumped on every revoke. The counter tracks revocation only: a cache hit
-MUST still independently check `expiry` against the current block, and
-a generation mismatch MUST fall back to the bounded ancestry walk —
-the cache is O(1) only on warm, valid hits.
+MUST still independently check `expiry` against the current block
+**and that the grant's `issuer_gen` is still current in the issuer
+registry (§5)** — or both MUST be part of the cache key — and a
+revocation-counter mismatch MUST fall back to the bounded ancestry
+walk. The cache is O(1) only on warm, valid hits.
 
 - Spending authority is **possession** of the QuotaCap, conveyed by
   cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
@@ -246,7 +249,11 @@ the cache is O(1) only on warm, valid hits.
   binding's epoch to equal the current one. A dropped governance key
   MUST NOT be re-added: recovery after a kill switch mints fresh keys
   (rotation), since a current-catch-set check cannot distinguish a
-  stale pre-drop yield once the same key is restored. Per-grant
+  stale pre-drop yield once the same key is restored. Rotation is not
+  complete until **re-issuance**: existing QuotaCaps still embed the
+  old senders and are permanently inert, so the chain MUST mint new
+  caps holding the fresh senders and redistribute them via cap-flow,
+  per the generic authority pattern. Per-grant
   revocation is setting
   `GrantRecords[g].revoked`; the chain MUST refuse draws and top-ups
   whose grant is not authorized. An implementation MAY instead mint
@@ -309,11 +316,13 @@ for `depth`) is refused before any mutation. The chain MUST maintain
 `remaining ≤ ceiling` on every quota record as an invariant. A refund
 that would exceed `ceiling` indicates an accounting fault and has a
 **defined outcome** — the meter is already harvested at that point, so
-the operation cannot simply abort: refund up to `ceiling`, move the
-excess to an explicit quarantine record
-(`QuarantinedGas[(issuer, quota_id)] += excess`) for governance
-inspection, delete the binding, and emit an auditable trace. Never
-clamp silently, never strand the binding, never mint.
+the operation cannot simply abort: refund up to `ceiling`, append an
+**immutable per-fault quarantine record**
+`{ issuer, quota_id, excess, block, meter_key }` for governance
+inspection — append-only, so there is no accumulator whose own
+arithmetic could overflow after the harvest — delete the binding, and
+emit an auditable trace. Never clamp silently, never strand the
+binding, never mint.
 
 The reservation at step 3 is the admission decision. Because reserve and
 refund are ledger writes inside the chain's sequential accumulate, two
@@ -370,8 +379,20 @@ accounting MUST NOT influence metering: the kernel sees only meters.
 
 ### 5. Issuer Governance
 
-The chain maintains an **issuer accept-list** mapping each accepted
-`IssuerId` to a **generation**, bumped on every removal.
+The chain maintains a persistent **issuer registry** — the accept-list
+is its `accepted` view:
+
+```
+IssuerRegistry : Map<IssuerId, { accepted   : bool
+                               , generation : u64 }>
+```
+
+The record **persists while the issuer is absent**, so the generation
+survives removal: removal sets `accepted := false` and bumps
+`generation` with a **checked** increment; re-acceptance sets
+`accepted := true` at the already-bumped generation. If the increment
+would overflow, the `IssuerId` is **retired permanently** and MUST NOT
+be re-accepted — wrapping could resurrect ancient grants.
 Membership-at-current-generation gates the whole lifecycle: issuance
 (registering a quota and its root grant) stamps the grant's
 `issuer_gen`; every draw (§4 step 2), delegation (§3), and top-up or
@@ -379,9 +400,9 @@ cross-block reload (§4) requires the grant to be authorized, which
 includes its generation equalling the issuer's current one. Removal
 therefore **permanently invalidates every existing grant** — no draw,
 delegation, top-up, or reload referencing a prior generation ever
-succeeds again. Re-acceptance starts a fresh generation: quota balances
-are preserved in the ledger, but grants MUST be re-issued; resurrection
-of old grants is impossible by construction. Gas already loaded into a
+succeeds again. Re-acceptance resumes at the generation already bumped
+at removal: quota balances are preserved in the ledger, but grants MUST
+be re-issued; resurrection of old grants is impossible by construction. Gas already loaded into a
 meter runs to a terminal state. Changes to the accept-list MUST use a
 **two-authority procedure**:
 
@@ -427,14 +448,14 @@ admissions.
 
 A delayed constitutional operation MUST eventually be includable without
 the consent of the authority it contests. Because inclusion is
-validator discretion (`docs/coinless.md`), this requires a
+validator discretion (`website/content/docs/coinless.md`), this requires a
 protocol-level inclusion guarantee for reserve-funded operations; that
 mechanism is an open dependency, not specified here (§Deferred Work,
 item 2).
 
 ### 7. Relationship to Coinless Allocation
 
-This RFC **complements** `docs/coinless.md`; it does not amend it:
+This RFC **complements** `website/content/docs/coinless.md`; it does not amend it:
 
 - **Inclusion stays free by default.** Quota admission gates how much
   *execution* an operation may perform once the chain processes it; it
@@ -544,7 +565,7 @@ Unconditional import everywhere is **not** claimed.
   and merging of quota;
 - provider capacity allocation and leases;
 - core-time assignment and scheduling markets (governed by
-  `docs/coinless.md`'s bilateral market, untouched per §7);
+  `website/content/docs/coinless.md`'s bilateral market, untouched per §7);
 - any change to kernel semantics: no new cap kind, no new `kernel:*`
   syscall, no change to `GasMeter`, gas costs, or `MGMT_COPY`.
 
@@ -575,7 +596,7 @@ The following MUST hold before this RFC is considered satisfied:
    without the originator holding quota. Provenance acceptance is
    destination policy and is not credit-gated either.
 7. **Coinless preserved.** Under zero congestion and sufficient quota,
-   observable behaviour matches `docs/coinless.md`'s free-by-default
+   observable behaviour matches `website/content/docs/coinless.md`'s free-by-default
    model; the core-time market is unmodified.
 8. **No overclaiming.** Normative text MUST NOT claim guaranteed market
    plurality, core-time allocation, or stronger censorship resistance
@@ -625,9 +646,10 @@ The following MUST hold before this RFC is considered satisfied:
 | Exit artifact missing referenced state | Mitigated | `Closure` carries the reachable content; `Manifest` completeness is deferred to resolution and traversal of every listed entry (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
 | Removed issuer continuing to draw | Mitigated | Generation-stamped grants; removal bumps the generation, permanently invalidating prior grants across draws, delegations, top-ups, and reloads (§3–§5) |
-| Grant resurrection after issuer re-acceptance | Mitigated | Re-acceptance starts a fresh generation; old grants never revalidate, balances preserved via re-issuance (§5) |
-| Stranded or minted gas on refund fault | Mitigated | Defined quarantine outcome: refund to `ceiling`, excess quarantined with audit trace, binding deleted (§4) |
-| Stale yield after key re-addition | Mitigated | Dropped governance keys are never re-added; recovery rotates to fresh keys (§3) |
+| Grant resurrection after issuer re-acceptance | Mitigated | Persistent registry retains the generation across absence; checked increment, permanent retirement on overflow; old grants never revalidate (§5) |
+| Stranded or minted gas on refund fault | Mitigated | Refund to `ceiling`; excess in immutable per-fault quarantine records (no accumulator to overflow); binding deleted; audit trace (§4) |
+| Stale yield after key re-addition | Mitigated | Dropped governance keys are never re-added; recovery rotates to fresh keys and re-issues QuotaCaps holding them (§3) |
+| Cached authorization outliving issuer removal | Mitigated | Cache hits independently recheck `expiry` and `issuer_gen` currency, or carry both in the cache key (§3) |
 | Arithmetic overflow bypassing limits | Mitigated | Checked arithmetic, refusal before mutation; `remaining ≤ ceiling` invariant (§4) |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
 | Exit artifact fabrication | Partial | Internal consistency is locally checkable for `Closure` artifacts, conditional on resolving every entry for `Manifest`; provenance needs the OPTIONAL `new_state_root` inclusion proof against a destination-accepted root (§8) |
@@ -709,3 +731,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.9) | Seventh recheck: generation counter scoped to revocation only — cache hits MUST still check `expiry` against the current block and mismatches fall back to the bounded walk (O(1) on warm, valid hits only); authorization epoch, if adopted, checked at draw/delegation/top-up with bindings recording their admission epoch; `MAX_DELEGATION_DEPTH` selection and worst-case cost deferred (threat re-marked Partial); exit guarantee qualified for `Manifest` artifacts (after resolution and successful traversal) |
 | 2026-06-10 | Draft (v0.10) | Eighth recheck: accept-list membership gates issuance, draw, delegation, and top-up — issuer removal stops admissions and top-ups while loaded gas runs to terminal; checked arithmetic required throughout §4 with the `remaining ≤ ceiling` invariant; epoch defined concretely (`auth_epoch` in chain σ, stamped into bindings, equality at top-up, handlers check their current catch set) and renamed to immediate *authorization revocation*; manifest verification requires root traversal with discovered-set equality, and a `Manifest` artifact is a reference export, not self-contained; step 2 binds `g.limits.per_call_max` |
 | 2026-06-10 | Draft (v0.11) | Ninth recheck: cross-block reload revalidates the full top-up authorization before loading (refund + `DROP_RESUME` on failure); over-ceiling refund has a defined quarantine outcome (refund to `ceiling`, excess to `QuarantinedGas`, binding deleted, audit trace); issuer **generations** — removal bumps, authorization requires the grant's `issuer_gen` to be current, so removal permanently invalidates grants and re-acceptance requires re-issuance; delegation checklist includes the generation check and §5's citation corrected to §3; dropped governance keys are never re-added (rotation), closing the stale-yield-after-restore edge |
+| 2026-06-10 | Draft (v0.12) | Tenth recheck: cache hits recheck `issuer_gen` currency (or carry it in the cache key); quarantine restated as immutable per-fault records — no accumulator to overflow post-harvest; persistent `IssuerRegistry { accepted, generation }` retains generations across absence, with checked increment and permanent retirement on overflow; rotation completed by mandatory QuotaCap re-issuance with fresh senders; all repository paths corrected to `website/content/…` |
