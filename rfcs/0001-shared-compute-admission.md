@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.13)                              |
+| Status     | Draft (v0.14)                              |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `website/content/spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `website/content/spec/principles/cap-scopes.md`; applies `website/content/spec/userspace/generic-authority-pattern.md`; positions itself against `website/content/docs/coinless.md`. Changes **no** kernel semantics: `website/content/spec/_index.md` §22, `website/content/spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -246,11 +246,15 @@ warm, valid hits.
   **immediate authorization revocation, not immediate execution
   halt** — gas already loaded into a meter runs to HALT or OOG
   regardless. For immediate revocation an implementation MAY add a
-  global **authorization epoch** `auth_epoch` in chain σ, bumped at
-  key drop with a **checked, non-wrapping** increment (on exhaustion
-  the epoch mechanism is retired: every binding stamped with a prior
-  epoch is refused at its next top-up, and a successor mechanism is a
-  governance matter): the draw and delegation handlers MUST refuse a yield
+  global **authorization epoch** in chain σ:
+  `auth_epoch_state = Active(u64) | Retired`, bumped at key drop with
+  a **checked** increment; an increment that would overflow sets
+  `Retired` instead. An epoch check is equality of the binding's
+  stamped value against `Active(n)` — in `Retired` state **every**
+  epoch check fails, at top-up and at cross-block reload alike, so no
+  binding (including one stamped `u64::MAX`) can pass; a successor
+  mechanism is a governance matter. With the epoch adopted, the draw
+  and delegation handlers MUST refuse a yield
   arriving under a key the chain has since dropped (a stale pre-drop
   snapshot can still route one in, so the handler checks its own
   current catch set, not the snapshot); each binding records
@@ -665,7 +669,7 @@ The following MUST hold before this RFC is considered satisfied:
 | Stranded or minted gas on refund fault | Mitigated | Refund to `ceiling`; excess in immutable per-fault quarantine records (no accumulator to overflow); binding deleted; audit trace (§4) |
 | Stale yield after key re-addition | Mitigated | Dropped governance keys are never re-added; recovery rotates to fresh keys and re-issues QuotaCaps holding them (§3) |
 | Cached authorization outliving issuer removal or expiry | Mitigated | Cache hits always verify `expiry` and `accepted` against current state; only generation-equality checks may live in the cache key (§3) |
-| Invalidation counter wrap | Mitigated | Revocation counter and `auth_epoch` are checked, non-wrapping; exhaustion flushes caches / retires the epoch mechanism (§3) |
+| Invalidation counter wrap | Mitigated | Revocation counter is checked, non-wrapping with cache flush on exhaustion; `auth_epoch_state = Active(u64) \| Retired` — retirement fails every epoch check at top-up and reload (§3) |
 | Quarantined gas re-entering circulation | Mitigated | Quarantine records are audit-only, unspendable pending a deferred reconciliation procedure (§4) |
 | Arithmetic overflow bypassing limits | Mitigated | Checked arithmetic, refusal before mutation; `remaining ≤ ceiling` invariant (§4) |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
@@ -751,3 +755,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.11) | Ninth recheck: cross-block reload revalidates the full top-up authorization before loading (refund + `DROP_RESUME` on failure); over-ceiling refund has a defined quarantine outcome (refund to `ceiling`, excess to `QuarantinedGas`, binding deleted, audit trace); issuer **generations** — removal bumps, authorization requires the grant's `issuer_gen` to be current, so removal permanently invalidates grants and re-acceptance requires re-issuance; delegation checklist includes the generation check and §5's citation corrected to §3; dropped governance keys are never re-added (rotation), closing the stale-yield-after-restore edge |
 | 2026-06-10 | Draft (v0.12) | Tenth recheck: cache hits recheck `issuer_gen` currency (or carry it in the cache key); quarantine restated as immutable per-fault records — no accumulator to overflow post-harvest; persistent `IssuerRegistry { accepted, generation }` retains generations across absence, with checked increment and permanent retirement on overflow; rotation completed by mandatory QuotaCap re-issuance with fresh senders; all repository paths corrected to `website/content/…` |
 | 2026-06-10 | Draft (v0.13) | Eleventh recheck: cache checks split by kind — `expiry` and `accepted` always verified against moving state, only generation-equality checks may live in the cache key; `retired` tombstone added to `IssuerRegistry`; revocation counter and `auth_epoch` made checked/non-wrapping with exhaustion semantics (cache flush / epoch retirement); quarantine records declared audit-only and unspendable pending a deferred reconciliation procedure. Reviewer concurrence: ready for wider Draft circulation |
+| 2026-06-10 | Draft (v0.14) | Twelfth recheck: epoch retirement made enforceable — `auth_epoch_state = Active(u64) \| Retired`; overflow sets `Retired`, in which every epoch check fails at top-up and cross-block reload alike, closing the `u64::MAX` equality bypass |
