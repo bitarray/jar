@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.10)                              |
+| Status     | Draft (v0.11)                              |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -161,6 +161,7 @@ GrantRecord  = { issuer   : IssuerId
                             , expiry       : BlockNo }
                , parent   : Option<GrantId>
                , depth    : u32              -- root = 0; child = parent + 1
+               , issuer_gen : u64            -- accept-list generation (§5)
                , revoked  : bool }
 ```
 
@@ -170,9 +171,11 @@ no un-revoke and no limit mutation, so neither attenuation nor ancestry
 can be bypassed after issuance.
 
 A grant is **authorized** iff it and every ancestor (via `parent`) is
-unrevoked, and it is unexpired — delegation enforces
-`child.limits ⊆ parent.limits` including `expiry` (chain-side, below),
-so the child's own expiry suffices. The limits carried in a QuotaCap's
+unrevoked, it is unexpired, and its `issuer_gen` equals the issuer's
+**current accept-list generation** (§5) — which also requires current
+membership. Delegation enforces `child.limits ⊆ parent.limits`
+including `expiry` (chain-side, below), so the child's own expiry
+suffices. The limits carried in a QuotaCap's
 state are a first-line clamp for caller convenience; the `GrantRecord`
 is what the chain enforces.
 
@@ -210,11 +213,13 @@ the cache is O(1) only on warm, valid hits.
   chain-issued, never minted by the cap. On a `quota:delegate` yield
   the chain MUST independently require, against the records alone:
   a fresh chain-issued child `grant_id`; that the parent record exists
-  and is authorized; that the child's `(issuer, quota_id)` equals the
-  parent's; and that the child's limits are within the **parent
-  record's** limits — the cap's local narrowing check is convenience,
-  not enforcement. Only then is the child's `GrantRecord` created
-  (with `parent` and `depth` set). A revoked or expired grant
+  and is authorized — which includes the issuer being on the
+  accept-list at the grant's generation (§5); that the child's
+  `(issuer, quota_id)` equals the parent's; and that the child's limits
+  are within the **parent record's** limits — the cap's local narrowing
+  check is convenience, not enforcement. Only then is the child's
+  `GrantRecord` created (with `parent`, `depth`, and `issuer_gen`
+  set from the parent). A revoked or expired grant
   therefore cannot launder itself into a fresh one, and revoking a
   grant covers all its descendants through the ancestry check.
   Narrowing MUST NOT create independent gas.
@@ -238,7 +243,11 @@ the cache is O(1) only on warm, valid hits.
   snapshot can still route one in, so the handler checks its own
   current catch set, not the snapshot); each binding records
   `auth_epoch` at admission (§4 step 4); and a top-up requires the
-  binding's epoch to equal the current one. Per-grant revocation is setting
+  binding's epoch to equal the current one. A dropped governance key
+  MUST NOT be re-added: recovery after a kill switch mints fresh keys
+  (rotation), since a current-catch-set check cannot distinguish a
+  stale pre-drop yield once the same key is restored. Per-grant
+  revocation is setting
   `GrantRecords[g].revoked`; the chain MUST refuse draws and top-ups
   whose grant is not authorized. An implementation MAY instead mint
   per-grant yield keys to make key drop fine-grained, at the cost of
@@ -252,9 +261,9 @@ operation presenting a QuotaCap:
 ```
 1. Caller's QuotaCap.draw(requested) yields quota:draw.
 2. Chain catches; g = GrantRecords[grant_id]; requires g to be
-   authorized (unrevoked incl. ancestors, unexpired — §3) and to
-   match (issuer, quota_id); requires issuer ∈ accept-list (§5);
-   requires requested ≤ g.limits.per_call_max;
+   authorized (unrevoked incl. ancestors, unexpired, issuer at
+   current accept-list generation — §3/§5) and to match
+   (issuer, quota_id); requires requested ≤ g.limits.per_call_max;
    looks up GasLedger[(issuer, quota_id)].
 3. RESERVE: if remaining < requested → refuse admission.
    Else remaining -= requested.                   -- the reservation
@@ -274,8 +283,8 @@ operation presenting a QuotaCap:
    reached through the binding. To continue with `additional`:
      b = ActiveReservations[meter_key]
      g = GrantRecords[b.grant_id]
-     re-check g authorized                        -- else DROP_RESUME
-     re-check b.issuer ∈ accept-list (§5)         -- else DROP_RESUME
+     re-check g authorized (incl. issuer at current
+       accept-list generation — §3/§5)            -- else DROP_RESUME
      require b.epoch = auth_epoch (iff adopted)   -- else DROP_RESUME
      require b.reserved + additional ≤ g.limits.per_call_max
        (checked add)                              -- else DROP_RESUME
@@ -297,9 +306,14 @@ operation presenting a QuotaCap:
 `residue + additional`, `remaining += harvested`, `depth + 1` — MUST be
 checked: an operation that would overflow or underflow `u64` (or `u32`
 for `depth`) is refused before any mutation. The chain MUST maintain
-`remaining ≤ ceiling` on every quota record as an invariant; a refund
-that would exceed `ceiling` indicates an accounting fault and MUST fault
-the operation rather than clamp silently.
+`remaining ≤ ceiling` on every quota record as an invariant. A refund
+that would exceed `ceiling` indicates an accounting fault and has a
+**defined outcome** — the meter is already harvested at that point, so
+the operation cannot simply abort: refund up to `ceiling`, move the
+excess to an explicit quarantine record
+(`QuarantinedGas[(issuer, quota_id)] += excess`) for governance
+inspection, delete the binding, and emit an auditable trace. Never
+clamp silently, never strand the binding, never mint.
 
 The reservation at step 3 is the admission decision. Because reserve and
 refund are ledger writes inside the chain's sequential accumulate, two
@@ -325,7 +339,12 @@ residue = emit kernel:set_gas_meter(meter_key, 0)
 ActiveReservations[meter_key].residue := residue
 ```
 
-and on resuming in a later block MUST reload before `CALL_RESUME`:
+and on resuming in a later block MUST **revalidate before reloading** —
+the same authorization checks as a top-up (grant authorized at the
+current accept-list generation, epoch equality if adopted). Reload is a
+gas load, and §5 forbids loading for a removed issuer. On failure,
+refund the residue through the binding (as in step 7) and
+`DROP_RESUME`. Only on success:
 
 ```
 emit kernel:set_gas_meter(meter_key, ActiveReservations[meter_key].residue)
@@ -351,15 +370,19 @@ accounting MUST NOT influence metering: the kernel sees only meters.
 
 ### 5. Issuer Governance
 
-The chain maintains an **issuer accept-list**: the set of `IssuerId`s
-whose quotas the chain will load. Membership gates the whole lifecycle:
-registering a quota and its root grant (issuance), every draw and
-delegation (§4 step 2), and every top-up of an in-flight reservation
-(§4 step 5) MUST require the issuer's *current* membership. Removing an
-issuer therefore stops new admissions and further top-ups at once;
-already-loaded gas runs to a terminal state, and the removed issuer's
-quota records remain in the ledger, inert, pending re-acceptance or
-expiry (chain policy). Changes to the accept-list MUST use a
+The chain maintains an **issuer accept-list** mapping each accepted
+`IssuerId` to a **generation**, bumped on every removal.
+Membership-at-current-generation gates the whole lifecycle: issuance
+(registering a quota and its root grant) stamps the grant's
+`issuer_gen`; every draw (§4 step 2), delegation (§3), and top-up or
+cross-block reload (§4) requires the grant to be authorized, which
+includes its generation equalling the issuer's current one. Removal
+therefore **permanently invalidates every existing grant** — no draw,
+delegation, top-up, or reload referencing a prior generation ever
+succeeds again. Re-acceptance starts a fresh generation: quota balances
+are preserved in the ledger, but grants MUST be re-issued; resurrection
+of old grants is impossible by construction. Gas already loaded into a
+meter runs to a terminal state. Changes to the accept-list MUST use a
 **two-authority procedure**:
 
 1. A **ballot**: a yield under a governance key (e.g. `gov:ballot`)
@@ -574,9 +597,11 @@ The following MUST hold before this RFC is considered satisfied:
     top-ups, exceed its grant's `per_call_max` ceiling or continue on a
     grant that has been revoked (directly or via an ancestor) or has
     expired since admission.
-14. **Issuer removal bites.** After an issuer's removal from the
-    accept-list, no draw, delegation, or top-up referencing that issuer
-    succeeds; already-loaded gas runs to terminal and no more is loaded.
+14. **Issuer removal bites permanently.** After an issuer's removal, no
+    draw, delegation, top-up, or cross-block reload referencing any
+    grant of a prior generation succeeds; already-loaded gas runs to
+    terminal and no more is loaded. Re-acceptance requires re-issuance —
+    no old grant revalidates.
 15. **No arithmetic wrap.** No quota, reservation, meter, or depth
     arithmetic wraps; `remaining ≤ ceiling` holds on every quota record
     at every step.
@@ -599,7 +624,10 @@ The following MUST hold before this RFC is considered satisfied:
 | Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
 | Exit artifact missing referenced state | Mitigated | `Closure` carries the reachable content; `Manifest` completeness is deferred to resolution and traversal of every listed entry (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
-| Removed issuer continuing to draw | Mitigated | Current accept-list membership required at issuance, draw, delegation, and top-up (§4–§5) |
+| Removed issuer continuing to draw | Mitigated | Generation-stamped grants; removal bumps the generation, permanently invalidating prior grants across draws, delegations, top-ups, and reloads (§3–§5) |
+| Grant resurrection after issuer re-acceptance | Mitigated | Re-acceptance starts a fresh generation; old grants never revalidate, balances preserved via re-issuance (§5) |
+| Stranded or minted gas on refund fault | Mitigated | Defined quarantine outcome: refund to `ceiling`, excess quarantined with audit trace, binding deleted (§4) |
+| Stale yield after key re-addition | Mitigated | Dropped governance keys are never re-added; recovery rotates to fresh keys (§3) |
 | Arithmetic overflow bypassing limits | Mitigated | Checked arithmetic, refusal before mutation; `remaining ≤ ceiling` invariant (§4) |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
 | Exit artifact fabrication | Partial | Internal consistency is locally checkable for `Closure` artifacts, conditional on resolving every entry for `Manifest`; provenance needs the OPTIONAL `new_state_root` inclusion proof against a destination-accepted root (§8) |
@@ -680,3 +708,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.8) | Sixth recheck: delegation checks made fully chain-side against the records (fresh `grant_id`, parent exists/authorized, `(issuer, quota_id)` match, child limits within the parent **record**); `GrantRecord` fields immutable except monotonic `revoked: false → true`; ancestry walks bounded by `depth` ≤ `MAX_DELEGATION_DEPTH` with optional generation-counter cache; key-drop boundary stated snapshot-precisely (blocks owner edges snapshotted after the drop; drop both keys together); manifest conditionality propagated to criterion 6 and both security rows |
 | 2026-06-10 | Draft (v0.9) | Seventh recheck: generation counter scoped to revocation only — cache hits MUST still check `expiry` against the current block and mismatches fall back to the bounded walk (O(1) on warm, valid hits only); authorization epoch, if adopted, checked at draw/delegation/top-up with bindings recording their admission epoch; `MAX_DELEGATION_DEPTH` selection and worst-case cost deferred (threat re-marked Partial); exit guarantee qualified for `Manifest` artifacts (after resolution and successful traversal) |
 | 2026-06-10 | Draft (v0.10) | Eighth recheck: accept-list membership gates issuance, draw, delegation, and top-up — issuer removal stops admissions and top-ups while loaded gas runs to terminal; checked arithmetic required throughout §4 with the `remaining ≤ ceiling` invariant; epoch defined concretely (`auth_epoch` in chain σ, stamped into bindings, equality at top-up, handlers check their current catch set) and renamed to immediate *authorization revocation*; manifest verification requires root traversal with discovered-set equality, and a `Manifest` artifact is a reference export, not self-contained; step 2 binds `g.limits.per_call_max` |
+| 2026-06-10 | Draft (v0.11) | Ninth recheck: cross-block reload revalidates the full top-up authorization before loading (refund + `DROP_RESUME` on failure); over-ceiling refund has a defined quarantine outcome (refund to `ceiling`, excess to `QuarantinedGas`, binding deleted, audit trace); issuer **generations** — removal bumps, authorization requires the grant's `issuer_gen` to be current, so removal permanently invalidates grants and re-acceptance requires re-issuance; delegation checklist includes the generation check and §5's citation corrected to §3; dropped governance keys are never re-added (rotation), closing the stale-yield-after-restore edge |
