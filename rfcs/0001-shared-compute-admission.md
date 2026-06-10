@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.4)                               |
+| Status     | Draft (v0.5)                               |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -152,10 +152,12 @@ QuotaCap = Cap::Instance[QuotaCapImage]
   cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
   treated as the credential; the credential is the embedded
   `YieldSender`, accessible only to the QuotaCap's own bytecode.
-- The `quota:draw` key is registered in the chain's `YieldReceiver` at
-  chain init. The chain MUST honor a draw only when it arrives as a
-  yield under that key — i.e. only through a QuotaCap's bytecode. Data
-  content claiming `(issuer, quota_id)` carries no authority.
+- The `quota:draw` **and** `quota:delegate` keys are both registered in
+  the chain's `YieldReceiver` at chain init, per the generic authority
+  pattern. The chain MUST honor a draw or delegation only when it
+  arrives as a yield under the respective key — i.e. only through a
+  QuotaCap's bytecode. Data content claiming `(issuer, quota_id)`
+  carries no authority.
 - `MGMT_COPY` of a QuotaCap copies the Instance; all copies share the
   embedded sender and name the same `(issuer, quota_id)` record, so a
   copy can never increase any balance — the same property the
@@ -243,10 +245,16 @@ and on resuming in a later block MUST reload before `CALL_RESUME`:
 
 ```
 emit kernel:set_gas_meter(meter_key, ActiveReservations[meter_key].residue)
+ActiveReservations[meter_key].residue := 0      -- now loaded, not parked
 ```
 
-(re-minting the `Gas{meter_key}` handle if needed — the wiped table
-entry is recreated by `kernel:set_gas_meter`). Live-uniqueness of
+Resetting `residue` is what distinguishes a parked reservation from a
+loaded one; without it a second resume would reload the same gas twice.
+Note the boundary wipes the meter-table **entry**, not the handle:
+`kernel:set_gas_meter` recreates the entry ("if no entry exists … the
+entry is created"), while the `Gas{meter_key}` **handle** is a cap the
+chain retains across blocks — inert while its entry is absent, it names
+the recreated entry again, so no re-mint is needed. Live-uniqueness of
 `meter_key`s is judged against the persistent bindings, not the
 per-block meter table. An implementation MAY instead refund the residue
 to the quota at block end and re-reserve at resume; either way, no gas
@@ -335,6 +343,9 @@ ExitArtifact = { image           : Image          -- current spec
                , cnode           : CNode          -- current state (root)
                , closure         : Map<Hash, Value> -- reachable content
                , lineage_witness : [ImageHash]    -- ordered, root-first
+               , provenance      : Option<
+                   { source_root     : Hash       -- a source new_state_root
+                   , inclusion_proof : Proof }>   -- Instance content ∈ root
                }
 ```
 
@@ -355,6 +366,22 @@ entries are already installed or supplied alongside. Closure entries are
 self-verifying by content hash; the lineage witness attests the *root*
 Instance only — nested Instances in the closure are imported as content,
 with no lineage claim of their own.
+
+**Verification has two levels, and the artifact alone gives only the
+first.** The re-fold and content checks above establish **internal
+consistency**: that `image`, `cnode`, `closure`, and the witness agree
+with one another. They do not establish that the Instance ever existed
+in any source domain — a fabricator can manufacture a mutually
+consistent artifact wholesale. Establishing **provenance** requires
+binding the artifact to source state: the OPTIONAL `provenance` field
+carries a source `new_state_root` (the hash of the source chain's cnode
+root) and an inclusion proof of the exported Instance's content under
+it. A destination that requires provenance MUST verify the inclusion
+proof against a source root it accepts; *which* roots it accepts is
+destination policy, established out of band. Where this RFC says
+credit-free "verification" (§6, acceptance criterion 6), it means
+internal consistency; provenance verification additionally needs an
+accepted root, which no credit can substitute for.
 
 **Import is re-instantiation, not identity transfer.**
 `host_derive_spawn` always extends the *spawner's* `image_hash` chain,
@@ -404,11 +431,13 @@ The following MUST hold before this RFC is considered satisfied:
 5. **Admission symmetry.** A normally funded issuer-policy proposal
    draws ordinary quota; a quota-starved challenge of that same policy
    draws the constitutional reserve, with no market-price gate.
-6. **Exit independence.** A quota-starved Instance can create and verify
-   an exit artifact (with lineage witness and reachable closure, or as
-   an explicit manifest), and a format-accepting destination can
-   re-instantiate its content under the destination's own lineage,
-   without the originator holding quota.
+6. **Exit independence.** A quota-starved Instance can create an exit
+   artifact and verify its internal consistency (lineage witness and
+   reachable closure, or as an explicit manifest), and a
+   format-accepting destination can re-instantiate its content under
+   the destination's own lineage, without the originator holding quota.
+   Provenance acceptance is destination policy and is not credit-gated
+   either.
 7. **Coinless preserved.** Under zero congestion and sufficient quota,
    observable behaviour matches `docs/coinless.md`'s free-by-default
    model; the core-time market is unmodified.
@@ -446,7 +475,7 @@ The following MUST hold before this RFC is considered satisfied:
 | Exit artifact missing referenced state | Mitigated | Reachable content closure carried, or explicit manifest semantics (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
-| Exit verification spoofing | Partial | Lineage witness re-fold (§8); the destination still needs the trusted root out of band |
+| Exit artifact fabrication | Partial | Internal consistency is always checkable; provenance needs the OPTIONAL `new_state_root` inclusion proof against a destination-accepted root (§8) |
 | Constitutional-reserve spam | Open | Eligibility, rate limits, deduplication deferred |
 | Reserve sizing, replenishment, exhaustion | Open | Deferred Work, item 2 |
 | Censorship of reserve-funded operations | Open | Inclusion is validator discretion; the §6 inclusion guarantee is an unspecified dependency |
@@ -516,3 +545,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.2) | Re-founded on existing machinery after review: quota as `GasLedger` extension with load/harvest bridge, spending authority via the generic AuthorityCap pattern, key-possession independence (not `image_hash`), reservation at admission, lineage-witness exit artifacts, explicit coinless positioning, honest `Affects` |
 | 2026-06-10 | Draft (v0.3) | Recheck fixes: live-unique `meter_key` with `ActiveReservations` binding, OOG continues by top-up + `CALL_RESUME` (never re-`CALL`), delegation via the QuotaCap's own `delegate` endpoint (sender is opaque to holders), import narrowed to re-instantiation under the destination lineage, revocation granularity of the shared `quota:draw` key made explicit with per-grant `grant_id` |
 | 2026-06-10 | Draft (v0.4) | Second recheck: delegation chain-mediated (`quota:delegate`) with chain-issued `grant_id`s, ancestry, and descendant revocation; cross-block pauses handled by pre-boundary harvest into the persistent binding + reload at resume; exit artifact carries the reachable content closure or is an explicit manifest; reserve funding source/authority restored to Deferred Work |
+| 2026-06-10 | Draft (v0.5) | Third recheck: exit verification split into internal consistency (artifact-local) vs provenance (OPTIONAL `new_state_root` + inclusion proof against a destination-accepted root); `quota:delegate` registration made explicit alongside `quota:draw`; boundary reload resets `residue` to distinguish parked from loaded, and the entry-vs-handle wipe semantics clarified (no re-mint needed) |
