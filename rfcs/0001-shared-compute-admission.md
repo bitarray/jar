@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.12)                              |
+| Status     | Draft (v0.13)                              |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `website/content/spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `website/content/spec/principles/cap-scopes.md`; applies `website/content/spec/userspace/generic-authority-pattern.md`; positions itself against `website/content/docs/coinless.md`. Changes **no** kernel semantics: `website/content/spec/_index.md` §22, `website/content/spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -187,12 +187,18 @@ worst-case validation cost are deferred — §Deferred Work, item 1), so
 every ancestry walk at draw, delegation, or top-up is
 O(`MAX_DELEGATION_DEPTH`). An implementation MAY additionally cache
 effective authorization under a revocation **generation counter** —
-bumped on every revoke. The counter tracks revocation only: a cache hit
-MUST still independently check `expiry` against the current block
-**and that the grant's `issuer_gen` is still current in the issuer
-registry (§5)** — or both MUST be part of the cache key — and a
-revocation-counter mismatch MUST fall back to the bounded ancestry
-walk. The cache is O(1) only on warm, valid hits.
+bumped on every revoke, with a **checked, non-wrapping** increment.
+The counter tracks revocation only, and the two remaining checks split
+by kind: a cache hit MUST **always** verify `expiry` against the
+current block and that the issuer is currently `accepted` (§5) — these
+compare against moving state, so no static cache key can stand in for
+them. Generation *equality* checks (the grant's `issuer_gen`, the
+revocation counter) MAY instead be carried in the cache key, since key
+equality against the registry's current values is exactly what they
+test. A revocation-counter mismatch MUST fall back to the bounded
+ancestry walk; counter exhaustion MUST flush every cached
+authorization before any counter reuse. The cache is O(1) only on
+warm, valid hits.
 
 - Spending authority is **possession** of the QuotaCap, conveyed by
   cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
@@ -241,7 +247,10 @@ walk. The cache is O(1) only on warm, valid hits.
   halt** — gas already loaded into a meter runs to HALT or OOG
   regardless. For immediate revocation an implementation MAY add a
   global **authorization epoch** `auth_epoch` in chain σ, bumped at
-  key drop: the draw and delegation handlers MUST refuse a yield
+  key drop with a **checked, non-wrapping** increment (on exhaustion
+  the epoch mechanism is retired: every binding stamped with a prior
+  epoch is refused at its next top-up, and a successor mechanism is a
+  governance matter): the draw and delegation handlers MUST refuse a yield
   arriving under a key the chain has since dropped (a stale pre-drop
   snapshot can still route one in, so the handler checks its own
   current catch set, not the snapshot); each binding records
@@ -321,8 +330,11 @@ the operation cannot simply abort: refund up to `ceiling`, append an
 `{ issuer, quota_id, excess, block, meter_key }` for governance
 inspection — append-only, so there is no accumulator whose own
 arithmetic could overflow after the harvest — delete the binding, and
-emit an auditable trace. Never clamp silently, never strand the
-binding, never mint.
+emit an auditable trace. Quarantine records are **audit-only**: they
+MUST NOT fund meters or refunds, and they remain unspendable until a
+normative reconciliation procedure exists (§Deferred Work, item 1) —
+this is what closes "never mint". Never clamp silently, never strand
+the binding, never mint.
 
 The reservation at step 3 is the admission decision. Because reserve and
 refund are ledger writes inside the chain's sequential accumulate, two
@@ -384,15 +396,18 @@ is its `accepted` view:
 
 ```
 IssuerRegistry : Map<IssuerId, { accepted   : bool
-                               , generation : u64 }>
+                               , generation : u64
+                               , retired    : bool }>
 ```
 
 The record **persists while the issuer is absent**, so the generation
 survives removal: removal sets `accepted := false` and bumps
 `generation` with a **checked** increment; re-acceptance sets
 `accepted := true` at the already-bumped generation. If the increment
-would overflow, the `IssuerId` is **retired permanently** and MUST NOT
-be re-accepted — wrapping could resurrect ancient grants.
+would overflow, the chain sets `retired := true` — a tombstone
+distinguishing permanent retirement from ordinary absence — and the
+`IssuerId` MUST NOT be re-accepted: wrapping could resurrect ancient
+grants.
 Membership-at-current-generation gates the whole lifecycle: issuance
 (registering a quota and its root grant) stamps the grant's
 `issuer_gen`; every draw (§4 step 2), delegation (§3), and top-up or
@@ -649,7 +664,9 @@ The following MUST hold before this RFC is considered satisfied:
 | Grant resurrection after issuer re-acceptance | Mitigated | Persistent registry retains the generation across absence; checked increment, permanent retirement on overflow; old grants never revalidate (§5) |
 | Stranded or minted gas on refund fault | Mitigated | Refund to `ceiling`; excess in immutable per-fault quarantine records (no accumulator to overflow); binding deleted; audit trace (§4) |
 | Stale yield after key re-addition | Mitigated | Dropped governance keys are never re-added; recovery rotates to fresh keys and re-issues QuotaCaps holding them (§3) |
-| Cached authorization outliving issuer removal | Mitigated | Cache hits independently recheck `expiry` and `issuer_gen` currency, or carry both in the cache key (§3) |
+| Cached authorization outliving issuer removal or expiry | Mitigated | Cache hits always verify `expiry` and `accepted` against current state; only generation-equality checks may live in the cache key (§3) |
+| Invalidation counter wrap | Mitigated | Revocation counter and `auth_epoch` are checked, non-wrapping; exhaustion flushes caches / retires the epoch mechanism (§3) |
+| Quarantined gas re-entering circulation | Mitigated | Quarantine records are audit-only, unspendable pending a deferred reconciliation procedure (§4) |
 | Arithmetic overflow bypassing limits | Mitigated | Checked arithmetic, refusal before mutation; `remaining ≤ ceiling` invariant (§4) |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
 | Exit artifact fabrication | Partial | Internal consistency is locally checkable for `Closure` artifacts, conditional on resolving every entry for `Manifest`; provenance needs the OPTIONAL `new_state_root` inclusion proof against a destination-accepted root (§8) |
@@ -665,9 +682,10 @@ The following are intentionally out of scope for this RFC and MUST be
 addressed in subsequent work:
 
 1. **Ledger record encoding** within the chain's σ, `IssuerId`
-   derivation, migration from the per-user `GasLedger` sketch, and the
+   derivation, migration from the per-user `GasLedger` sketch, the
    selection of `MAX_DELEGATION_DEPTH` with its worst-case
-   pre-admission validation cost.
+   pre-admission validation cost, and the reconciliation procedure for
+   quarantine records (audit-only until it exists — §4).
 2. **Constitutional reserve design.** Eligibility, sizing, per-Instance
    rate limits, deduplication, replenishment cadence, **funding source
    or authority**, rollover, exhaustion semantics, and the
@@ -732,3 +750,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.10) | Eighth recheck: accept-list membership gates issuance, draw, delegation, and top-up — issuer removal stops admissions and top-ups while loaded gas runs to terminal; checked arithmetic required throughout §4 with the `remaining ≤ ceiling` invariant; epoch defined concretely (`auth_epoch` in chain σ, stamped into bindings, equality at top-up, handlers check their current catch set) and renamed to immediate *authorization revocation*; manifest verification requires root traversal with discovered-set equality, and a `Manifest` artifact is a reference export, not self-contained; step 2 binds `g.limits.per_call_max` |
 | 2026-06-10 | Draft (v0.11) | Ninth recheck: cross-block reload revalidates the full top-up authorization before loading (refund + `DROP_RESUME` on failure); over-ceiling refund has a defined quarantine outcome (refund to `ceiling`, excess to `QuarantinedGas`, binding deleted, audit trace); issuer **generations** — removal bumps, authorization requires the grant's `issuer_gen` to be current, so removal permanently invalidates grants and re-acceptance requires re-issuance; delegation checklist includes the generation check and §5's citation corrected to §3; dropped governance keys are never re-added (rotation), closing the stale-yield-after-restore edge |
 | 2026-06-10 | Draft (v0.12) | Tenth recheck: cache hits recheck `issuer_gen` currency (or carry it in the cache key); quarantine restated as immutable per-fault records — no accumulator to overflow post-harvest; persistent `IssuerRegistry { accepted, generation }` retains generations across absence, with checked increment and permanent retirement on overflow; rotation completed by mandatory QuotaCap re-issuance with fresh senders; all repository paths corrected to `website/content/…` |
+| 2026-06-10 | Draft (v0.13) | Eleventh recheck: cache checks split by kind — `expiry` and `accepted` always verified against moving state, only generation-equality checks may live in the cache key; `retired` tombstone added to `IssuerRegistry`; revocation counter and `auth_epoch` made checked/non-wrapping with exhaustion semantics (cache flush / epoch retirement); quarantine records declared audit-only and unspendable pending a deferred reconciliation procedure. Reviewer concurrence: ready for wider Draft circulation |
