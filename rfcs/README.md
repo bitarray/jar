@@ -14,7 +14,7 @@ as a snapshot of thinking at the time it was written.
 The normative design lives elsewhere:
 
 - The formal specification is in [`spec/`](../spec).
-- The decided distribution and review process is in [`docs/genesis.md`](../docs/genesis.md).
+- The decided distribution and review process is in [`/Genesis.md`](../Genesis.md).
 
 When an RFC's idea is actually adopted, that decision shows up in those sources —
 not by promoting the RFC in place.

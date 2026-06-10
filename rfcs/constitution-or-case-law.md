@@ -4,7 +4,7 @@
 
 ## The question
 
-`docs/genesis.md` describes an unusually rigorous procedure. Linear weight to neutralise Sybil splitting; ranked rather than scalar review; weighted lower-quantile aggregation that is BFT-safe under the same 50% / 66% thresholds as PoS; dilution as ongoing cost; meta-reviews to filter biased reviewers. Taken on its own terms it is one of the more careful Sybil-resistant scoring designs published for a contributor token.
+`/Genesis.md` describes an unusually rigorous procedure. Linear weight to neutralise Sybil splitting; ranked rather than scalar review; weighted lower-quantile aggregation that is BFT-safe under the same 50% / 66% thresholds as PoS; dilution as ongoing cost; meta-reviews to filter biased reviewers. Taken on its own terms it is one of the more careful Sybil-resistant scoring designs published for a contributor token.
 
 But it raises a question the document does not directly answer:
 
@@ -67,7 +67,7 @@ The cold-start problem is the strongest counter-argument. In the current phase J
 
 ## Recommendation
 
-Treat `docs/genesis.md` as the constitution of process and add — separately, deliberately thin, and explicitly subject to revision by the case law it seeds — a constitution of content. A working name: **the Reviewer's Compass**.
+Treat `/Genesis.md` as the constitution of process and add — separately, deliberately thin, and explicitly subject to revision by the case law it seeds — a constitution of content. A working name: **the Reviewer's Compass**.
 
 It should pin down only three things:
 
