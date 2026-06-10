@@ -4,25 +4,27 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft                                      |
-| Date       | 2026-06-09                                 |
-| Affects    | — (introduces new semantics; amends no existing document. If adopted, lands in `spec/` and `website/content/spec/`.) |
+| Status     | Draft (v0.2)                               |
+| Date       | 2026-06-10                                 |
+| Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
 ---
 
 ## Abstract
 
-This RFC defines how shared compute is admitted and governed in JAR without
-a universal economic numeraire. Admission compares only canonical gas
-demand — never heterogeneous economic value. Gas quotas are conserved
-quantities held in issuer authority state and debited by authority
-bytecode, in line with JAR's discipline that conservation is bytecode
-arithmetic in canonical authorities. Credit references held by Instances
-are content-addressed values that name a quota; copying the reference
-never copies the balance.
+This RFC specifies the chain-orchestrator layer for admitting shared
+compute without a universal economic numeraire. Admission compares only
+canonical gas demand — never heterogeneous economic value. Persistent gas
+quotas live in the chain's `GasLedger` (chain σ), extended from
+per-user balances to multi-issuer `(issuer, quota_id)` records. Spending
+rights are conveyed by the generic authority-capability pattern —
+`Cap::Instance` with an embedded `YieldSender` — never by data content or
+type identity. Execution metering is the existing kernel-assisted
+`GasMeter` flow, unchanged: the chain loads a meter from the quota at
+admission and harvests the remainder at completion.
 
-Quota semantics are specified here. Record encoding, storage layout, and
-atomic debit mechanics are deferred.
+Quota semantics and the admission discipline are specified here. Ledger
+encoding and issuer onboarding policy are deferred.
 
 ---
 
@@ -36,31 +38,53 @@ atomic debit mechanics are deferred.
 
 ---
 
+## Relationship to the Existing Design
+
+This RFC adds **no kernel mechanism**. It builds on four things v3
+already specifies, and changes none of them:
+
+1. **The kernel-assisted `GasMeter`** (`spec/_index.md` §22,
+   `gas-cost.md`): per-block fast-path debiting against an ephemeral
+   kernel table; `Gas{meter_key}` unit handles whose copies all name the
+   same meter; `kernel:mint_gas` / `kernel:set_gas_meter`; the
+   `kernel:oog` yield. Conservation already lives in the meter, not the
+   cap. This RFC sits entirely *above* that flow.
+2. **The `GasLedger`** (`kernel-assisted-instances.md`, `cap-scopes.md`):
+   the chain's own σ-resident Instance holding persistent balances,
+   lazy-loaded into meters per invocation via the OOG-catch pattern, and
+   harvested back with the atomic set+read of `kernel:set_gas_meter`.
+   This RFC is a specification of that ledger's record structure and
+   admission discipline.
+3. **The generic authority pattern**
+   (`userspace/generic-authority-pattern.md`): privileged rights are
+   conveyed by possession of `Cap::Instance[AuthorityCap]` with a
+   `YieldSender` embedded opaquely in its cnode. Type identity
+   (`image_hash`) identifies and never authorizes. Spending rights here
+   follow this pattern exactly.
+4. **Coinless allocation** (`docs/coinless.md`): transactions are free by
+   default; validators allocate core-time under congestion through a
+   bilateral market. This RFC governs *metering of admitted execution*,
+   not inclusion, and does not replace that market (§7).
+
+---
+
 ## Motivation
 
 Most chain admission designs price access through a market-clearing token
-price, coupling consensus liveness to external economic conditions. Three
-properties of JAR's minimum-kernel v3 architecture make that coupling
-unnecessary and harmful:
+price, coupling consensus liveness to external economic conditions. JAR
+already avoids this for execution metering — gas is canonical, kernel
+charged, and identical across the interpreter and recompiler — and for
+inclusion, which is free by default. What v3 leaves open is the layer
+between them: *who may draw how much gas, granted by whom, under what
+governance*. The `GasLedger` is sketched as "persistent gas balances per
+user" with policy explicitly unspecified.
 
-- **`MGMT_COPY` shares content; mutations diverge.** All cap kinds are
-  uniformly copyable content-addressed values. Any balance embedded in a
-  cap's value is duplicated by every copy — a structural over-issuance
-  vector. Balances therefore cannot live inside cap values at all.
-- **Conservation is bytecode arithmetic in canonical authorities.** JAR
-  already states where conserved quantities belong: in authority
-  bytecode, not in the values that reference them. Gas quotas are
-  conserved quantities and must follow the same discipline.
-- **Execution is heterogeneous; gas is canonical.** The JAVM interpreter
-  and the x86-64 JIT recompiler must charge identically, and future
-  backends must too. A single canonical gas measure already serves this;
-  layering a price on top adds nothing to admission and imports market
-  volatility into liveness.
-
-Separately, constitutional operations — contesting a governance decision,
-or refusing one and exiting — must remain accessible to Instances that
-hold no credit. Gating them behind balances turns them into plutocratic
-levers.
+Filling that gap badly would import a numeraire: a single mandatory
+issuer, a market-priced balance, or admission gated on economic value
+would each couple liveness to economics. This RFC fills it without one:
+multiple issuers, canonical-gas-denominated quotas, possession-based
+spending authority, and a constitutional reserve that keeps contestation
+and exit credit-free.
 
 ---
 
@@ -68,135 +92,204 @@ levers.
 
 ### 1. Governance Domains
 
-A **governance domain** is an analytical grouping of:
+A **governance domain** is an analytical grouping: one or more issuer
+authority Instances together with the Instances whose gas access they
+govern and the policy records they hold. Domains introduce no new cap
+kind and no new object; they are an organisational lens. Domain
+membership and issuer policy are chain-orchestrator state, opaque to the
+kernel.
 
-- one or more Instances sharing a common authority lineage — an
-  `image_hash` chain rooted at a common ancestor;
-- the Image lineages governed under that root;
-- the issuer and policy records those Instances hold.
+### 2. Quota Records (GasLedger Extension)
 
-Domains introduce no new cap kind and no new on-chain object. They are an
-organisational lens over existing Instance and lineage relationships.
-
-### 2. Gas Quota Records
-
-A **gas quota record** is a conserved-quantity record held in the state
-(cnode) of an **issuer authority Instance**, keyed by a domain-unique
-`quota_id`. It stores:
-
-- `remaining`: canonical gas units still available;
-- `ceiling`: maximum ever valid, set at issuance and immutable under
-  delegation.
-
-Quota records live only in issuer authority state. They MUST NOT be
-embedded in any content-addressed cap value. All arithmetic on
-`remaining` MUST be performed by the issuer authority's bytecode,
-consistent with conservation being bytecode arithmetic in canonical
-authorities.
-
-### 3. Gas Credit References
-
-A **gas credit reference** is a content-addressed value (carried as
-`Cap::Data`) naming a quota:
+The `GasLedger` record is keyed by `(issuer, quota_id)` rather than by
+user alone:
 
 ```
-GasCreditRef = { issuer_instance, quota_id }
+GasLedger : Map<(IssuerId, QuotaId), QuotaRecord>
+QuotaRecord = { remaining : u64    -- canonical gas units
+              , ceiling   : u64 }  -- set at issuance; immutable thereafter
 ```
 
-It introduces no fifth cap kind; the four kinds (Instance, Image, Data,
-CNode) are unchanged.
+- `IssuerId` names an accepted issuer authority Instance (§5).
+- `remaining` and all arithmetic on it live in the ledger — chain σ —
+  never in any cap value, mirroring the meter discipline ("conservation
+  lives in GasMeter, not in the cap").
+- The ledger is the chain's own Instance state; updates occur inside the
+  chain's sequential accumulate, so ledger operations are serialized by
+  construction.
 
-`MGMT_COPY` applied to a value containing a `GasCreditRef` MUST copy the
-reference only; the quota record MUST NOT be duplicated, because it never
-resided in the copied value. All references naming the same
-`(issuer_instance, quota_id)` MUST draw from one record. Delegation
-narrows what a holder may spend; it MUST NOT create independent gas: a
-narrower reference still names the original quota identity.
+### 3. Spending Authority (QuotaCap)
 
-### 4. Metering and Debit
+A **QuotaCap** is an AuthorityCap per the generic authority pattern:
 
-Gas is debited in canonical gas units as committed by execution. This
-measure MUST be identical across the JAVM interpreter and the JIT
-recompiler, and any future backend MUST charge the same canonical unit.
-This RFC does not change the gas model itself.
+```
+QuotaCap = Cap::Instance[QuotaCapImage]
+  state:
+    sender    : YieldSender{quota:draw}   -- embedded in cnode, opaque
+    issuer    : IssuerId
+    quota_id  : QuotaId
+    limits    : { per_call_max : u64      -- attenuation fields
+                , expiry       : BlockNo
+                , ...           }
+  bytecode:
+    draw(requested) → status
+      -- clamp requested against limits; compose
+      -- {issuer, quota_id, requested}; host_yield(sender)
+```
 
-Record encoding, concurrency rules, atomic debit, fault behaviour, and
-migration are deferred (§Deferred Work, item 1).
+- Spending authority is **possession** of the QuotaCap, conveyed by
+  cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
+  treated as the credential; the credential is the embedded
+  `YieldSender`, accessible only to the QuotaCap's own bytecode.
+- The `quota:draw` key is registered in the chain's `YieldReceiver` at
+  chain init. The chain MUST honor a draw only when it arrives as a
+  yield under that key — i.e. only through a QuotaCap's bytecode. Data
+  content claiming `(issuer, quota_id)` carries no authority.
+- `MGMT_COPY` of a QuotaCap copies the Instance; all copies share the
+  embedded sender and name the same `(issuer, quota_id)` record, so a
+  copy can never increase any balance — the same property the
+  `Gas{meter_key}` handle already has.
+- **Delegation** is derivation: a holder spawns a child QuotaCap
+  (`host_derive_spawn`) whose `limits` are equal or narrower and whose
+  bytecode clamps before yielding. The child names the same quota
+  identity; narrowing MUST NOT create independent gas. Revocation
+  follows cap-scopes discipline: the issuer requests key drop or the
+  chain expires the cap by `expiry`.
 
-### 5. Admission
+### 4. Admission, Load, and Harvest
 
-An operation MUST be admitted only if the quota record named by its
-credit reference has sufficient `remaining` at admission time. Admission
-reads the record and MUST NOT modify it. Debit occurs at execution
-commitment.
+Admission extends the existing lazy-load OOG-catch flow. For an
+operation presenting a QuotaCap:
 
-Multiple accepted issuer authorities MUST be permitted within and across
-domains. Proof-of-Intelligence contribution attestation is one initial
-issuance route and MUST NOT be treated as mandatory or exclusive.
+```
+1. Caller's QuotaCap.draw(requested) yields quota:draw.
+2. Chain catches; looks up GasLedger[(issuer, quota_id)].
+3. RESERVE: if remaining < requested → refuse admission.
+   Else remaining -= requested.                   -- the reservation
+4. Chain mints/reuses meter_key; emit kernel:set_gas_meter(meter_key,
+   requested); CALL target with the Gas cap in its gas_slots.
+5. Execution debits the meter per block (kernel fast path, unchanged).
+   On kernel:oog the chain MAY repeat 2–4 for a further reservation.
+6. On HALT/fault: harvested = emit kernel:set_gas_meter(meter_key, 0).
+7. GasLedger[(issuer, quota_id)].remaining += harvested.
+```
 
-Consensus compares canonical gas demand only. Issuer policies, and any
-assets or accounting internal to a domain, MUST NOT be observable by
-consensus and MUST NOT influence metering.
+The reservation at step 3 is the admission decision. Because reserve and
+refund are ledger writes inside the chain's sequential accumulate, two
+operations drawing on one quota cannot both pass against the same
+`remaining` — there is no check/debit window. Gas consumed by a faulted
+apply is not refunded beyond the harvest, consistent with the meter's
+STM-exemption.
 
-### 6. Issuer Governance
+Multiple accepted issuers MUST be permitted. Proof-of-Intelligence
+contribution attestation is one issuance route and MUST NOT be treated
+as mandatory or exclusive. Issuer policies and domain-internal
+accounting MUST NOT influence metering: the kernel sees only meters.
 
-Changes to the set of accepted issuer authorities MUST use a
-**two-authority procedure**, defined here:
+### 5. Issuer Governance
 
-1. A ballot record identifying the proposed change, produced by an
-   Instance in one authority lineage.
-2. An independent quorum witness attesting the ballot's quorum, produced
-   by an Instance whose `image_hash` lineage root is distinct from the
-   ballot producer's.
-3. Both records MUST be retained so the change is auditable end to end.
+The chain maintains an **issuer accept-list**: the set of `IssuerId`s
+whose quotas the chain will load. Changes to the accept-list MUST use a
+**two-authority procedure**:
 
-A single lineage MUST NOT supply both records.
+1. A **ballot**: a yield under a governance key (e.g. `gov:ballot`)
+   identifying the proposed change, emitted via an AuthorityCap held by
+   the proposing authority Instance.
+2. An independent **quorum witness**: a yield under a distinct key
+   (e.g. `gov:witness`) attesting the ballot's quorum, emitted via an
+   AuthorityCap whose `YieldSender` was minted under a separately
+   controlled key and granted to a different authority Instance.
 
-Issuer-policy proposals are ordinary admissions: they MUST consume normal
-credit under §5. Contesting such a proposal is a constitutional operation
-under §7. The asymmetry is intentional (see Discussion).
+Independence is **possession of separately controlled yield keys** —
+never lineage: two Instances of distinct `image_hash` roots may be under
+one party's control, and `image_hash` MUST NOT be read as a credential.
+The chain MUST verify the two yields arrived under the two distinct
+registered keys, and MUST retain both records so the change is auditable
+end to end. A single AuthorityCap holder MUST NOT be granted both keys.
 
-### 7. Constitutional Budget
+Issuer-policy proposals are ordinary admissions: they MUST draw on
+normal quota under §4. Contesting such a proposal is a constitutional
+operation under §6.
 
-The **constitutional budget** is a reserved gas allowance, independent of
-any issuer's quota, that funds exactly two operation classes:
+### 6. Constitutional Reserve
 
-- **Contestation**: challenging a pending or enacted governance decision,
-  including issuer-policy changes.
-- **Refusal and exit**: declining an authority succession and exporting
-  state.
+The **constitutional reserve** is a ledger record under the chain's own
+authority — seeded per chain spec like `root_meter_key`'s block budget,
+not issued by any accept-listed issuer — that funds exactly two
+operation classes:
 
-The budget MUST NOT fund issuer-policy proposals or any other ordinary
-admission.
+- **Contestation**: challenging a pending or enacted governance
+  decision, including issuer accept-list changes.
+- **Refusal and exit**: declining a governance succession and exporting
+  state (§7).
+
+The reserve MUST NOT fund issuer-policy proposals or other ordinary
+admissions.
 
 | Operation                        | Funding               |
 |----------------------------------|-----------------------|
-| Propose issuer-policy change     | Ordinary credit (§5)  |
-| Contest a governance decision    | Constitutional budget |
-| Refuse a succession / exit       | Constitutional budget |
+| Propose issuer-policy change     | Ordinary quota (§4)   |
+| Contest a governance decision    | Constitutional reserve |
+| Refuse a succession / exit       | Constitutional reserve |
 
 A delayed constitutional operation MUST eventually be includable without
-the consent of the authority it contests. The mechanism guaranteeing this
-(forced inclusion after a timeout) is an open dependency of this RFC and
-is not specified here (§Deferred Work, item 2).
+the consent of the authority it contests. Because inclusion is
+validator discretion (`docs/coinless.md`), this requires a
+protocol-level inclusion guarantee for reserve-funded operations; that
+mechanism is an open dependency, not specified here (§Deferred Work,
+item 2).
 
-**Exit guarantee.** An **exit artifact** is a minimal self-contained
-export of an Instance: its current Image and the contents of its cnode,
-verifiable against its `image_hash` chain. Exit-artifact creation,
-verification, and minimal import into another domain MUST NOT be
-conditioned on an external agreement or on the caller's credit balance.
+### 7. Relationship to Coinless Allocation
 
-### 8. Out of Scope
+This RFC **complements** `docs/coinless.md`; it does not amend it:
 
-The following are explicitly outside kernel and consensus semantics:
+- **Inclusion stays free by default.** Quota admission gates how much
+  *execution* an operation may perform once the chain processes it; it
+  is not an inclusion fee and MUST NOT be used as one.
+- **The core-time market is untouched.** Under congestion, validators
+  allocate inclusion via bilateral core-time payment, before and
+  independently of quota admission. Quota does not price, replace, or
+  guarantee core-time.
+- Both gates apply in sequence: core-time (who gets included, under
+  congestion) then quota (how much gas the included operation may
+  draw). A zero-congestion chain with generous issuers reproduces
+  coinless's free-by-default behaviour exactly.
+
+### 8. Exit
+
+An **exit artifact** is a self-contained export of an Instance:
+
+```
+ExitArtifact = { image          : Image        -- current spec
+               , cnode          : CNode        -- current state
+               , lineage_witness : [ImageHash] -- ordered, root-first
+               }
+```
+
+Because `image_hash` is the cumulative chain hash and lineage walking is
+off-chain or userspace (there is no `host_is_template_of`), the artifact
+MUST carry a **lineage witness**: the ordered image hashes from root
+such that folding `hash(acc || hash(image))` reproduces the Instance's
+attested `image_hash`. Verification is that re-fold plus a content check
+of `image` against the final element.
+
+**Guarantees.** Exit-artifact creation and verification MUST NOT be
+conditioned on an external agreement or on the holder's quota balance
+(reserve-funded, §6). Import is subject to the destination's acceptance
+policy; what is guaranteed is narrower: a destination that accepts the
+artifact format MUST be able to verify and instantiate it without the
+*originator* holding quota in either domain. Unconditional import
+everywhere is **not** claimed.
+
+### 9. Out of Scope
 
 - Issuance valuation, exchange, transfer, redemption, collateralization,
-  and merging of credit;
+  and merging of quota;
 - provider capacity allocation and leases;
-- core-time assignment, scheduling markets, and capacity authorities.
-
-Nothing in this RFC adds a cap kind, changes `MGMT_COPY`, or alters the
-`image_hash` chain rules.
+- core-time assignment and scheduling markets (governed by
+  `docs/coinless.md`'s bilateral market, untouched per §7);
+- any change to kernel semantics: no new cap kind, no new `kernel:*`
+  syscall, no change to `GasMeter`, gas costs, or `MGMT_COPY`.
 
 ---
 
@@ -204,23 +297,28 @@ Nothing in this RFC adds a cap kind, changes `MGMT_COPY`, or alters the
 
 The following MUST hold before this RFC is considered satisfied:
 
-1. **No quota duplication.** `MGMT_COPY` involving a `GasCreditRef` MUST
-   NOT increase the `remaining` of any quota record.
-2. **Shared-identity bound.** Two delegated references naming the same
-   `quota_id` MUST NOT collectively cause `remaining` to go negative.
-3. **Domain opacity.** Distinct issuer policies and domain-internal
-   assets MUST NOT be observable by consensus and MUST NOT influence gas
-   metering.
-4. **Admission symmetry.** A normally funded issuer-policy proposal MUST
-   use ordinary admission; a credit-starved challenge of that same policy
-   MUST be able to use the constitutional budget with no market-price
-   gate.
-5. **Exit independence.** A credit-starved Instance MUST be able to
-   create, verify, and minimally import exit artifacts without acquiring
-   credit from any external party.
-6. **No overclaiming.** Normative text in this RFC MUST NOT claim
-   guaranteed market plurality, coinlessness, core-time allocation, or
-   stronger censorship resistance than baseline JAR.
+1. **No quota duplication.** No sequence of `MGMT_COPY` on QuotaCaps
+   increases the `remaining` of any `GasLedger` record.
+2. **Shared-identity bound.** Two QuotaCaps naming one
+   `(issuer, quota_id)` cannot collectively over-reserve it: the §4
+   reservation serializes in chain accumulate.
+3. **No data-forged authority.** A `Cap::Data` containing
+   `(issuer, quota_id)` bytes obtains no draw: only a yield under the
+   registered `quota:draw` key is honored.
+4. **Domain opacity.** Issuer policies and domain-internal accounting
+   are invisible to the kernel and do not alter any meter charge.
+5. **Admission symmetry.** A normally funded issuer-policy proposal
+   draws ordinary quota; a quota-starved challenge of that same policy
+   draws the constitutional reserve, with no market-price gate.
+6. **Exit independence.** A quota-starved Instance can create and verify
+   an exit artifact (with lineage witness), and a format-accepting
+   destination can instantiate it, without the originator holding quota.
+7. **Coinless preserved.** Under zero congestion and sufficient quota,
+   observable behaviour matches `docs/coinless.md`'s free-by-default
+   model; the core-time market is unmodified.
+8. **No overclaiming.** Normative text MUST NOT claim guaranteed market
+   plurality, core-time allocation, or stronger censorship resistance
+   than baseline JAR.
 
 ---
 
@@ -228,14 +326,16 @@ The following MUST hold before this RFC is considered satisfied:
 
 | Threat | Status | Notes |
 |--------|--------|-------|
-| Balance duplication via `MGMT_COPY` | Mitigated | Quota records never reside in copied values (§2, §3) |
-| Collective overspend through delegation | Mitigated | One record per quota identity; debit is issuer-authority bytecode (§3) |
-| Issuer accept-list capture by a single lineage | Partial | Two-authority procedure with distinct lineage roots (§6); collusion across lineages remains possible |
-| Quota exhaustion under adversarial issuance timing | Partial | Admission-time check only; atomic debit mechanics deferred |
-| Exit blocked by quota shortage in the receiving domain | Partial | Minimal import is credit-free (§7); richer import is not guaranteed |
-| Constitutional-budget spam (repeated low-cost contests) | Open | Eligibility, rate limits, and deduplication deferred |
-| Budget eligibility, sizing, replenishment, exhaustion unspecified | Open | Deferred Work, item 2 |
-| Forced inclusion of delayed constitutional operations | Open | Mechanism not specified here; named dependency of §7 |
+| Balance duplication via `MGMT_COPY` | Mitigated | Balances live in `GasLedger`/`GasMeter`, never in cap values (§2, §3) |
+| Forged spending authority from data content | Mitigated | Authority is possession of the embedded `YieldSender` (§3); data carries none |
+| Check/debit race on one quota | Mitigated | Reservation at admission inside sequential accumulate (§4) |
+| Collective overspend through delegation | Mitigated | Children name the same record; clamps only narrow (§3) |
+| Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
+| Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
+| Exit verification spoofing | Partial | Lineage witness re-fold (§8); the destination still needs the trusted root out of band |
+| Constitutional-reserve spam | Open | Eligibility, rate limits, deduplication deferred |
+| Reserve sizing, replenishment, exhaustion | Open | Deferred Work, item 2 |
+| Censorship of reserve-funded operations | Open | Inclusion is validator discretion; the §6 inclusion guarantee is an unspecified dependency |
 
 ---
 
@@ -244,49 +344,51 @@ The following MUST hold before this RFC is considered satisfied:
 The following are intentionally out of scope for this RFC and MUST be
 addressed in subsequent work:
 
-1. **Quota record mechanics.** Encoding, storage layout within the issuer
-   cnode, concurrency rules, atomic debit, fault behaviour, and migration
-   path.
-2. **Constitutional budget design.** Eligibility, sizing, per-Instance
-   rate limits, deduplication, replenishment cadence, funding source or
-   authority, rollover, exhaustion semantics, and the forced-inclusion
-   mechanism for delayed constitutional operations.
+1. **Ledger record encoding** within the chain's σ, `IssuerId`
+   derivation, and migration from the per-user `GasLedger` sketch.
+2. **Constitutional reserve design.** Eligibility, sizing, per-Instance
+   rate limits, deduplication, replenishment cadence, rollover,
+   exhaustion semantics, and the protocol-level inclusion guarantee for
+   reserve-funded operations under validator-discretion inclusion.
 3. **Issuer onboarding.** Evidence requirements and the
    contribution-attestation issuance policy.
-4. **Multidimensional metering.** Any future extension to multiple
-   resource dimensions MUST be specified independently, with canonical
-   units and cross-architecture charging proofs.
+4. **Multidimensional metering.** Any extension beyond gas (e.g. storage
+   quota issuance through the same ledger) MUST be specified
+   independently, with canonical units and cross-architecture charging
+   proofs.
 
 ---
 
 ## Discussion
 
-This RFC deliberately avoids the word "token" in normative context. Gas
-quota records are protocol-internal conserved quantities, not
-transferable bearer instruments. Whether any external economic layer maps
-onto them is a product decision outside kernel semantics.
+This RFC deliberately avoids the word "token" in normative context.
+Quota records are protocol-internal conserved quantities denominated in
+canonical gas, not transferable bearer instruments; whether any economic
+layer maps onto them is a service-layer concern, where `coinless.md`
+already places token economics.
 
-The placement of quota records follows directly from two v3 commitments:
-values are content-addressed and uniformly copyable, and conservation is
-bytecode arithmetic in canonical authorities. Put together, a balance can
-only live where bytecode guards it — in an authority Instance's state —
-and anything an ordinary Instance holds can only be a name for it.
+v0.1 of this draft reinvented both halves of the machinery this version
+reuses: it held balances in issuer cnode records referenced by
+`Cap::Data` content, and checked authority independence by `image_hash`
+lineage. Both were architecture violations — data content is forgeable
+by construction, and v3 states flatly that type identity never
+authorizes. The corrected design is smaller: the kernel meter already
+solves copy-safe debiting, the `GasLedger` already names the persistence
+layer, and the authority pattern already solves unforgeable spending
+rights. What remained genuinely unspecified — and is this RFC's actual
+content — is the record structure, the issuer plurality, the
+reservation discipline, and the constitutional asymmetry.
 
-The two-authority procedure reuses the structural forgery resistance JAR
-already has: lineage identity is the `image_hash` chain, so "independent
-authority" is checkable as "distinct lineage root" without introducing a
-registry.
+That asymmetry (ordinary quota for proposals, reserve access for
+challenges) is the mechanism that prevents a well-capitalised issuer
+coalition from buying immunity to challenge. Proposals cost quota
+because spam prevention matters. Challenges are reserve-funded because
+the ability to contest must not depend on the outcome of the thing being
+contested.
 
-The constitutional-budget asymmetry (ordinary credit for proposals, free
-access for challenges) is not a quirk — it is the mechanism that prevents
-a well-capitalised issuer coalition from buying immunity to challenge.
-Proposals cost credit because spam prevention matters. Challenges are
-free because the ability to contest must not depend on the outcome of the
-thing being contested.
-
-A note on naming: this RFC says "contestation" and "refusal/exit" for the
-constitutional operation classes, and never "commitment", which in JAR
-already means a Merkle commitment/root/proof over CNode state.
+A note on naming: this RFC says "contestation" and "refusal/exit" for
+the constitutional operation classes, and never "commitment", which in
+JAR already means a Merkle commitment/root/proof over CNode state.
 
 ---
 
@@ -296,3 +398,4 @@ already means a Merkle commitment/root/proof over CNode state.
 |------------|--------|------|
 | 2026-06-09 | Draft  | Initial filing |
 | 2026-06-09 | Draft  | Rewritten self-contained against JAR's v3 model; external cross-references removed |
+| 2026-06-10 | Draft (v0.2) | Re-founded on existing machinery after review: quota as `GasLedger` extension with load/harvest bridge, spending authority via the generic AuthorityCap pattern, key-possession independence (not `image_hash`), reservation at admission, lineage-witness exit artifacts, explicit coinless positioning, honest `Affects` |
