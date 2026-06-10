@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.5)                               |
+| Status     | Draft (v0.6)                               |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -136,7 +136,11 @@ QuotaCap = Cap::Instance[QuotaCapImage]
   bytecode:
     draw(requested) → status
       -- clamp requested against limits; compose
-      -- {issuer, quota_id, grant_id, requested}; host_yield(sender)
+      -- {issuer, quota_id, grant_id, requested,
+      --  authorized: limits.per_call_max}; host_yield(sender)
+      -- `authorized` is trustworthy because only this bytecode can
+      --  yield under quota:draw; the chain stores it in the binding
+      --  to bound cumulative top-ups (§4)
     delegate(narrower_limits) → Cap::Instance[QuotaCap]
       -- validate narrower_limits ⊆ self.limits, else fault;
       -- compose {issuer, quota_id, grant_id, narrower_limits};
@@ -190,24 +194,30 @@ operation presenting a QuotaCap:
 
 ```
 1. Caller's QuotaCap.draw(requested) yields quota:draw.
-2. Chain catches; checks grant_id against the revocation set; looks up
-   GasLedger[(issuer, quota_id)].
+2. Chain catches; checks grant_id against the revocation set and
+   expiry; looks up GasLedger[(issuer, quota_id)].
 3. RESERVE: if remaining < requested → refuse admission.
    Else remaining -= requested.                   -- the reservation
 4. Chain picks a meter_key that is LIVE-UNIQUE — bound by no other
    active reservation (meter_key collisions silently alias) — and
-   records the binding:
+   records the binding, carrying the FULL authorization context:
      ActiveReservations[meter_key] :=
-       { issuer, quota_id, reserved: requested, residue: 0 }
+       { issuer, quota_id, grant_id, authorized,
+         reserved: requested, residue: 0 }
    emit kernel:set_gas_meter(meter_key, requested);
    CALL target with the Gas cap in its gas_slots.
 5. Execution debits the meter per block (kernel fast path, unchanged).
    On kernel:oog the target is Waiting with its origin slot reserved;
-   the chain MUST NOT CALL it again. To continue, reserve more
-   (repeat 2–3 for `additional`), then top up and resume:
+   the chain MUST NOT CALL it again. The kernel:oog payload carries
+   only the Gas handle, so every authorization fact for a top-up
+   comes from the binding. To continue with `additional`:
+     b = ActiveReservations[meter_key]
+     re-check b.grant_id: unrevoked, unexpired   -- else DROP_RESUME
+     require b.reserved + additional ≤ b.authorized -- else DROP_RESUME
+     RESERVE additional from GasLedger[(b.issuer, b.quota_id)] (as in 3)
      residue = emit kernel:set_gas_meter(meter_key, 0)
      emit kernel:set_gas_meter(meter_key, residue + additional)
-     ActiveReservations[meter_key].reserved += additional
+     b.reserved += additional
    CALL_RESUME. To stop, DROP_RESUME and fall through to 6–7.
 6. On HALT/fault/drop:
      harvested = emit kernel:set_gas_meter(meter_key, 0)
@@ -341,7 +351,8 @@ An **exit artifact** is a self-contained export of an Instance:
 ```
 ExitArtifact = { image           : Image          -- current spec
                , cnode           : CNode          -- current state (root)
-               , closure         : Map<Hash, Value> -- reachable content
+               , content         : Closure(Map<Hash, Value>)  -- values
+                                 | Manifest(Set<Hash>)        -- hashes only
                , lineage_witness : [ImageHash]    -- ordered, root-first
                , provenance      : Option<
                    { source_root     : Hash       -- a source new_state_root
@@ -351,21 +362,31 @@ ExitArtifact = { image           : Image          -- current spec
 
 Because `image_hash` is the cumulative chain hash and lineage walking is
 off-chain or userspace (there is no `host_is_template_of`), the artifact
-MUST carry a **lineage witness**: the ordered image hashes from root
-such that folding `hash(acc || hash(image))` reproduces the Instance's
-attested `image_hash`. Verification is that re-fold plus a content check
-of `image` against the final element.
+MUST carry a **lineage witness** `[h₀ … hₙ]`: the ordered image hashes
+from root, each `hᵢ = hash(imageᵢ)`. The fold is over the
+already-hashed entries, with the genesis accumulator defined as the
+root entry:
+
+```
+acc₀ = h₀
+accᵢ = hash(accᵢ₋₁ || hᵢ)        for i = 1 … n
+```
+
+(equivalent to the spec's `hash(acc || hash(image))` with `hᵢ`
+substituted for `hash(imageᵢ)`). Verification is that `accₙ` equals the
+Instance's attested `image_hash`, plus the content check
+`hash(image) = hₙ`.
 
 The root cnode is not self-contained: its slots hold caps referencing
 further content-addressed values (Instance, Image, Data, CNode), which
-in turn reference others. The artifact MUST either carry the
-**reachable content closure** — every value transitively referenced from
-the root cnode and `image` — or declare itself a **manifest**: the root
-plus the content hashes of the closure, importable only where those
-entries are already installed or supplied alongside. Closure entries are
-self-verifying by content hash; the lineage witness attests the *root*
-Instance only — nested Instances in the closure are imported as content,
-with no lineage claim of their own.
+in turn reference others. The `content` field carries this in one of
+two variants: **`Closure`** — every value transitively referenced from
+the root cnode and `image` — or **`Manifest`** — the content hashes of
+that closure only, importable only where those entries are already
+installed or supplied alongside. Content entries are self-verifying by
+content hash; the lineage witness attests the *root* Instance only —
+nested Instances in the content are imported as values, with no lineage
+claim of their own.
 
 **Verification has two levels, and the artifact alone gives only the
 first.** The re-fold and content checks above establish **internal
@@ -457,6 +478,9 @@ The following MUST hold before this RFC is considered satisfied:
 12. **Boundary conservation.** A reservation paused across a block
     boundary loses no gas and gains none: pre-harvested residue equals
     the amount reloaded at resume (or refunded and re-reserved).
+13. **Top-up authorization.** A paused operation cannot, through
+    top-ups, exceed its grant's `authorized` ceiling or continue on a
+    grant that has been revoked or has expired since admission.
 
 ---
 
@@ -471,6 +495,7 @@ The following MUST hold before this RFC is considered satisfied:
 | Collective overspend through delegation | Mitigated | Delegation only via the cap's own `delegate` endpoint; clamps only narrow (§3) |
 | Coarse revocation via shared `quota:draw` key drop | Partial | Key drop is an explicit global kill switch; per-grant revocation is ledger-side by `grant_id` (§3) |
 | Revocation bypass via local delegation | Mitigated | `grant_id`s are chain-issued with recorded ancestry; revocation covers descendants (§3) |
+| Top-up bypassing grant limits or revocation | Mitigated | Binding carries `grant_id` + `authorized`; every top-up re-checks revocation/expiry and the cumulative ceiling (§4) |
 | Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
 | Exit artifact missing referenced state | Mitigated | Reachable content closure carried, or explicit manifest semantics (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
@@ -546,3 +571,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.3) | Recheck fixes: live-unique `meter_key` with `ActiveReservations` binding, OOG continues by top-up + `CALL_RESUME` (never re-`CALL`), delegation via the QuotaCap's own `delegate` endpoint (sender is opaque to holders), import narrowed to re-instantiation under the destination lineage, revocation granularity of the shared `quota:draw` key made explicit with per-grant `grant_id` |
 | 2026-06-10 | Draft (v0.4) | Second recheck: delegation chain-mediated (`quota:delegate`) with chain-issued `grant_id`s, ancestry, and descendant revocation; cross-block pauses handled by pre-boundary harvest into the persistent binding + reload at resume; exit artifact carries the reachable content closure or is an explicit manifest; reserve funding source/authority restored to Deferred Work |
 | 2026-06-10 | Draft (v0.5) | Third recheck: exit verification split into internal consistency (artifact-local) vs provenance (OPTIONAL `new_state_root` + inclusion proof against a destination-accepted root); `quota:delegate` registration made explicit alongside `quota:draw`; boundary reload resets `residue` to distinguish parked from loaded, and the entry-vs-handle wipe semantics clarified (no re-mint needed) |
+| 2026-06-10 | Draft (v0.6) | Fourth recheck: `ActiveReservations` carries the full authorization context (`grant_id`, `authorized` from the draw payload) so OOG top-ups re-check revocation/expiry and the cumulative ceiling; lineage-witness fold restated over already-hashed entries with `acc₀ = h₀` defined explicitly; artifact `content` modelled as `Closure \| Manifest` variants |
