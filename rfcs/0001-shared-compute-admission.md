@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.3)                               |
+| Status     | Draft (v0.4)                               |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -125,10 +125,11 @@ A **QuotaCap** is an AuthorityCap per the generic authority pattern:
 ```
 QuotaCap = Cap::Instance[QuotaCapImage]
   state:
-    sender    : YieldSender{quota:draw}   -- embedded in cnode, opaque
+    sender    : YieldSender{quota:draw}     -- embedded in cnode, opaque
+    dsender   : YieldSender{quota:delegate} -- likewise opaque
     issuer    : IssuerId
     quota_id  : QuotaId
-    grant_id  : GrantId                   -- per-grant revocation handle
+    grant_id  : GrantId                   -- chain-issued; never self-minted
     limits    : { per_call_max : u64      -- attenuation fields
                 , expiry       : BlockNo
                 , ...           }
@@ -138,8 +139,13 @@ QuotaCap = Cap::Instance[QuotaCapImage]
       -- {issuer, quota_id, grant_id, requested}; host_yield(sender)
     delegate(narrower_limits) → Cap::Instance[QuotaCap]
       -- validate narrower_limits ⊆ self.limits, else fault;
-      -- host_derive_spawn a child initialized with self.sender,
-      -- self.(issuer, quota_id), a fresh grant_id, narrower_limits
+      -- compose {issuer, quota_id, grant_id, narrower_limits};
+      -- host_yield(dsender) — chain verifies this grant is unrevoked
+      --   and unexpired, records child→parent ancestry, returns a
+      --   chain-issued child grant_id (else refuses);
+      -- host_derive_spawn the child with both senders,
+      --   self.(issuer, quota_id), the returned grant_id,
+      --   narrower_limits
 ```
 
 - Spending authority is **possession** of the QuotaCap, conveyed by
@@ -154,13 +160,17 @@ QuotaCap = Cap::Instance[QuotaCapImage]
   embedded sender and name the same `(issuer, quota_id)` record, so a
   copy can never increase any balance — the same property the
   `Gas{meter_key}` handle already has.
-- **Delegation** is an endpoint of the QuotaCap itself. The embedded
-  `YieldSender` is opaque to the holder, so the holder cannot construct
-  a child directly; only the QuotaCap's own bytecode can, via
-  `delegate(narrower_limits)`. The endpoint MUST fault unless
-  `narrower_limits` is equal or narrower; the child carries the same
-  sender and quota identity with a fresh `grant_id`. Narrowing MUST NOT
-  create independent gas.
+- **Delegation** is chain-mediated, through the QuotaCap's own
+  endpoint. The embedded senders are opaque to the holder, so only the
+  QuotaCap's bytecode can initiate `delegate(narrower_limits)`, and the
+  endpoint MUST fault unless `narrower_limits` is equal or narrower —
+  but local checks alone are not sufficient: `grant_id`s MUST be
+  chain-issued, never minted by the cap. The `quota:delegate` yield
+  lets the chain verify the parent grant is unrevoked and unexpired
+  before issuing the child `grant_id`, and record the child→parent
+  ancestry. A revoked or expired grant therefore cannot launder itself
+  into a fresh one. Revoking a grant MUST revoke all its descendants
+  (ancestry walk). Narrowing MUST NOT create independent gas.
 - **Revocation** has two granularities, and the coarse one is global:
   dropping `quota:draw` from the chain's `YieldReceiver` (the
   cap-scopes key-drop discipline) inertizes **every** QuotaCap at once —
@@ -185,7 +195,8 @@ operation presenting a QuotaCap:
 4. Chain picks a meter_key that is LIVE-UNIQUE — bound by no other
    active reservation (meter_key collisions silently alias) — and
    records the binding:
-     ActiveReservations[meter_key] := (issuer, quota_id, requested)
+     ActiveReservations[meter_key] :=
+       { issuer, quota_id, reserved: requested, residue: 0 }
    emit kernel:set_gas_meter(meter_key, requested);
    CALL target with the Gas cap in its gas_slots.
 5. Execution debits the meter per block (kernel fast path, unchanged).
@@ -199,7 +210,7 @@ operation presenting a QuotaCap:
 6. On HALT/fault/drop:
      harvested = emit kernel:set_gas_meter(meter_key, 0)
 7. Refund through the binding, never by recomputing the key's owner:
-     (issuer, quota_id, _) = ActiveReservations[meter_key]
+     { issuer, quota_id, .. } = ActiveReservations[meter_key]
      GasLedger[(issuer, quota_id)].remaining += harvested
      delete ActiveReservations[meter_key]   -- key reusable again
 ```
@@ -214,6 +225,32 @@ live key would overwrite one operation's meter and route its harvest to
 the wrong quota. Keys MAY be reused once their binding is deleted. Gas
 consumed by a faulted apply is not refunded beyond the harvest,
 consistent with the meter's STM-exemption.
+
+**Block boundaries.** `GasMeter` is discarded at block end — the kernel
+is stateless across blocks — while a yield may be preserved across
+blocks as a persistent pause. A reservation MUST NOT rely on meter state
+surviving a block boundary; the binding, which lives in chain σ and
+persists, is what carries a reservation across. For every
+`ActiveReservations` entry whose operation remains paused at block end,
+the chain MUST pre-harvest before the block closes:
+
+```
+residue = emit kernel:set_gas_meter(meter_key, 0)
+ActiveReservations[meter_key].residue := residue
+```
+
+and on resuming in a later block MUST reload before `CALL_RESUME`:
+
+```
+emit kernel:set_gas_meter(meter_key, ActiveReservations[meter_key].residue)
+```
+
+(re-minting the `Gas{meter_key}` handle if needed — the wiped table
+entry is recreated by `kernel:set_gas_meter`). Live-uniqueness of
+`meter_key`s is judged against the persistent bindings, not the
+per-block meter table. An implementation MAY instead refund the residue
+to the quota at block end and re-reserve at resume; either way, no gas
+is created or lost at a boundary.
 
 Multiple accepted issuers MUST be permitted. Proof-of-Intelligence
 contribution attestation is one issuance route and MUST NOT be treated
@@ -294,9 +331,10 @@ This RFC **complements** `docs/coinless.md`; it does not amend it:
 An **exit artifact** is a self-contained export of an Instance:
 
 ```
-ExitArtifact = { image          : Image        -- current spec
-               , cnode          : CNode        -- current state
-               , lineage_witness : [ImageHash] -- ordered, root-first
+ExitArtifact = { image           : Image          -- current spec
+               , cnode           : CNode          -- current state (root)
+               , closure         : Map<Hash, Value> -- reachable content
+               , lineage_witness : [ImageHash]    -- ordered, root-first
                }
 ```
 
@@ -306,6 +344,17 @@ MUST carry a **lineage witness**: the ordered image hashes from root
 such that folding `hash(acc || hash(image))` reproduces the Instance's
 attested `image_hash`. Verification is that re-fold plus a content check
 of `image` against the final element.
+
+The root cnode is not self-contained: its slots hold caps referencing
+further content-addressed values (Instance, Image, Data, CNode), which
+in turn reference others. The artifact MUST either carry the
+**reachable content closure** — every value transitively referenced from
+the root cnode and `image` — or declare itself a **manifest**: the root
+plus the content hashes of the closure, importable only where those
+entries are already installed or supplied alongside. Closure entries are
+self-verifying by content hash; the lineage witness attests the *root*
+Instance only — nested Instances in the closure are imported as content,
+with no lineage claim of their own.
 
 **Import is re-instantiation, not identity transfer.**
 `host_derive_spawn` always extends the *spawner's* `image_hash` chain,
@@ -356,9 +405,10 @@ The following MUST hold before this RFC is considered satisfied:
    draws ordinary quota; a quota-starved challenge of that same policy
    draws the constitutional reserve, with no market-price gate.
 6. **Exit independence.** A quota-starved Instance can create and verify
-   an exit artifact (with lineage witness), and a format-accepting
-   destination can re-instantiate its content under the destination's
-   own lineage, without the originator holding quota.
+   an exit artifact (with lineage witness and reachable closure, or as
+   an explicit manifest), and a format-accepting destination can
+   re-instantiate its content under the destination's own lineage,
+   without the originator holding quota.
 7. **Coinless preserved.** Under zero congestion and sufficient quota,
    observable behaviour matches `docs/coinless.md`'s free-by-default
    model; the core-time market is unmodified.
@@ -371,6 +421,13 @@ The following MUST hold before this RFC is considered satisfied:
 10. **OOG continues by resume.** A `kernel:oog` pause is continued only
     by top-up + `CALL_RESUME` (or ended by `DROP_RESUME`); the waiting
     target is never re-`CALL`ed.
+11. **No revocation laundering.** A QuotaCap whose grant is revoked or
+    expired cannot produce a child that draws: `grant_id`s are
+    chain-issued at delegation, and revoking a grant revokes its
+    descendants.
+12. **Boundary conservation.** A reservation paused across a block
+    boundary loses no gas and gains none: pre-harvested residue equals
+    the amount reloaded at resume (or refunded and re-reserved).
 
 ---
 
@@ -384,6 +441,9 @@ The following MUST hold before this RFC is considered satisfied:
 | Meter-key collision misrouting gas | Mitigated | Live-unique keys; refunds flow only through the `ActiveReservations` binding (§4) |
 | Collective overspend through delegation | Mitigated | Delegation only via the cap's own `delegate` endpoint; clamps only narrow (§3) |
 | Coarse revocation via shared `quota:draw` key drop | Partial | Key drop is an explicit global kill switch; per-grant revocation is ledger-side by `grant_id` (§3) |
+| Revocation bypass via local delegation | Mitigated | `grant_id`s are chain-issued with recorded ancestry; revocation covers descendants (§3) |
+| Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
+| Exit artifact missing referenced state | Mitigated | Reachable content closure carried, or explicit manifest semantics (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
 | Exit verification spoofing | Partial | Lineage witness re-fold (§8); the destination still needs the trusted root out of band |
@@ -401,9 +461,10 @@ addressed in subsequent work:
 1. **Ledger record encoding** within the chain's σ, `IssuerId`
    derivation, and migration from the per-user `GasLedger` sketch.
 2. **Constitutional reserve design.** Eligibility, sizing, per-Instance
-   rate limits, deduplication, replenishment cadence, rollover,
-   exhaustion semantics, and the protocol-level inclusion guarantee for
-   reserve-funded operations under validator-discretion inclusion.
+   rate limits, deduplication, replenishment cadence, **funding source
+   or authority**, rollover, exhaustion semantics, and the
+   protocol-level inclusion guarantee for reserve-funded operations
+   under validator-discretion inclusion.
 3. **Issuer onboarding.** Evidence requirements and the
    contribution-attestation issuance policy.
 4. **Multidimensional metering.** Any extension beyond gas (e.g. storage
@@ -454,3 +515,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-09 | Draft  | Rewritten self-contained against JAR's v3 model; external cross-references removed |
 | 2026-06-10 | Draft (v0.2) | Re-founded on existing machinery after review: quota as `GasLedger` extension with load/harvest bridge, spending authority via the generic AuthorityCap pattern, key-possession independence (not `image_hash`), reservation at admission, lineage-witness exit artifacts, explicit coinless positioning, honest `Affects` |
 | 2026-06-10 | Draft (v0.3) | Recheck fixes: live-unique `meter_key` with `ActiveReservations` binding, OOG continues by top-up + `CALL_RESUME` (never re-`CALL`), delegation via the QuotaCap's own `delegate` endpoint (sender is opaque to holders), import narrowed to re-instantiation under the destination lineage, revocation granularity of the shared `quota:draw` key made explicit with per-grant `grant_id` |
+| 2026-06-10 | Draft (v0.4) | Second recheck: delegation chain-mediated (`quota:delegate`) with chain-issued `grant_id`s, ancestry, and descendant revocation; cross-block pauses handled by pre-boundary harvest into the persistent binding + reload at resume; exit artifact carries the reachable content closure or is an explicit manifest; reserve funding source/authority restored to Deferred Work |
