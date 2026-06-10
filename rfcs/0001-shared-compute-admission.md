@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.9)                               |
+| Status     | Draft (v0.10)                              |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -228,12 +228,17 @@ the cache is O(1) only on warm, valid hits.
   at all (§4), so in-flight reservations run to a terminal state under
   their bindings. A drop intended as a kill switch SHOULD remove
   `quota:draw` and `quota:delegate` together. An implementation that
-  needs an immediate halt MAY add a global **authorization epoch**,
-  bumped at key drop — but to actually be immediate it MUST be checked
-  by the draw, delegation, *and* top-up handlers alike (pre-drop
-  snapshots can still yield into the first two), with each binding
-  recording its admission epoch so a stale in-flight reservation is
-  refused at its next top-up. Per-grant revocation is setting
+  wants a kill switch should be clear about what it achieves:
+  **immediate authorization revocation, not immediate execution
+  halt** — gas already loaded into a meter runs to HALT or OOG
+  regardless. For immediate revocation an implementation MAY add a
+  global **authorization epoch** `auth_epoch` in chain σ, bumped at
+  key drop: the draw and delegation handlers MUST refuse a yield
+  arriving under a key the chain has since dropped (a stale pre-drop
+  snapshot can still route one in, so the handler checks its own
+  current catch set, not the snapshot); each binding records
+  `auth_epoch` at admission (§4 step 4); and a top-up requires the
+  binding's epoch to equal the current one. Per-grant revocation is setting
   `GrantRecords[g].revoked`; the chain MUST refuse draws and top-ups
   whose grant is not authorized. An implementation MAY instead mint
   per-grant yield keys to make key drop fine-grained, at the cost of
@@ -246,9 +251,10 @@ operation presenting a QuotaCap:
 
 ```
 1. Caller's QuotaCap.draw(requested) yields quota:draw.
-2. Chain catches; requires GrantRecords[grant_id] to be authorized
-   (unrevoked incl. ancestors, unexpired — §3) and to match
-   (issuer, quota_id); requires requested ≤ limits.per_call_max;
+2. Chain catches; g = GrantRecords[grant_id]; requires g to be
+   authorized (unrevoked incl. ancestors, unexpired — §3) and to
+   match (issuer, quota_id); requires issuer ∈ accept-list (§5);
+   requires requested ≤ g.limits.per_call_max;
    looks up GasLedger[(issuer, quota_id)].
 3. RESERVE: if remaining < requested → refuse admission.
    Else remaining -= requested.                   -- the reservation
@@ -257,7 +263,8 @@ operation presenting a QuotaCap:
    records the binding; grant_id links it to the authoritative
    GrantRecord:
      ActiveReservations[meter_key] :=
-       { issuer, quota_id, grant_id, reserved: requested, residue: 0 }
+       { issuer, quota_id, grant_id, reserved: requested, residue: 0
+       , epoch: auth_epoch }       -- iff the §3 epoch is adopted
    emit kernel:set_gas_meter(meter_key, requested);
    CALL target with the Gas cap in its gas_slots.
 5. Execution debits the meter per block (kernel fast path, unchanged).
@@ -268,8 +275,10 @@ operation presenting a QuotaCap:
      b = ActiveReservations[meter_key]
      g = GrantRecords[b.grant_id]
      re-check g authorized                        -- else DROP_RESUME
+     re-check b.issuer ∈ accept-list (§5)         -- else DROP_RESUME
+     require b.epoch = auth_epoch (iff adopted)   -- else DROP_RESUME
      require b.reserved + additional ≤ g.limits.per_call_max
-                                                  -- else DROP_RESUME
+       (checked add)                              -- else DROP_RESUME
      RESERVE additional from GasLedger[(b.issuer, b.quota_id)] (as in 3)
      residue = emit kernel:set_gas_meter(meter_key, 0)
      emit kernel:set_gas_meter(meter_key, residue + additional)
@@ -282,6 +291,15 @@ operation presenting a QuotaCap:
      GasLedger[(issuer, quota_id)].remaining += harvested
      delete ActiveReservations[meter_key]   -- key reusable again
 ```
+
+**Checked arithmetic.** Every addition and subtraction in this section —
+`remaining -= requested`, `b.reserved + additional`,
+`residue + additional`, `remaining += harvested`, `depth + 1` — MUST be
+checked: an operation that would overflow or underflow `u64` (or `u32`
+for `depth`) is refused before any mutation. The chain MUST maintain
+`remaining ≤ ceiling` on every quota record as an invariant; a refund
+that would exceed `ceiling` indicates an accounting fault and MUST fault
+the operation rather than clamp silently.
 
 The reservation at step 3 is the admission decision. Because reserve and
 refund are ledger writes inside the chain's sequential accumulate, two
@@ -334,7 +352,14 @@ accounting MUST NOT influence metering: the kernel sees only meters.
 ### 5. Issuer Governance
 
 The chain maintains an **issuer accept-list**: the set of `IssuerId`s
-whose quotas the chain will load. Changes to the accept-list MUST use a
+whose quotas the chain will load. Membership gates the whole lifecycle:
+registering a quota and its root grant (issuance), every draw and
+delegation (§4 step 2), and every top-up of an in-flight reservation
+(§4 step 5) MUST require the issuer's *current* membership. Removing an
+issuer therefore stops new admissions and further top-ups at once;
+already-loaded gas runs to a terminal state, and the removed issuer's
+quota records remain in the ledger, inert, pending re-acceptance or
+expiry (chain policy). Changes to the accept-list MUST use a
 **two-authority procedure**:
 
 1. A **ballot**: a yield under a governance key (e.g. `gov:ballot`)
@@ -402,7 +427,9 @@ This RFC **complements** `docs/coinless.md`; it does not amend it:
 
 ### 8. Exit
 
-An **exit artifact** is a self-contained export of an Instance:
+An **exit artifact** is an export of an Instance — self-contained in
+its `Closure` form; a `Manifest` artifact is a *reference* export, not
+self-contained:
 
 ```
 ExitArtifact = { image           : Image          -- current spec
@@ -449,10 +476,13 @@ first.** The re-fold and content checks above establish **internal
 consistency**: that `image`, `cnode`, `content`, and the witness agree
 with one another. For a `Closure` artifact this is checkable locally.
 For a `Manifest` artifact it is **conditional**: hashes alone cannot
-prove the listed set is the complete transitive closure, so internal
-consistency is established only once every listed entry is resolved to
-its value — until then the artifact is a self-consistent claim over the
-root and witness only. Neither level establishes that the Instance ever
+prove the listed set is the complete transitive closure — and resolving
+every listed value still cannot prove no reachable value was *omitted*
+from the list. Internal consistency is established only by resolving
+every listed entry and **traversing from the root**: the hash set
+discovered by the traversal MUST equal the manifest set exactly,
+nothing missing and nothing extra. Until then the artifact is a
+self-consistent claim over the root and witness only. Neither level establishes that the Instance ever
 existed in any source domain — a fabricator can manufacture a mutually
 consistent artifact wholesale. Establishing **provenance** requires
 binding the artifact to source state: the OPTIONAL `provenance` field
@@ -544,6 +574,12 @@ The following MUST hold before this RFC is considered satisfied:
     top-ups, exceed its grant's `per_call_max` ceiling or continue on a
     grant that has been revoked (directly or via an ancestor) or has
     expired since admission.
+14. **Issuer removal bites.** After an issuer's removal from the
+    accept-list, no draw, delegation, or top-up referencing that issuer
+    succeeds; already-loaded gas runs to terminal and no more is loaded.
+15. **No arithmetic wrap.** No quota, reservation, meter, or depth
+    arithmetic wraps; `remaining ≤ ceiling` holds on every quota record
+    at every step.
 
 ---
 
@@ -563,6 +599,8 @@ The following MUST hold before this RFC is considered satisfied:
 | Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
 | Exit artifact missing referenced state | Mitigated | `Closure` carries the reachable content; `Manifest` completeness is deferred to resolution and traversal of every listed entry (§8) |
 | Issuer accept-list capture | Partial | Two separately controlled yield keys (§5); collusion between the two holders remains possible |
+| Removed issuer continuing to draw | Mitigated | Current accept-list membership required at issuance, draw, delegation, and top-up (§4–§5) |
+| Arithmetic overflow bypassing limits | Mitigated | Checked arithmetic, refusal before mutation; `remaining ≤ ceiling` invariant (§4) |
 | Lineage-as-credential confusion | Mitigated | §5 forbids it explicitly, matching the v3 footgun warning |
 | Exit artifact fabrication | Partial | Internal consistency is locally checkable for `Closure` artifacts, conditional on resolving every entry for `Manifest`; provenance needs the OPTIONAL `new_state_root` inclusion proof against a destination-accepted root (§8) |
 | Constitutional-reserve spam | Open | Eligibility, rate limits, deduplication deferred |
@@ -641,3 +679,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.7) | Fifth recheck: authoritative chain-side `GrantRecord { issuer, quota_id, limits{per_call_max, expiry}, parent, revoked }` keyed by `grant_id` replaces the payload-supplied `authorized` and the revocation set — draws and top-ups both check it; key-drop claim narrowed to future draws (catch-set snapshots; top-ups bypass the key), with an optional authorization epoch for immediate halt; `Manifest` internal consistency made conditional on resolving every entry; stale `closure` field name corrected |
 | 2026-06-10 | Draft (v0.8) | Sixth recheck: delegation checks made fully chain-side against the records (fresh `grant_id`, parent exists/authorized, `(issuer, quota_id)` match, child limits within the parent **record**); `GrantRecord` fields immutable except monotonic `revoked: false → true`; ancestry walks bounded by `depth` ≤ `MAX_DELEGATION_DEPTH` with optional generation-counter cache; key-drop boundary stated snapshot-precisely (blocks owner edges snapshotted after the drop; drop both keys together); manifest conditionality propagated to criterion 6 and both security rows |
 | 2026-06-10 | Draft (v0.9) | Seventh recheck: generation counter scoped to revocation only — cache hits MUST still check `expiry` against the current block and mismatches fall back to the bounded walk (O(1) on warm, valid hits only); authorization epoch, if adopted, checked at draw/delegation/top-up with bindings recording their admission epoch; `MAX_DELEGATION_DEPTH` selection and worst-case cost deferred (threat re-marked Partial); exit guarantee qualified for `Manifest` artifacts (after resolution and successful traversal) |
+| 2026-06-10 | Draft (v0.10) | Eighth recheck: accept-list membership gates issuance, draw, delegation, and top-up — issuer removal stops admissions and top-ups while loaded gas runs to terminal; checked arithmetic required throughout §4 with the `remaining ≤ ceiling` invariant; epoch defined concretely (`auth_epoch` in chain σ, stamped into bindings, equality at top-up, handlers check their current catch set) and renamed to immediate *authorization revocation*; manifest verification requires root traversal with discovered-set equality, and a `Manifest` artifact is a reference export, not self-contained; step 2 binds `g.limits.per_call_max` |
