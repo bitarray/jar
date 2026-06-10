@@ -4,7 +4,7 @@
 |------------|--------------------------------------------|
 | RFC        | 0001                                       |
 | Title      | Shared Compute Admission Without a Universal Numeraire |
-| Status     | Draft (v0.8)                               |
+| Status     | Draft (v0.9)                               |
 | Date       | 2026-06-10                                 |
 | Affects    | Elaborates the `GasLedger` sketch in `spec/principles/kernel-assisted-instances.md` (lazy-load OOG-catch) and `spec/principles/cap-scopes.md`; applies `spec/userspace/generic-authority-pattern.md`; positions itself against `docs/coinless.md`. Changes **no** kernel semantics: `spec/_index.md` §22, `spec/gas-cost.md`, the four cap kinds, and all `kernel:*` syscalls are used as-is. |
 
@@ -178,11 +178,15 @@ is what the chain enforces.
 
 The authorization check is **bounded before any gas is reserved**:
 delegation MUST refuse a child whose `depth` would exceed
-`MAX_DELEGATION_DEPTH` (a chain-spec parameter), so every ancestry walk
-at draw, delegation, or top-up is O(`MAX_DELEGATION_DEPTH`). An
-implementation MAY additionally cache effective authorization under a
-revocation **generation counter** — bumped on every revoke — for O(1)
-checks with deterministic invalidation cost.
+`MAX_DELEGATION_DEPTH` (a chain-spec parameter whose selection and
+worst-case validation cost are deferred — §Deferred Work, item 1), so
+every ancestry walk at draw, delegation, or top-up is
+O(`MAX_DELEGATION_DEPTH`). An implementation MAY additionally cache
+effective authorization under a revocation **generation counter** —
+bumped on every revoke. The counter tracks revocation only: a cache hit
+MUST still independently check `expiry` against the current block, and
+a generation mismatch MUST fall back to the bounded ancestry walk —
+the cache is O(1) only on warm, valid hits.
 
 - Spending authority is **possession** of the QuotaCap, conveyed by
   cap-flow. `image_hash` identifies the QuotaCap's type and MUST NOT be
@@ -224,8 +228,12 @@ checks with deterministic invalidation cost.
   at all (§4), so in-flight reservations run to a terminal state under
   their bindings. A drop intended as a kill switch SHOULD remove
   `quota:draw` and `quota:delegate` together. An implementation that
-  needs an immediate halt MAY add a global authorization epoch, bumped
-  at key drop and checked at every top-up. Per-grant revocation is setting
+  needs an immediate halt MAY add a global **authorization epoch**,
+  bumped at key drop — but to actually be immediate it MUST be checked
+  by the draw, delegation, *and* top-up handlers alike (pre-drop
+  snapshots can still yield into the first two), with each binding
+  recording its admission epoch so a stale in-flight reservation is
+  refused at its next top-up. Per-grant revocation is setting
   `GrantRecords[g].revoked`; the chain MUST refuse draws and top-ups
   whose grant is not authorized. An implementation MAY instead mint
   per-grant yield keys to make key drop fine-grained, at the cost of
@@ -473,8 +481,9 @@ conditioned on an external agreement or on the holder's quota balance
 policy; what is guaranteed is narrower: a destination that accepts the
 artifact format MUST be able to verify it and re-instantiate its content
 under the destination's own lineage, without the *originator* holding
-quota in either domain. Unconditional import everywhere is **not**
-claimed.
+quota in either domain — for a `Manifest` artifact, after every listed
+value resolves and the resulting closure traverses successfully.
+Unconditional import everywhere is **not** claimed.
 
 ### 9. Out of Scope
 
@@ -548,7 +557,7 @@ The following MUST hold before this RFC is considered satisfied:
 | Meter-key collision misrouting gas | Mitigated | Live-unique keys; refunds flow only through the `ActiveReservations` binding (§4) |
 | Collective overspend through delegation | Mitigated | Delegation only via the cap's own `delegate` endpoint; clamps only narrow (§3) |
 | Coarse revocation via shared `quota:draw` key drop | Partial | Key drop blocks draws from owner edges snapshotted after the drop; pre-drop snapshots may still yield and top-ups bypass the key, so in-flight reservations run to terminal unless an authorization epoch is added; drop both keys together (§3) |
-| Pre-admission DoS via deep delegation chains | Mitigated | `depth` capped at `MAX_DELEGATION_DEPTH`, bounding every ancestry walk; optional generation-counter cache for O(1) checks (§3) |
+| Pre-admission DoS via deep delegation chains | Partial | `depth` capped at `MAX_DELEGATION_DEPTH`, bounding every ancestry walk, but the bound's value and worst-case cost are deferred; cache is O(1) only on warm, valid hits (§3) |
 | Revocation bypass via local delegation | Mitigated | `grant_id`s are chain-issued with recorded ancestry; revocation covers descendants (§3) |
 | Top-up bypassing grant limits or revocation | Mitigated | Binding links to the authoritative `GrantRecord`; every top-up re-checks authorization (revocation incl. ancestors, expiry) and the cumulative ceiling (§3–§4) |
 | Reservation loss across block boundaries | Mitigated | Pre-harvest into the persistent binding before block end; reload at resume (§4) |
@@ -568,7 +577,9 @@ The following are intentionally out of scope for this RFC and MUST be
 addressed in subsequent work:
 
 1. **Ledger record encoding** within the chain's σ, `IssuerId`
-   derivation, and migration from the per-user `GasLedger` sketch.
+   derivation, migration from the per-user `GasLedger` sketch, and the
+   selection of `MAX_DELEGATION_DEPTH` with its worst-case
+   pre-admission validation cost.
 2. **Constitutional reserve design.** Eligibility, sizing, per-Instance
    rate limits, deduplication, replenishment cadence, **funding source
    or authority**, rollover, exhaustion semantics, and the
@@ -629,3 +640,4 @@ JAR already means a Merkle commitment/root/proof over CNode state.
 | 2026-06-10 | Draft (v0.6) | Fourth recheck: `ActiveReservations` carries the full authorization context (`grant_id`, `authorized` from the draw payload) so OOG top-ups re-check revocation/expiry and the cumulative ceiling; lineage-witness fold restated over already-hashed entries with `acc₀ = h₀` defined explicitly; artifact `content` modelled as `Closure \| Manifest` variants |
 | 2026-06-10 | Draft (v0.7) | Fifth recheck: authoritative chain-side `GrantRecord { issuer, quota_id, limits{per_call_max, expiry}, parent, revoked }` keyed by `grant_id` replaces the payload-supplied `authorized` and the revocation set — draws and top-ups both check it; key-drop claim narrowed to future draws (catch-set snapshots; top-ups bypass the key), with an optional authorization epoch for immediate halt; `Manifest` internal consistency made conditional on resolving every entry; stale `closure` field name corrected |
 | 2026-06-10 | Draft (v0.8) | Sixth recheck: delegation checks made fully chain-side against the records (fresh `grant_id`, parent exists/authorized, `(issuer, quota_id)` match, child limits within the parent **record**); `GrantRecord` fields immutable except monotonic `revoked: false → true`; ancestry walks bounded by `depth` ≤ `MAX_DELEGATION_DEPTH` with optional generation-counter cache; key-drop boundary stated snapshot-precisely (blocks owner edges snapshotted after the drop; drop both keys together); manifest conditionality propagated to criterion 6 and both security rows |
+| 2026-06-10 | Draft (v0.9) | Seventh recheck: generation counter scoped to revocation only — cache hits MUST still check `expiry` against the current block and mismatches fall back to the bounded walk (O(1) on warm, valid hits only); authorization epoch, if adopted, checked at draw/delegation/top-up with bindings recording their admission epoch; `MAX_DELEGATION_DEPTH` selection and worst-case cost deferred (threat re-marked Partial); exit guarantee qualified for `Manifest` artifacts (after resolution and successful traversal) |
