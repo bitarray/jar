@@ -1,0 +1,15 @@
+{{- $dest := "https://alleyos.org" -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url={{ $dest }}">
+  <link rel="canonical" href="{{ $dest }}">
+  <meta name="robots" content="noindex">
+  <title>{{ site.Title }}</title>
+  <script>window.location.replace("{{ $dest }}");</script>
+</head>
+<body>
+  <p>Redirecting to <a href="{{ $dest }}">{{ $dest }}</a>…</p>
+</body>
+</html>
