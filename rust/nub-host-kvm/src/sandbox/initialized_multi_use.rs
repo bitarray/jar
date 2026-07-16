@@ -19,7 +19,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use javm_cap::cap::Cap;
 use nub_arch_x86_abi::{
     CapHash as AbiCapHash, FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP, InvocationResult,
     InvokePacket, PARALLEL_INVOKE_STATUS_DONE, PARALLEL_INVOKE_STATUS_EMPTY,
@@ -60,8 +59,8 @@ pub struct MultiUseSandbox {
     control_lock: Mutex<()>,
     invoke_workers: Mutex<Option<Arc<ParallelInvokeWorkers>>>,
     /// Host-side record of every blob hash this sandbox has successfully
-    /// published, so `put_cap_with_hash` can short-circuit an idempotent
-    /// re-put without a roundtrip + merkle walk through the guest.
+    /// published, so `put_object_with_hash` can short-circuit an idempotent
+    /// re-put without a roundtrip + hash walk through the guest.
     ///
     /// This *replaces* an earlier design that directly dereferenced the
     /// guest's heap-resident `CacheDirectory` hashbrown table from the host
@@ -556,65 +555,66 @@ impl MultiUseSandbox {
         }
     }
 
-    /// Publish a [`Cap`] into the guest's heap-resident cap
-    /// directory via the [`FN_ID_NUB_PUT_CAP`] RPC.
+    /// Publish a serialized state object into the guest's
+    /// heap-resident object store via the [`FN_ID_NUB_PUT_CAP`] RPC.
     ///
-    /// rkyv-encodes `cap` directly via [`rkyv::to_bytes`]; the
-    /// resulting bytes are shipped via [`Self::call_raw`] and the
-    /// guest-computed `CapHash` is read back. On the guest side, the
-    /// cap is inserted into the `nub_arch_x86::state_cache::DIRECTORY`
-    /// map, keyed by hash.
+    /// `bytes` is the personality-encoded object (JAVM: an
+    /// rkyv-encoded `Cap`), shipped opaquely via [`Self::call_raw`];
+    /// the guest-computed content hash is read back. The guest-side
+    /// personality decodes, validates, hashes, and inserts the object
+    /// into its store.
     ///
-    /// Caps whose graph still holds a `CapHashOrRef::Ref` target
-    /// (cache-local lifetime handles with no resolution on the
-    /// receive side) fail at rkyv-encode with a typed
-    /// [`CapHasRefError`](javm_cap::CapHasRefError) wrapped in the
-    /// rancor error chain. Other encode/decode failures are surfaced
-    /// as `HyperlightError::Error`. A sentinel response (all-`0xFF`
+    /// Encode/decode failures are surfaced as
+    /// `HyperlightError::Error`. A sentinel response (all-`0xFF`
     /// hash) from the guest is also turned into an error.
-    pub fn put_cap(&self, cap: &Cap) -> Result<AbiCapHash> {
-        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cap)
-            .map_err(|e| crate::new_error!("put_cap: rkyv encode (or Ref present): {e}"))?;
-        let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
+    pub fn put_object(&self, bytes: &[u8]) -> Result<AbiCapHash> {
+        let resp = self.call_raw(FN_ID_NUB_PUT_CAP, bytes)?;
         if resp.len() != 32 {
             return Err(crate::new_error!(
-                "put_cap: expected 32-byte hash response, got {}",
+                "put_object: expected 32-byte hash response, got {}",
                 resp.len()
             ));
         }
         let mut hash: AbiCapHash = [0u8; 32];
         hash.copy_from_slice(&resp);
-        // Guest's `nub_put_cap` returns `0xFF * 32` on decode/conv
+        // The guest's put handler returns `0xFF * 32` on decode/conv
         // failure. Surface as a typed error so callers don't observe
         // a fake hash.
         if hash == [0xFFu8; 32] {
             return Err(crate::new_error!(
-                "put_cap: guest reported decode/conversion failure (sentinel response)"
+                "put_object: guest reported decode/conversion failure (sentinel response)"
             ));
         }
         Ok(hash)
     }
 
     /// Pre-hashed put: idempotent fast path that short-circuits the
-    /// full [`Self::put_cap`] RPC when this sandbox has already
+    /// full [`Self::put_object`] RPC when this sandbox has already
     /// published `hash`.
     ///
     /// Behaviour:
     ///
     /// - If `hash` is in the host-side `published_blobs` set,
-    ///   return immediately — we already shipped this cap and the blobs
-    ///   tier never evicts, so the guest still holds it. We skip the
-    ///   rkyv encode + VMEXIT + guest decode + merkle walk + directory
-    ///   insert. This is the hot path for bench loops that re-publish
-    ///   the same cap graph every iteration.
-    /// - Otherwise, ship `put_cap(cap)`, debug-assert the returned hash
+    ///   return immediately — we already shipped this object and the
+    ///   blobs tier never evicts, so the guest still holds it. The
+    ///   `serialize` closure is never called: no encode, no VMEXIT, no
+    ///   guest decode + hash walk + store insert. This is the hot path
+    ///   for bench loops that re-publish the same object graph every
+    ///   iteration.
+    /// - Otherwise, call `serialize()` (personality encode; JAVM: rkyv
+    ///   of `Cap`, which fails on unresolved `CapHashOrRef::Ref`
+    ///   handles), ship `put_object`, debug-assert the returned hash
     ///   matches `hash`, and record it.
     ///
-    /// We deliberately do **not** check the guest's directory directly:
-    /// the guest's `CacheDirectory` is a hashbrown table built with a
+    /// We deliberately do **not** check the guest's store directly:
+    /// the guest's directory is a hashbrown table built with a
     /// different SIMD `Group` width than the host's hashbrown (see
     /// `published_blobs`), so a host-side deref of it is unsound.
-    pub fn put_cap_with_hash(&self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
+    pub fn put_object_with_hash(
+        &self,
+        hash: AbiCapHash,
+        serialize: impl FnOnce() -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<()> {
         {
             let published_blobs = self
                 .published_blobs
@@ -625,10 +625,12 @@ impl MultiUseSandbox {
             }
         }
 
-        let got = self.put_cap(cap)?;
+        let bytes =
+            serialize().map_err(|e| crate::new_error!("put_object_with_hash: encode: {e}"))?;
+        let got = self.put_object(&bytes)?;
         debug_assert_eq!(
             got, hash,
-            "put_cap_with_hash: guest-computed hash differs from claimed hash"
+            "put_object_with_hash: guest-computed hash differs from claimed hash"
         );
 
         self.published_blobs

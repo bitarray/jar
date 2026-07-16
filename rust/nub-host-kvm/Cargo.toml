@@ -32,7 +32,6 @@ blake3 = "1.8.5"
 foldhash = "0.2"
 goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hyperlight-common = { version = "0.15.0", features = ["std"] }
-javm-cap = { path = "../javm-cap" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 nub-host-common = { path = "../nub-host-common", features = ["std"] }
 rkyv = { version = "0.8", features = ["std"] }

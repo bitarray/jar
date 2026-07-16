@@ -565,10 +565,16 @@ impl Nub {
             Backend::Local { cache, .. } => cache
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
-            Backend::Hyperlight(h) => h
-                .sandbox
-                .put_cap(cap)
-                .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
+            Backend::Hyperlight(h) => {
+                // Serialize host-side; the sandbox surface is opaque
+                // bytes + hash (personality-agnostic). Encoding fails
+                // on unresolved `CapHashOrRef::Ref` handles.
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cap)
+                    .map_err(|e| anyhow::anyhow!("put_cap: rkyv encode (or Ref present): {e}"))?;
+                h.sandbox
+                    .put_object(bytes.as_slice())
+                    .map_err(|e| anyhow::anyhow!("put_cap: {e}"))
+            }
         }
     }
 
@@ -599,7 +605,13 @@ impl Nub {
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
-                .put_cap_with_hash(hash, cap)
+                .put_object_with_hash(hash, || {
+                    // Lazy encode: never runs on the idempotent-republish
+                    // hot path (host-side published_blobs hit).
+                    rkyv::to_bytes::<rkyv::rancor::Error>(cap)
+                        .map(|b| b.to_vec())
+                        .map_err(|e| format!("rkyv encode (or Ref present): {e}"))
+                })
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
         }
     }
