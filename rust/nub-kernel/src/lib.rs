@@ -43,10 +43,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-/// 32-byte content hash. Same shape as `javm_cap::CapHash`; defined
-/// here locally so this crate stays `no_std`. A future unification
-/// pass will share the type once `javm-cap` becomes `no_std`-clean.
-pub type CapHash = [u8; 32];
+/// 32-byte content hash of a published state object. The personality
+/// defines the hash function (JAVM: SSZ `hash_tree_root`); nub treats
+/// the value as an opaque content-addressed key.
+pub type ObjHash = [u8; 32];
+
+/// Legacy alias for [`ObjHash`] from when the only personality was the
+/// JAVM capability system. Prefer [`ObjHash`] in new code.
+pub type CapHash = ObjHash;
 
 /// Opaque, 32-byte handle to an Instance held by an `Arch`.
 ///

@@ -17,6 +17,7 @@
 //! publishes a `Cap::Instance` referencing them, and then invokes by
 //! the resulting instance hash.
 
+pub mod personality;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
@@ -39,7 +40,8 @@ use nub_kernel::Kernel;
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::InvokePacket;
 pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult, SCRATCHPAD_HEAD_LEN};
-pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
+pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome, ObjHash};
+pub use personality::{LocalKernel, Personality};
 
 pub const MAX_HYPERLIGHT_VCPUS: usize = nub_arch_x86_abi::MAX_EXECUTION_LANES;
 
