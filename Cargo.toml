@@ -9,6 +9,7 @@ members = [
     "rust/nub-arch-x86",
     "rust/nub-arch-x86-abi",
     "rust/javm-guest-x86",
+    "rust/javm",
     "rust/nub-host-kvm",
     "rust/nub-host-common",
     "rust/nub-host-guest-macro",

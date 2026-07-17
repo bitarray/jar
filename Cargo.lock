@@ -1122,6 +1122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "javm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "javm-cap",
+ "nub",
+]
+
+[[package]]
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,17 @@
+[package]
+name = "javm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAVM engine entrypoint: the javm-cap kernel personality on the nub substrate (typed publish/invoke surface + guest blob)"
+
+[features]
+default = []
+heap-diag = ["nub/heap-diag"]
+# Exposes hyperlight_tests/hyperlight_benches + nub's raw call_raw.
+test-support = ["nub/test-support"]
+
+[dependencies]
+anyhow = "1"
+javm-cap = { workspace = true }
+nub = { path = "../nub" }
