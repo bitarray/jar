@@ -36,7 +36,7 @@ use foldhash::fast::FixedState;
 use javm_cap::cache::CacheDirectory;
 use nub_arch_x86_abi::BootInfo;
 
-use crate::cached_cap::CachedCap;
+use crate::cached_cap::{CachedCap, CapCache};
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
 /// direct-dereference reader (via `BootInfo.directory_va`) agrees on
@@ -56,6 +56,22 @@ pub static CACHE: CacheDirectory<FixedState, CachedCap> = CacheDirectory::new_co
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
 );
+
+/// Drop every compiled-image artifact from [`CACHE`].
+///
+/// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
+/// and template PD/PT pages, which is fine between invocations (no
+/// in-flight call references them). The next compile-cache miss will
+/// pay full recompile cost. Safe under Hyperlight serialisation; not
+/// meant for production paths.
+pub fn evict_jit_all() {
+    for (_, cap) in CACHE.iter_blobs() {
+        let mut cache = cap.cache.lock();
+        if matches!(&*cache, CapCache::Image(_)) {
+            *cache = CapCache::None;
+        }
+    }
+}
 
 /// `BootInfo` placed in the `.boot_info` linker section. Initialised
 /// at link time with the magic and reserved fields; the

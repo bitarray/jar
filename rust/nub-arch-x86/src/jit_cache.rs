@@ -34,7 +34,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
-use crate::cached_cap::CapCache;
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::page_alloc::PageBuf;
 use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
@@ -127,22 +126,6 @@ static NEXT_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// in the arena — keeps the per-region PTEs uniform).
 fn page_round_up_min1(n: usize) -> usize {
     n.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE)
-}
-
-/// Drop every compiled image from the cache.
-///
-/// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
-/// and template PD/PT pages, which is fine between invocations (no
-/// in-flight call references them). The next `with_compiled_image` miss will
-/// pay full recompile cost. Safe under Hyperlight serialisation; not
-/// meant for production paths.
-pub fn evict_all() {
-    for (_, cap) in crate::state_cache::CACHE.iter_blobs() {
-        let mut cache = cap.cache.lock();
-        if matches!(&*cache, CapCache::Image(_)) {
-            *cache = CapCache::None;
-        }
-    }
 }
 
 /// A personality-owned cache slot for one image's [`CompiledImage`].

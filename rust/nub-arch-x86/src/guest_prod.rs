@@ -182,7 +182,7 @@ pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
                 if claimed.is_err() {
                     continue;
                 }
-                crate::jit_cache::evict_all();
+                crate::state_cache::evict_jit_all();
                 crate::state_cache::CACHE.sweep_instances();
                 unsafe {
                     core::ptr::addr_of_mut!((*slot).result).write_volatile(InvocationResult {
@@ -254,7 +254,7 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
 /// execute", not "rebuild every runtime memo".
 #[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
 pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
-    crate::jit_cache::evict_all();
+    crate::state_cache::evict_jit_all();
     Vec::new()
 }
 
