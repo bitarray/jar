@@ -124,6 +124,7 @@ impl LaneJitState {
         }
     }
 
+    #[inline]
     fn clear(&self) {
         // `active_cr3` is the publication sentinel. Once it is zero, the #PF
         // handler will not use this lane state; the remaining fields may stay
@@ -137,11 +138,13 @@ static LANE_JIT_STATE: [LaneJitState; MAX_EXECUTION_LANES] =
     [const { LaneJitState::new() }; MAX_EXECUTION_LANES];
 static LAST_ACTIVE_JIT_LANE: AtomicU64 = AtomicU64::new(u64::MAX);
 
+#[inline]
 fn lane_jit_state(lane: ExecutionLane) -> &'static LaneJitState {
     lane.assert_in_range();
     &LANE_JIT_STATE[lane.index()]
 }
 
+#[inline]
 fn current_cr3_jit_state() -> Option<&'static LaneJitState> {
     let cr3 = crate::paging::read_cr3();
     let hint = LAST_ACTIVE_JIT_LANE.load(Ordering::Relaxed) as usize;
@@ -211,6 +214,7 @@ static GLOBAL_PD_INIT: spin::Mutex<()> = spin::Mutex::new(());
 
 /// Resolve a global CTX/STACK PD PA, building + leaking the PD subtree mapping
 /// `page_pa` at `va` on first call.
+#[inline]
 fn lane_page(
     pages: &'static [GlobalPage; MAX_EXECUTION_LANES],
     lane: ExecutionLane,
@@ -219,6 +223,7 @@ fn lane_page(
     &pages[lane.index()]
 }
 
+#[inline]
 fn lane_pd_pa(
     slots: &'static [AtomicU64; MAX_EXECUTION_LANES],
     lane: ExecutionLane,
@@ -370,6 +375,7 @@ pub fn install_handlers<M: FrameMem>() {
 /// Resolve a faulting native offset to its `(pvm_pc, access_width)` via
 /// the trap table. Returns `(0, 0)` when no entry covers the offset
 /// (not a guest memory op → width 0 → caller treats as a PageFault).
+#[inline]
 fn trap_lookup(state: &LaneJitState, offset: u32) -> (u32, u32) {
     let tt_ptr = state.trap_table_ptr.load(Ordering::Relaxed);
     let tt_len = state.trap_table_len.load(Ordering::Relaxed) as usize;
@@ -409,6 +415,7 @@ pub struct MatRange {
 /// or `None` for an ephemeral page. Pinned ranges are pushed first, so the
 /// first hit is the read-only one when a VA is covered by both a pinned range
 /// and the catch-all RW range.
+#[inline]
 fn mat_range_for_in(ranges: &[MatRange], page_va: u32) -> Option<MatRange> {
     ranges
         .iter()
@@ -419,6 +426,7 @@ fn mat_range_for_in(ranges: &[MatRange], page_va: u32) -> Option<MatRange> {
 /// Find the cap-backed [`MatRange`] covering page
 /// `page_va` (page-aligned) in the running frame's published `mat_ranges`, or
 /// `None` for an ephemeral page.
+#[inline]
 fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<MatRange> {
     let ptr = state.mat_ranges_ptr.load(Ordering::Relaxed);
     let len = state.mat_ranges_len.load(Ordering::Relaxed) as usize;
@@ -494,6 +502,7 @@ enum RoSrc {
 /// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
 /// cap-backed pages take their kind from the matching `MatRange`; every
 /// other page in the declared extent is ephemeral.
+#[inline]
 fn page_kind(state: &LaneJitState, page_va: u32) -> javm_exec::mat::PageKind {
     match mat_range_for(state, page_va) {
         Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
@@ -1324,6 +1333,7 @@ pub unsafe fn enter_frame<M: FrameMem>(
     }
 }
 
+#[inline]
 fn flush_global_arena_on_image_switch(lane: ExecutionLane, next_token: u64, next_pages: u64) {
     let idx = lane.index();
     lane.assert_in_range();

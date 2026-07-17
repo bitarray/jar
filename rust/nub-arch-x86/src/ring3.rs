@@ -90,6 +90,7 @@ impl Ring3LaneState {
         }
     }
 
+    #[inline]
     fn ptr(&self) -> *mut Ring3LaneRaw {
         self.raw.get()
     }
@@ -97,6 +98,7 @@ impl Ring3LaneState {
     /// # Safety
     /// The caller must ensure this state belongs to the currently entering
     /// vCPU lane, so no other CPU is concurrently mutating the same raw fields.
+    #[inline]
     unsafe fn reset_for_entry(&self, lane: ExecutionLane) {
         let raw = self.raw.get();
         unsafe {
@@ -252,6 +254,7 @@ const USER_EXIT_RAX_OFFSET: usize = offset_of!(Ring3LaneRaw, user_exit_rax);
 const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
+#[inline]
 unsafe fn write_msr(msr: u32, value: u64) {
     let lo = value as u32;
     let hi = (value >> 32) as u32;
@@ -266,6 +269,7 @@ unsafe fn write_msr(msr: u32, value: u64) {
     }
 }
 
+#[inline]
 unsafe fn write_gs_bases(base: u64) {
     unsafe {
         write_msr(IA32_GS_BASE, base);
@@ -443,6 +447,7 @@ core::arch::global_asm!(
 /// # Safety
 /// Safe to call from kernel mode (CPL=0). The caller must pass the lane owned
 /// by the currently running vCPU.
+#[inline]
 pub unsafe fn prepare_ring3_entry(lane: ExecutionLane) {
     lane.assert_in_range();
     let state = &RING3_LANES[lane.index()];

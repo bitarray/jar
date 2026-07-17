@@ -102,6 +102,7 @@ impl GlobalPage {
     }
 
     /// Kernel VA of the page, allocating + leaking it on first call.
+    #[inline]
     pub fn kva(&self) -> u64 {
         let cur = self.kva.load(Ordering::Acquire);
         if cur != 0 {
@@ -125,6 +126,7 @@ impl GlobalPage {
     }
 
     /// Physical address of the page (allocating it on first call).
+    #[inline]
     pub fn pa(&self) -> u64 {
         crate::paging::va_to_pa(self.kva()).expect("global page kva must lie in kernel half")
     }

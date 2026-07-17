@@ -100,6 +100,7 @@ const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// Convert a kernel VA to its physical address. Three regimes (see
 /// module doc): scratch (high VA), kernel half (low VA past
 /// `kernel_base_va()`), user half (returns `None`).
+#[inline]
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let scratch_gva = scratch_base_gva();
     let kernel_base = kernel_base_va();
@@ -113,6 +114,7 @@ pub fn va_to_pa(va: u64) -> Option<u64> {
 }
 
 /// Convert a PA to its kernel VA. The dual of [`va_to_pa`].
+#[inline]
 pub fn pa_to_va(pa: u64) -> Option<u64> {
     let scratch_gpa = scratch_base_gpa();
     if pa >= scratch_gpa {
@@ -134,6 +136,7 @@ pub struct Perm {
 }
 
 impl Perm {
+    #[inline]
     pub const fn user_rw() -> Self {
         Self {
             writable: true,
@@ -142,6 +145,7 @@ impl Perm {
             global: false,
         }
     }
+    #[inline]
     pub const fn user_rx() -> Self {
         Self {
             writable: false,
@@ -150,6 +154,7 @@ impl Perm {
             global: false,
         }
     }
+    #[inline]
     pub const fn user_ro() -> Self {
         Self {
             writable: false,
@@ -158,6 +163,7 @@ impl Perm {
             global: false,
         }
     }
+    #[inline]
     pub const fn user_rx_global() -> Self {
         Self {
             writable: false,
@@ -166,6 +172,7 @@ impl Perm {
             global: true,
         }
     }
+    #[inline]
     pub const fn user_ro_global() -> Self {
         Self {
             writable: false,
@@ -175,6 +182,7 @@ impl Perm {
         }
     }
     /// Encode as the low-bit + high-bit flags of a leaf PTE.
+    #[inline]
     fn pte_flags(&self) -> u64 {
         let mut bits = flag::P;
         if self.writable {
@@ -337,6 +345,7 @@ impl Pml4SlotTemplate {
     }
 
     /// Physical address of the PDPT page — what per-call PTs install into PML4.
+    #[inline]
     pub fn pdpt_pa(&self) -> Option<u64> {
         va_to_pa(self.pdpt.as_ptr() as u64)
     }
@@ -402,6 +411,7 @@ impl PageTable {
     }
 
     /// CR3 value to load (physical address of the PML4, low 12 bits clear).
+    #[inline]
     pub fn cr3(&self) -> Option<u64> {
         va_to_pa(self.pml4.as_ptr() as u64)
     }
@@ -465,6 +475,7 @@ impl PageTable {
     /// template's PDPT. The target slot must be empty (it is in a fresh PT: the
     /// kernel lives in slot 511, the guest mem in slot 0, and slot 1 — the
     /// CTX/META/STACK region — is built only here).
+    #[inline]
     pub fn install_borrowed_pdpt(&mut self, va: u64, pdpt_pa: u64) -> Option<()> {
         assert!(va.is_multiple_of(1u64 << 39));
         let idx4 = ((va >> 39) & 0x1FF) as usize;
@@ -528,6 +539,7 @@ impl PageTable {
     /// Kernel VA of this page table's PML4. Stashed in a static at
     /// `enter_frame` time so the #PF handler can rewrite leaf PTEs
     /// without needing access to the [`PageTable`] itself.
+    #[inline]
     pub fn pml4_kva(&self) -> u64 {
         self.pml4.as_ptr() as u64
     }
@@ -537,6 +549,7 @@ impl PageTable {
     /// into via [`pt_map_leaf`] (so they are freed at `Drop`). The guest
     /// is single-threaded (the main thread is suspended in ring 3 while
     /// the handler runs), so there is no concurrent borrow of `owned`.
+    #[inline]
     pub fn owned_vec_ptr(&self) -> u64 {
         self.owned.as_ptr() as u64
     }
@@ -559,6 +572,7 @@ impl PageTable {
 /// `pml4_va` must be the kernel VA of a live 4-level page table (this
 /// `PageTable`'s); `owned_vec` must be [`PageTable::owned_vec_ptr`] of the
 /// same table. The caller must be the only writer (single-threaded guest).
+#[inline]
 pub unsafe fn pt_map_leaf(
     pml4_va: u64,
     virt: u64,
@@ -606,6 +620,7 @@ pub unsafe fn pt_map_leaf(
 /// # Safety
 /// `pml4_va` must be the kernel VA of a live 4-level page table; the caller
 /// must be the only writer (single-threaded guest).
+#[inline]
 pub unsafe fn pt_set_leaf_w(pml4_va: u64, virt: u64, writable: bool) -> bool {
     const PS: u64 = 1 << 7;
     let idx4 = ((virt >> 39) & 0x1FF) as usize;
@@ -658,6 +673,7 @@ pub unsafe fn pt_set_leaf_w(pml4_va: u64, virt: u64, writable: bool) -> bool {
 /// # Safety
 /// `owned` must point at a live `Vec<NonNull<Table>>` (the PageTable's
 /// `owned`); single-threaded access.
+#[inline]
 unsafe fn ensure_inner_recorded(
     entry: &mut u64,
     inner_flags: u64,
@@ -696,6 +712,7 @@ pub fn invlpg(virt: u64) {
 
 /// Read CR3. Returns the physical address of the current PML4 (low
 /// 12 bits are PCID flags).
+#[inline]
 pub fn read_cr3() -> u64 {
     let cr3: u64;
     // SAFETY: reading CR3 is a privileged but harmless operation at ring 0.
@@ -708,6 +725,7 @@ pub fn read_cr3() -> u64 {
 /// Enable CR4.PGE so leaf PTEs with [`flag::G`] survive CR3 reloads.
 ///
 /// Idempotent: callers can run this on the hot path before ring-3 entry.
+#[inline]
 pub fn enable_global_pages() {
     const CR4_PGE: u64 = 1 << 7;
     let mut cr4: u64;

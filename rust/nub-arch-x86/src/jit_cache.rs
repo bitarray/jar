@@ -94,6 +94,7 @@ pub struct CompiledImage {
 
 impl CompiledImage {
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     pub fn template_pdpt_pa_for_lane(
         &mut self,
         lane: ExecutionLane,
