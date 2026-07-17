@@ -20,7 +20,8 @@ The repository hosts two parallel tracks that converge in `rust/`:
 |-----------|-------------|
 | [`spec/`](spec/) | Lean 4 formal specification for SSZ, PVM2, caps, SubVM, JAVM kernel core, and Genesis scoring |
 | [`website/content/spec/`](website/content/spec/) | Minimum-kernel v3 architecture spec (cap system, Image / Instance, `nub` microkernel design) |
-| [`rust/`](rust/) | Rust workspace — JAVM, recompiler, `nub`, `jar-kernel`, `scale`, `subsoil` |
+| [`nub/`](nub/) | nub: standalone, personality-generic execution engine (KVM/Hyperlight sandbox, PVM2 interpreter, x86-64 JIT) |
+| [`rust/`](rust/) | Rust workspace — the JAVM layer on top of nub (`javm`, `javm-cap`, `javm-guest-x86`, transpiler, `subsoil`, `ssz`) |
 | [`components/`](components/) | Guest crates compiled to PVM blobs (bench guests; future userspace services) |
 | [`tools/`](tools/) | Genesis Proof-of-Intelligence CLI tooling |
 
@@ -28,15 +29,15 @@ The repository hosts two parallel tracks that converge in `rust/`:
 
 | Crate | Role |
 |-------|------|
-| `javm-exec` | Pure PVM execution engine (interpreter, gas, memory pages). No cap awareness. |
-| `javm-recompiler-x86` | x86-64 JIT recompiler for PVM bytecode. |
+| `nub` | Uniform `Nub<P: Personality>` handle over backends (in-process interpreter / KVM guest); personality-agnostic publish + invoke surface. |
+| `nub-exec` | Pure PVM2 execution engine (interpreter, gas, memory pages). No cap awareness. |
+| `nub-recompiler-x86` | x86-64 JIT recompiler for PVM2 bytecode. |
+| `nub-arch-x86` / `nub-arch-x86-abi` | Generic bare-metal guest-kernel lib (ring-0 boot, IDT, page tables, JIT trampoline, `GuestPersonality` traits) + wire ABI. |
+| `nub-host-kvm` | Host-side KVM driver (via Hyperlight); ships opaque objects + invocations into the guest. |
+| `javm` | JAVM entrypoint built on nub: the Javm personality, typed cap surface, guest blob + Hyperlight singleton. |
 | `javm-cap` | Foundational cap system: the four cap kinds (Instance, Image, Data, CNode), CNode, image_hash chain, `MGMT_*` semantics. |
-| `javm` | Full JAVM = caps + execution + call stack + host-call coordination. |
-| `javm-transpiler` | RISC-V ELF → PVM bytecode transpiler. |
-| `nub` | Long-running microkernel running inside a KVM-isolated guest; hosts σ and the JIT. |
-| `nub-arch-x86` / `nub-arch-x86-abi` | x86-64 substrate (ring-0 boot, IDT, page tables, JIT trampoline). |
-| `nub-host-kvm` | Host-side KVM driver (via Hyperlight); content-addressed cache region. |
-| `jar-kernel` | Chain kernel: σ, block apply, host calls, kernel-assisted Image definitions. |
+| `javm-guest-x86` | JAVM guest personality over the generic guest-kernel lib; produces the Hyperlight guest binaries. |
+| `javm-transpiler` | RISC-V ELF → PVM2 bytecode transpiler. |
 
 ## Why a KVM-microkernel
 

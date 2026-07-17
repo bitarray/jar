@@ -1,7 +1,7 @@
 # PVM2 portability: what assumptions does the recompiler make?
 
 PVM2 today has exactly one JIT backend: x86-64 Linux running inside
-a Hyperlight microkernel. The interpreter (`javm-exec::interp`) is
+a Hyperlight microkernel. The interpreter (`nub-exec::interp`) is
 host-arch-independent and runs anywhere Rust does. But the
 production-path JIT in `nub-arch-x86` makes a number of assumptions
 about its host arch; if we ever build a second backend (AArch64 is

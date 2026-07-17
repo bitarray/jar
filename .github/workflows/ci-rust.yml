@@ -123,9 +123,10 @@ jobs:
   test-macos:
     # macOS only exercises the interpreter / spec-facing portion of
     # the workspace. The `nub` stack (KVM host + cross-compiled x86_64
-    # guest binary) and `javm-recompiler-x86` are Linux-x86_64 only,
-    # so we exclude them here. See ci-rust.yml comments for the
-    # interpreter-only crate set.
+    # guest binary), the JAVM guest personality crate, and
+    # `nub-recompiler-x86` are Linux-x86_64 only, so we exclude them
+    # here. See ci-rust.yml comments for the interpreter-only crate
+    # set.
     name: Tests (macOS, interpreter)
     runs-on: macos-latest
     steps:
@@ -150,6 +151,7 @@ jobs:
           --exclude nub-arch-x86
           --exclude nub-arch-x86-abi
           --exclude nub-build
-          --exclude javm-recompiler-x86
+          --exclude nub-recompiler-x86
+          --exclude javm-guest-x86
         env:
           RUSTFLAGS: "-D warnings"

@@ -18,19 +18,24 @@ JAR is a **JAM (Join-Accumulate Machine)** blockchain node implementation in Rus
 
 ```
 jar/
-  rust/                     # Rust workspace — where node-side work happens
-    jar-kernel/             # Kernel: state, types, host calls
-    javm/                   # PVM (Polkadot VM) entry point
-    javm-exec/              # PVM execution
-    javm-transpiler/        # rv64em → x86-64 transpiler
-    javm-recompiler-x86/    # x86-64 JIT recompiler
-    javm-cap/               # Capability layer for javm
+  nub/                      # nub: standalone, personality-generic execution engine
+    nub/                    # Uniform Nub<P: Personality> handle over backends
+    nub-kernel/             # Arch trait + core types (ObjHash, InstanceRef)
+    nub-exec/               # PVM2 execution (interpreter, gas, memory). No cap awareness
+    nub-recompiler-x86/     # x86-64 JIT recompiler for PVM2
+    nub-arch-x86*/          # Generic bare-metal guest-kernel lib + wire ABI
+    nub-arch-local/         # In-process interpreter backend (run_program)
+    nub-host-*/             # KVM/Hyperlight host driver + shared host/guest types
+    nub-build/              # build.rs helper for cross-compiling guest blobs
+  rust/                     # Rust workspace — the JAVM layer on top of nub
+    javm/                   # JAVM entrypoint: the crate callers invoke JAVM through
+    javm-cap/               # Capability system — the JAVM kernel personality
+    javm-guest-x86/         # JAVM guest personality + Hyperlight blob binaries
+    javm-transpiler/        # RISC-V ELF → PVM2 transpiler
     javm-bench/             # PVM benchmarks (vs polkavm)
     javm-guest-tests/       # Conformance vectors for javm guests
-    nub*/                   # Sandbox runtime (kernel, host, arch backends)
-    scale/, scale-derive/   # SCALE codec
+    ssz/, ssz-derive/       # SSZ codec
     subsoil/, subsoil-derive/  # Storage layer
-    jar-test-services/      # Test guest services
   components/               # Guest crates consumed by rust/ (bench guests)
   spec/                     # Lean 4 formal specification
   tools/jar-genesis/        # Genesis Proof-of-Intelligence tooling
