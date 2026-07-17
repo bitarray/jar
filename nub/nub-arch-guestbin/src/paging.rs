@@ -34,7 +34,7 @@ const KERNEL_BASE_GPA: u64 = 0x1000;
 unsafe extern "C" {
     /// Linker-provided symbol marking the start of the kernel image.
     /// Defined by `_kernel_start = .;` in the consuming binary's
-    /// `link.x` (e.g. `rust/nub-arch-x86/link.x`). With PIE output
+    /// `link.x` (e.g. `rust/javm-guest-x86/link.x`). With PIE output
     /// this resolves at runtime to the actual GVA the host loaded
     /// the kernel at, so the kernel half is VA-relocatable.
     safe static _kernel_start: u8;

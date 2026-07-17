@@ -20,13 +20,13 @@ javm-cap = { workspace = true }
 # `run_instance` builds the interpreter register file (javm_exec::Regs)
 # when lowering an InstanceCap onto nub_arch_local::ProgramSpec.
 javm-exec = { workspace = true }
-nub = { path = "../nub" }
-nub-arch-local = { path = "../nub-arch-local" }
-nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+nub = { path = "../../nub/nub" }
+nub-arch-local = { path = "../../nub/nub-arch-local" }
+nub-arch-x86-abi = { path = "../../nub/nub-arch-x86-abi" }
 rkyv = { version = "0.8", features = ["std"] }
 
 [build-dependencies]
-nub-build = { path = "../nub-build" }
+nub-build = { path = "../../nub/nub-build" }
 
 [dev-dependencies]
 # Self-reference so `cargo test -p javm` and `cargo bench -p javm`
@@ -38,10 +38,10 @@ criterion = "0.5"
 # Host lib forms of the guest crates — test_abi fn_id constants only:
 # javm-private ids (band >= 0x100) and the generic probes (100/200).
 javm-guest-x86 = { path = "../javm-guest-x86" }
-nub-arch-x86 = { path = "../nub-arch-x86" }
+nub-arch-x86 = { path = "../../nub/nub-arch-x86" }
 # Tests exercise the generic byte surface (nub::Nub<Javm>::put_object)
 # directly alongside the typed facade.
-nub = { path = "../nub" }
+nub = { path = "../../nub/nub" }
 
 [[bench]]
 name = "arc_page_alloc"

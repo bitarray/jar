@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # onto host platforms.
 [target.'cfg(target_os = "none")'.dependencies]
 hyperlight-guest = { version = "0.15", default-features = false }
-# Vendored Hyperlight guest-bin (`rust/nub-arch-guestbin`). The
+# Vendored Hyperlight guest-bin (`nub/nub-arch-guestbin`). The
 # directory name is `nub-arch-guestbin` but the package keeps its
 # upstream name `hyperlight-guest-bin` so the `#[guest_function]`
 # proc-macro's `proc_macro_crate::crate_name("hyperlight-guest-bin")`
@@ -25,8 +25,8 @@ hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false
 # in-kernel JIT path (Stages C1+). Direct path deps (not workspace
 # inheritance) because cargo forbids overriding workspace
 # `default-features` from the member crate.
-javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
-javm-exec = { path = "../javm-exec", default-features = false }
+javm-recompiler-x86 = { path = "../../rust/javm-recompiler-x86", default-features = false }
+javm-exec = { path = "../../rust/javm-exec", default-features = false }
 # Wire types shared between guest and host. The fn-id constants and
 # `Archive` / `Serialize` derives on `InvocationSpec` /
 # `InvocationResult` live here.

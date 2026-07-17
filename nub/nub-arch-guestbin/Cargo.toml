@@ -3,7 +3,7 @@
 # strip aarch64/libc/logger/mem_profile, drop the CoW pagefault handler,
 # and swap the buddy heap allocator for talc.
 #
-# The directory lives at `rust/nub-arch-guestbin/` for workspace clarity,
+# The directory lives at `nub/nub-arch-guestbin/` for workspace clarity,
 # but `package.name` is `hyperlight-guest-bin` so `proc_macro_crate`
 # (used by `hyperlight-guest-macro`'s `#[guest_function]`) resolves it
 # by the upstream crate name. Our workspace doesn't depend on the

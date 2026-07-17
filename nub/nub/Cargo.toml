@@ -29,7 +29,7 @@ test-support = []
 [dependencies]
 anyhow = "1"
 # Forked KVM-only Hyperlight host (vendored + stripped from
-# `hyperlight-host` 0.15.0; see `rust/nub-host-kvm`).
+# `hyperlight-host` 0.15.0; see `nub/nub-host-kvm`).
 nub-host-kvm = { path = "../nub-host-kvm" }
 nub-kernel = { path = "../nub-kernel" }
 # Wire types shared between the host driver and the guest's

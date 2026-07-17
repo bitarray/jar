@@ -4,17 +4,17 @@ members = [
     "tools/jar-genesis",
     "rust/build-crate",
     "rust/build-javm",
-    "rust/nub-build",
-    "rust/nub",
-    "rust/nub-arch-x86",
-    "rust/nub-arch-x86-abi",
+    "nub/nub-build",
+    "nub/nub",
+    "nub/nub-arch-x86",
+    "nub/nub-arch-x86-abi",
     "rust/javm-guest-x86",
     "rust/javm",
-    "rust/nub-host-kvm",
-    "rust/nub-host-common",
-    "rust/nub-host-guest-macro",
-    "rust/nub-arch-local",
-    "rust/nub-kernel",
+    "nub/nub-host-kvm",
+    "nub/nub-host-common",
+    "nub/nub-host-guest-macro",
+    "nub/nub-arch-local",
+    "nub/nub-kernel",
     "rust/subsoil",
     "rust/subsoil-derive",
     "rust/javm-guest-tests",
@@ -49,7 +49,7 @@ exclude = [
     # the `cfg(target_os = "none")` cross-compile; excluding it from
     # the workspace prevents `cargo build --workspace` (host target)
     # from trying to link a no_std panic_impl into a std world.
-    "rust/nub-arch-guestbin",
+    "nub/nub-arch-guestbin",
 ]
 
 [workspace.package]

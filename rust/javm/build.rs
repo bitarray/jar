@@ -41,8 +41,8 @@ fn main() {
     // src trees explicitly. nub_build::build already emits rerun for the
     // guest crate's own src/ + Cargo.toml.
     println!("cargo:rerun-if-changed=../javm-guest-x86/link.x");
-    println!("cargo:rerun-if-changed=../nub-arch-x86/src");
-    println!("cargo:rerun-if-changed=../nub-arch-x86/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-x86/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-x86/Cargo.toml");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/src");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/Cargo.toml");
     println!("cargo:rerun-if-changed=../javm-exec/src");
@@ -56,14 +56,14 @@ fn main() {
     println!("cargo:rerun-if-changed=../ssz/Cargo.toml");
     println!("cargo:rerun-if-changed=../ssz-derive/src");
     println!("cargo:rerun-if-changed=../ssz-derive/Cargo.toml");
-    println!("cargo:rerun-if-changed=../nub-arch-x86-abi/src");
-    println!("cargo:rerun-if-changed=../nub-arch-x86-abi/Cargo.toml");
-    println!("cargo:rerun-if-changed=../nub-host-common/src");
-    println!("cargo:rerun-if-changed=../nub-host-common/Cargo.toml");
-    println!("cargo:rerun-if-changed=../nub-host-guest-macro/src");
-    println!("cargo:rerun-if-changed=../nub-host-guest-macro/Cargo.toml");
-    println!("cargo:rerun-if-changed=../nub-arch-guestbin/src");
-    println!("cargo:rerun-if-changed=../nub-arch-guestbin/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-x86-abi/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-x86-abi/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-host-common/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-host-common/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-host-guest-macro/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-host-guest-macro/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-guestbin/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-arch-guestbin/Cargo.toml");
     // The guest build resolves through the same workspace: the root
     // manifest's [workspace.dependencies] feed the tracked crates'
     // `workspace = true` deps, and external version bumps land in the
