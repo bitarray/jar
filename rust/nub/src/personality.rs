@@ -42,6 +42,19 @@ pub trait LocalKernel {
     /// into the store. Returns the personality-computed content hash.
     /// Idempotent re-puts follow the personality's own semantics
     /// (JAVM: refcount bump).
+    ///
+    /// **Publication is permanent** — a personality obligation that
+    /// spans both backends (this method and the personality's guest
+    /// store alike): once a put succeeds for a hash, the store must
+    /// retain that object for its own lifetime, never evicting it
+    /// under capacity or memory pressure. The Hyperlight backend's
+    /// host-side idempotency cache
+    /// (`nub-host-kvm::MultiUseSandbox::published_blobs`) short-
+    /// circuits re-puts on exactly this assumption; a store that
+    /// evicted a published object would take warm-path hits for
+    /// objects the guest no longer holds, and later invokes would
+    /// fail guest-side with object-not-found even though every
+    /// publish returned `Ok`.
     fn put_object(&mut self, bytes: &[u8]) -> Result<ObjHash>;
 
     /// Pre-hashed variant of [`put_object`](Self::put_object): the

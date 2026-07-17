@@ -73,12 +73,18 @@ pub struct MultiUseSandbox {
     /// wrong entry. A hashbrown table simply cannot be shared by direct memory
     /// access across two binaries with different SIMD `Group` widths.
     ///
-    /// The host set is correct because the blobs tier is **monotonic**: a cap
-    /// is keyed by content hash and `CacheDirectory::put_cap` only ever
-    /// `entry().or_insert()`s — blobs are never evicted (only the *instances*
-    /// tier is swept). A miss falls through to the idempotent `put_cap` RPC,
-    /// so even blobs the guest published on its own (e.g. via `derive_spawn`)
-    /// are handled correctly — just without the short-circuit.
+    /// The host set is sound only under a **personality obligation**:
+    /// publication is permanent — the guest store must retain every object
+    /// it has accepted for the sandbox's lifetime, never evicting under
+    /// capacity or memory pressure (stated on
+    /// `nub::personality::LocalKernel::put_object`; a pressure-evicting
+    /// store MUST NOT be driven through this cache). javm satisfies it
+    /// structurally: caps are keyed by content hash and
+    /// `CacheDirectory::put_cap` only ever `entry().or_insert()`s — blobs
+    /// are never evicted (only the *instances* tier is swept). A miss
+    /// falls through to the idempotent `put_cap` RPC, so even blobs the
+    /// guest published on its own (e.g. via `derive_spawn`) are handled
+    /// correctly — just without the short-circuit.
     published_blobs: Mutex<HashSet<AbiCapHash>>,
 }
 
@@ -595,8 +601,9 @@ impl MultiUseSandbox {
     /// Behaviour:
     ///
     /// - If `hash` is in the host-side `published_blobs` set,
-    ///   return immediately — we already shipped this object and the
-    ///   blobs tier never evicts, so the guest still holds it. The
+    ///   return immediately — we already shipped this object and
+    ///   publication is permanent (the personality obligation on
+    ///   `published_blobs`), so the guest still holds it. The
     ///   `serialize` closure is never called: no encode, no VMEXIT, no
     ///   guest decode + hash walk + store insert. This is the hot path
     ///   for bench loops that re-publish the same object graph every

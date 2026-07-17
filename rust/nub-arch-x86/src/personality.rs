@@ -96,9 +96,19 @@ pub trait ExecFrame {
 /// `JavmStore`).
 pub trait GuestStore: Sync {
     /// Decode + validate + hash + insert one published object.
+    ///
+    /// **Publication is permanent**: once this returns `Ok(hash)`, the
+    /// store must retain the object for the guest's lifetime — never
+    /// evict it under capacity or memory pressure. The host's
+    /// idempotency cache (`nub-host-kvm::MultiUseSandbox::
+    /// published_blobs`) short-circuits re-puts on this obligation;
+    /// see `nub::personality::LocalKernel::put_object`.
     fn put_object(&self, bytes: &[u8]) -> Result<ObjHash, u32>;
 
     /// Post-invoke housekeeping (javm: `CACHE.sweep_instances()`).
+    /// May reclaim internal/derived state only — never objects
+    /// accepted by [`put_object`](Self::put_object) (see the
+    /// publication-permanence obligation there).
     fn sweep(&self) {}
 
     /// Drop all compiled-image artifacts (javm: walk the cap directory
