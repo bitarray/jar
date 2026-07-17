@@ -16,11 +16,14 @@ default = []
 # Off in production. Used by `javm-bench/tests/heap_drift.rs` to
 # detect per-iter leaks.
 heap-diag = []
-# Enable the `test_support` module + build the test/bench guest
-# binaries (`javm-guest-x86-tests`, `javm-guest-x86-benches`) in
-# addition to the production blob. Off by default; enabled by
-# downstream test/bench consumers via their own feature edge (e.g.
-# `javm`'s `test-support = ["nub/test-support"]`).
+# Enable the `test_support` module: raw `call_raw` /
+# `call_raw_on_vcpu` RPC dispatch on the Nub handle for fn_ids not
+# exposed through the typed API. nub builds no guest blobs — blob
+# production (including the test/bench blobs) lives in the
+# personality entrypoint crate's build.rs (e.g. `javm`, behind its
+# own `test-support` feature). Off by default; enabled by downstream
+# test/bench consumers via their own feature edge (e.g. `javm`'s
+# `test-support = ["nub/test-support"]`).
 test-support = []
 
 [dependencies]
