@@ -27,9 +27,6 @@ print_debug = []
 anyhow = "1.0"
 bitflags = "2.11.1"
 blake3 = "1.8.5"
-# Pinned to match the guest's `state_cache::DIRECTORY` hasher seed
-# — host and guest must compute identical bucket indices.
-foldhash = "0.2"
 goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hyperlight-common = { version = "0.15.0", features = ["std"] }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }

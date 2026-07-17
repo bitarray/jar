@@ -1519,7 +1519,6 @@ dependencies = [
  "bitflags 2.11.1",
  "blake3",
  "cfg_aliases",
- "foldhash 0.2.0",
  "goblin",
  "hyperlight-common",
  "kvm-bindings",
