@@ -103,6 +103,16 @@ pub trait GuestStore: Sync {
     /// idempotency cache (`nub-host-kvm::MultiUseSandbox::
     /// published_blobs`) short-circuits re-puts on this obligation;
     /// see `nub::personality::LocalKernel::put_object`.
+    ///
+    /// **Reserved hash value**: the wire protocol uses the all-`0xFF`
+    /// 32-byte hash as its put-failure sentinel
+    /// ([`crate::guest_fns`]'s `error_hash_sentinel`); the host turns
+    /// a response equal to it into a typed error. A personality whose
+    /// hash function could legitimately produce `[0xFF; 32]` (e.g.
+    /// structured or truncated keys) must not use it as a real object
+    /// hash. The `Err(u32)` code is diagnostics-only: the RPC wrapper
+    /// discards it and ships the sentinel, the only failure channel on
+    /// the wire.
     fn put_object(&self, bytes: &[u8]) -> Result<ObjHash, u32>;
 
     /// Post-invoke housekeeping (javm: `CACHE.sweep_instances()`).

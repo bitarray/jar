@@ -77,10 +77,16 @@ fn parallel_slot_for_lane(lane: usize) -> Option<*mut ParallelInvokeSlot> {
     Some((base + offset) as *mut ParallelInvokeSlot)
 }
 
-/// `put_object` failure sentinel — a hash of all `0xFF`. No real object
-/// hashes to this value (SSZ root + Union mix-in selector mean a content
-/// hash collides with all-ones only with negligible probability), so the
-/// host can use equality against this constant as a reliable error flag.
+/// `put_object` failure sentinel — a hash of all `0xFF`. The host errors
+/// on exact equality with this value
+/// (`nub-host-kvm::MultiUseSandbox::put_object`), which makes
+/// `[0xFF; 32]` a RESERVED hash on the wire: every personality's
+/// [`GuestStore::put_object`] must guarantee no real object ever hashes
+/// to it (stated on that trait method). javm satisfies this
+/// cryptographically — an SSZ content root (with its Union mix-in
+/// selector) collides with all-ones only with negligible probability.
+/// The personality's `u32` error code is diagnostics-only and never
+/// crosses the wire — the sentinel is the sole failure channel.
 fn error_hash_sentinel() -> Vec<u8> {
     alloc::vec![0xFFu8; 32]
 }
