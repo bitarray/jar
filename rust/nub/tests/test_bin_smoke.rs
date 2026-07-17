@@ -8,8 +8,9 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm_guest_x86::test_abi::FN_ID_TEST_INVOKE_TWO_SERIAL;
 use nub::{Nub, NubOptions};
-use nub_arch_x86::test_abi::{FN_ID_TEST_INVOKE_TWO_SERIAL, FN_ID_TEST_SMOKE};
+use nub_arch_x86::test_abi::FN_ID_TEST_SMOKE;
 use nub_arch_x86_abi::{InvocationResult, InvokePacket};
 use rkyv::primitive::ArchivedU64;
 use std::collections::BTreeMap;

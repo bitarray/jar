@@ -18,7 +18,8 @@ extern crate javm_guest_x86;
 mod test_fns {
     use alloc::vec::Vec;
     use hyperlight_guest_bin::guest_function;
-    use nub_arch_x86::test_abi::{FN_ID_TEST_INVOKE_TWO_SERIAL, FN_ID_TEST_SMOKE};
+    use javm_guest_x86::test_abi::FN_ID_TEST_INVOKE_TWO_SERIAL;
+    use nub_arch_x86::test_abi::FN_ID_TEST_SMOKE;
     use nub_arch_x86_abi::{InvocationResult, InvokePacket, SCRATCHPAD_HEAD_LEN};
 
     /// Smoke probe. Returns rkyv-encoded `42u64`. Used by

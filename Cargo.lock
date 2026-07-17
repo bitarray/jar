@@ -1428,6 +1428,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "javm-cap",
+ "javm-guest-x86",
  "nub",
  "nub-arch-local",
  "nub-arch-x86",

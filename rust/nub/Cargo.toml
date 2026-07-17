@@ -49,6 +49,10 @@ nub-build = { path = "../nub-build" }
 # `Nub::hyperlight_tests` / `hyperlight_benches` constructors.
 nub = { path = ".", features = ["test-support"] }
 criterion = "0.5"
+# Host lib form of the Javm guest crate — supplies the javm-private
+# test_abi constants (fn_id band >= 0x100) to nub's integration tests.
+# Temporary: moves to the `javm` crate with the tests at B2.
+javm-guest-x86 = { path = "../javm-guest-x86" }
 
 [[bench]]
 name = "arc_page_alloc"
