@@ -1436,11 +1436,11 @@ fn build_runtime(lane: ExecutionLane, frame: &KernelFrame) -> Result<FrameRuntim
     unsafe {
         jit_run::build_frame_runtime(
             lane,
-            &img_arc,
-            &frame.instance.image_hash,
+            &*img_arc,
             code_bytes,
             code_base,
             code_pa,
+            javm_cap::layout::DATA_BASE,
             mem_size,
             mat_ranges,
         )

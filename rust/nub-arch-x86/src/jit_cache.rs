@@ -29,15 +29,12 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
-use javm_cap::CapHash;
-
-use crate::cached_cap::{CachedCap, CapCache};
+use crate::cached_cap::CapCache;
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::page_alloc::PageBuf;
 use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
@@ -148,7 +145,29 @@ pub fn evict_all() {
     }
 }
 
-/// Look up the compile cache attached to `image_cap`. On miss, compile the
+/// A personality-owned cache slot for one image's [`CompiledImage`].
+///
+/// The JIT cache is NOT hash-keyed: the compiled artifact rides on whatever
+/// slot the caller already holds for the image (javm: the resident
+/// `CachedCap`'s `CapCache::Image` variant), so a hit costs zero lookups.
+///
+/// Contract:
+/// - same slot ⇒ same image bytes (slots are content-addressed upstream), so
+///   every compile input derived from the image — including the `mem_cycles`
+///   gas tier, which is per-Image under v3 static memory — is constant per
+///   slot;
+/// - no eviction while [`FrameRuntime`](crate::jit_run::FrameRuntime)s borrow
+///   the artifact (`trap_table_ptr` points into the slot's `CompiledImage`).
+pub trait JitSlot {
+    /// Run `f` on the slot's artifact, installing `compile()` on miss.
+    fn with_image<R>(
+        &self,
+        compile: impl FnOnce() -> CompiledImage,
+        f: impl FnOnce(&mut CompiledImage) -> R,
+    ) -> R;
+}
+
+/// Look up the compile cache attached to `slot`. On miss, compile the
 /// Image and materialise the per-Image arena, then run `f` with a borrow of the
 /// boxed cached artifact. The borrow must not escape the closure; callers copy
 /// the stable pointers/metadata they need into their frame runtime.
@@ -160,13 +179,12 @@ pub fn evict_all() {
 ///
 /// # Safety
 ///
-/// The compiled artifact is boxed inside the resident `CachedCap`, so raw
-/// pointers into it remain stable as long as that cap cache is not evicted
-/// while frame runtimes are live.
+/// The compiled artifact lives inside the personality's slot, so raw
+/// pointers into it remain stable as long as that slot is not evicted
+/// while frame runtimes are live (the [`JitSlot`] contract).
 #[allow(clippy::too_many_arguments)]
-pub fn with_compiled_image<R>(
-    image_cap: &CachedCap,
-    image_hash: &CapHash,
+pub fn with_compiled_image<S: JitSlot, R>(
+    slot: &S,
     code: &[u8],
     code_base: u32,
     arena_base_va: u64,
@@ -175,27 +193,13 @@ pub fn with_compiled_image<R>(
     helpers: HelperFns,
     f: impl FnOnce(&mut CompiledImage) -> R,
 ) -> R {
-    let mut cache = image_cap.cache.lock();
-    if !matches!(&*cache, CapCache::Image(_)) {
-        *cache = CapCache::Image(Box::new(compile_image(
-            image_hash,
-            code,
-            code_base,
-            arena_base_va,
-            ctx_va,
-            mem_cycles,
-            helpers,
-        )));
-    }
-    let CapCache::Image(compiled) = &mut *cache else {
-        unreachable!("image cache variant installed above")
-    };
-    f(compiled)
+    slot.with_image(
+        || compile_image(code, code_base, arena_base_va, ctx_va, mem_cycles, helpers),
+        f,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compile_image(
-    _image_hash: &CapHash,
     code: &[u8],
     code_base: u32,
     arena_base_va: u64,

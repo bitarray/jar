@@ -175,6 +175,23 @@ fn fold_cnode_to_wire(cnode: &ResidentCNode) -> CNodeCap<Box<Cap>> {
     out
 }
 
+impl crate::jit_cache::JitSlot for CachedCap {
+    fn with_image<R>(
+        &self,
+        compile: impl FnOnce() -> CompiledImage,
+        f: impl FnOnce(&mut CompiledImage) -> R,
+    ) -> R {
+        let mut cache = self.cache.lock();
+        if !matches!(&*cache, CapCache::Image(_)) {
+            *cache = CapCache::Image(Box::new(compile()));
+        }
+        let CapCache::Image(compiled) = &mut *cache else {
+            unreachable!("image cache variant installed above")
+        };
+        f(compiled)
+    }
+}
+
 impl Clone for CachedCap {
     fn clone(&self) -> Self {
         // A clone is a distinct instance → fresh, empty cache.

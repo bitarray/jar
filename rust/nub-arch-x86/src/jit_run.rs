@@ -50,9 +50,9 @@
 
 extern crate alloc;
 
-use crate::cached_cap::CachedCap;
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
+use crate::jit_cache::JitSlot;
 use crate::page_alloc::GlobalPage;
 use crate::paging::{PAGE_SIZE, PageTable};
 use crate::ring3;
@@ -979,15 +979,21 @@ impl FrameRuntime {
 /// # Safety
 /// The `code` / overlay slices and `code_pa` / cap PAs must outlive the
 /// returned [`FrameRuntime`], which owns the per-call page table and borrows
-/// the cached Image arena PD.
+/// the cached Image arena PD (no `jit_slot` eviction while FrameRuntimes are
+/// live — `trap_table_ptr` borrows into the slot; see [`JitSlot`]).
+///
+/// `mem_size` MUST be per-image constant: it feeds `mem_cycles`, a compile
+/// input cached per slot, so two calls against one slot with different
+/// `mem_size` tiers would silently reuse the first tier's code (the
+/// [`JitSlot`] contract makes this the caller's obligation).
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn build_frame_runtime(
+pub unsafe fn build_frame_runtime<S: JitSlot>(
     lane: ExecutionLane,
-    image_cap: &CachedCap,
-    image_hash: &javm_cap::CapHash,
+    jit_slot: &S,
     code: &[u8],
     code_base: u32,
     code_pa: u64,
+    data_base: u32,
     mem_size: u32,
     mat_ranges: alloc::vec::Vec<MatRange>,
 ) -> Option<FrameRuntime> {
@@ -1004,15 +1010,13 @@ pub unsafe fn build_frame_runtime(
     // Category #2: scale the load/store base latency (mem_cycles) ×1..4
     // by the Instance's declared footprint. `mem_size` is the same
     // high-water-mark the interpreter derives, so both pick the same
-    // tier (and it is per-Image, so the jit_cache keying by image_hash
-    // stays sound under v3 static memory).
+    // tier (and it is per-Image — see the `mem_size` contract above — so
+    // caching the compile per slot stays sound under v3 static memory).
     let mem_cycles = javm_exec::gas_const::mem_cycles_for(javm_exec::gas_const::accessible_pages(
-        mem_size,
-        javm_cap::layout::DATA_BASE,
+        mem_size, data_base,
     ));
     jit_cache::with_compiled_image(
-        image_cap,
-        image_hash,
+        jit_slot,
         code,
         code_base,
         META_BASE_M,
@@ -1032,7 +1036,7 @@ pub unsafe fn build_frame_runtime(
             // only that extent and is mapped at native VA DATA_BASE, leaving
             // [0, DATA_BASE) unmapped — a null guard, save for the code
             // direct-map at CODE_BASE. `mem_size` is the absolute max data VA.
-            let data_base = javm_cap::layout::DATA_BASE as usize;
+            let data_base = data_base as usize;
             let mem_bytes = (mem_size as usize)
                 .saturating_sub(data_base)
                 .next_multiple_of(PAGE_SIZE);
