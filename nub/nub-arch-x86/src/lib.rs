@@ -1,7 +1,7 @@
 //! Generic nub guest-kernel library for Hyperlight.
 //!
 //! Houses the personality seam (`personality`), the CALL/HALT task
-//! loop (`task`), the generic RPC bodies + [`register_guest_kernel!`]
+//! loop (`task`), the generic RPC bodies + `register_guest_kernel!`
 //! (`guest_fns`), and the bare-metal substrate modules (page tables,
 //! JIT runtime, page allocator, ring-3 entry, segments). This crate
 //! produces **no** binaries: a personality crate (e.g.

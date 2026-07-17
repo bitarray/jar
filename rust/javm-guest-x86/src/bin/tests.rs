@@ -2,7 +2,7 @@
 //!
 //! Same kernel modules + production RPCs as the production bin
 //! (via `extern crate javm_guest_x86`), plus test-only guest
-//! functions whose FN_IDs live in [`nub_arch_x86::test_abi`].
+//! functions whose FN_IDs live in `nub_arch_x86::test_abi`.
 
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
