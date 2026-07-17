@@ -11,11 +11,11 @@
 //! The personality lowers its own object types into a `ProgramSpec`
 //! (JAVM: `javm::JavmLocal`'s `run_instance`).
 
+use nub_arch_x86_abi::{InvocationResult, SCRATCHPAD_HEAD_LEN};
 use nub_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
     Regs, gas_const, interp::Interpreter, predecode::predecode_rv_with_mem_cycles,
 };
-use nub_arch_x86_abi::{InvocationResult, SCRATCHPAD_HEAD_LEN};
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 /// In-process Arch backend.

@@ -505,8 +505,9 @@ enum RoSrc {
 #[inline]
 fn page_kind(state: &LaneJitState, page_va: u32) -> nub_exec::mat::PageKind {
     match mat_range_for(state, page_va) {
-        Some(r) => nub_exec::mat::PageKind::from_u8(r.kind)
-            .unwrap_or(nub_exec::mat::PageKind::PinnedCapRo),
+        Some(r) => {
+            nub_exec::mat::PageKind::from_u8(r.kind).unwrap_or(nub_exec::mat::PageKind::PinnedCapRo)
+        }
         None => nub_exec::mat::PageKind::EphemeralZero,
     }
 }
