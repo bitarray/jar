@@ -1500,7 +1500,6 @@ dependencies = [
  "foldhash 0.2.0",
  "goblin",
  "hyperlight-common",
- "javm-cap",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
