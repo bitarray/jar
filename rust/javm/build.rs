@@ -57,9 +57,13 @@ fn main() {
     println!("cargo:rerun-if-changed=../ssz-derive/src");
     println!("cargo:rerun-if-changed=../ssz-derive/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-arch-x86-abi/src");
+    println!("cargo:rerun-if-changed=../nub-arch-x86-abi/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-host-common/src");
+    println!("cargo:rerun-if-changed=../nub-host-common/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-host-guest-macro/src");
+    println!("cargo:rerun-if-changed=../nub-host-guest-macro/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-arch-guestbin/src");
+    println!("cargo:rerun-if-changed=../nub-arch-guestbin/Cargo.toml");
     // The guest build resolves through the same workspace: the root
     // manifest's [workspace.dependencies] feed the tracked crates'
     // `workspace = true` deps, and external version bumps land in the
