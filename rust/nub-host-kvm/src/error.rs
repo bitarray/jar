@@ -216,6 +216,23 @@ pub enum HyperlightError {
     #[error("Failed To Convert Return Value {0:?} to {1:?}")]
     ReturnValueConversionFailure(ReturnValue, &'static str),
 
+    /// A Hyperlight sandbox was already created in this process. The
+    /// KVM substrate supports at most ONE live sandbox per process:
+    /// the guest-VA window is a single process-wide reservation
+    /// ([`nub_host_common::layout::reserve_guest_va_range`], a
+    /// `OnceLock` that silently no-ops on a second call) and every
+    /// sandbox `MAP_FIXED`-overlays its kernel-shadow at the one fixed
+    /// VA inside it (`FixedVaMapping`, whose `Drop` munmaps it). A
+    /// second sandbox — concurrent or sequential — would silently
+    /// clobber the first one's live guest memory rather than fail.
+    #[error(
+        "a Hyperlight sandbox was already created in this process; the KVM substrate supports \
+         at most one live sandbox per process (the kernel-shadow is a MAP_FIXED overlay at a \
+         single fixed VA inside the one process-wide guest-VA reservation — a second sandbox \
+         would silently corrupt the first one's guest memory)"
+    )]
+    SandboxAlreadyCreated(),
+
     /// SystemTimeError
     #[error("SystemTimeError {0:?}")]
     SystemTimeError(#[from] SystemTimeError),

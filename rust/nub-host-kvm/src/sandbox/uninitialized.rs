@@ -17,6 +17,7 @@ limitations under the License.
 use std::fmt::Debug;
 use std::option::Option;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracing::{Span, instrument};
@@ -31,7 +32,25 @@ use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags}
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::{ExclusiveSharedMemory, SharedMemory};
 use crate::sandbox::SandboxConfiguration;
-use crate::{MultiUseSandbox, Result, new_error};
+use crate::{HyperlightError, MultiUseSandbox, Result, new_error};
+
+/// One-shot latch enforcing the at-most-one-sandbox-per-process
+/// substrate limit. Set by the FIRST construction attempt and never
+/// cleared — not on sandbox drop, not on a failed construction:
+/// [`nub_host_common::layout::reserve_guest_va_range`] reserves the
+/// process-wide guest-VA window exactly once (its `OnceLock` makes a
+/// second reservation a silent no-op), and every sandbox
+/// `MAP_FIXED`-overlays its kernel-shadow at the single fixed VA
+/// inside that window (`FixedVaMapping`, whose `Drop` munmaps it).
+/// A second sandbox — concurrent or sequential — would therefore
+/// silently corrupt the first one's live guest memory instead of
+/// failing, so we refuse loudly here, before any resource is
+/// acquired. (Even create → drop → create is unsafe: the drop
+/// munmaps the kernel-shadow hole out of the reservation, so an
+/// unrelated allocation can land there and be clobbered by the next
+/// MAP_FIXED — see the historical corruption note in
+/// `javm-bench/examples/smoke.rs`.)
+static SANDBOX_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// A preliminary sandbox that represents allocated memory and registered host functions,
 /// but has not yet created the underlying virtual machine.
@@ -195,6 +214,12 @@ impl UninitializedSandbox {
         env: impl Into<GuestEnvironment<'a, 'b>>,
         cfg: Option<SandboxConfiguration>,
     ) -> Result<Self> {
+        // Claim the process-wide sandbox slot BEFORE acquiring any
+        // resource, so a rejected second construction leaves no
+        // partial state behind. See `SANDBOX_CREATED`.
+        if SANDBOX_CREATED.swap(true, Ordering::SeqCst) {
+            return Err(HyperlightError::SandboxAlreadyCreated());
+        }
         let cfg = cfg.unwrap_or_default();
         let env = env.into();
         let snapshot = Snapshot::from_env(env, cfg)?;

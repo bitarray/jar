@@ -381,9 +381,19 @@ impl<P: Personality> Nub<P> {
 
     /// Create a Hyperlight-backed Nub from a guest ELF on disk.
     ///
-    /// Non-singleton: every call boots a fresh sandbox. Personality
-    /// entrypoint crates (e.g. `javm`) own the blob paths and any
-    /// process-wide singleton policy on top of this.
+    /// **At most one per process.** The KVM substrate supports a
+    /// single live Hyperlight sandbox per process: the guest-VA
+    /// window is one process-wide fixed reservation, and every
+    /// sandbox `MAP_FIXED`-overlays its kernel-shadow at the same VA
+    /// inside it. A second construction — concurrent or sequential
+    /// (the guard is never released, even after dropping the first
+    /// sandbox) — fails loudly with
+    /// `nub_host_kvm::HyperlightError::SandboxAlreadyCreated` instead
+    /// of silently corrupting the live sandbox's guest memory.
+    /// Personality entrypoint crates own the blob paths and typically
+    /// wrap this constructor in a process-wide singleton (e.g.
+    /// `javm::Nub::hyperlight`), which reuses the one sandbox across
+    /// callers.
     pub fn create_hyperlight(path: &str, options: NubOptions) -> Result<Self> {
         options.validate()?;
         let mut cfg = SandboxConfiguration::default();
