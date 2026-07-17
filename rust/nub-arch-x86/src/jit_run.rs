@@ -76,7 +76,7 @@ struct LaneJitState {
     trap_table_ptr: AtomicPtr<(u32, u32, u32)>,
     trap_table_len: AtomicU64,
     ctx_kva: AtomicU64,
-    mat_ranges_ptr: AtomicPtr<crate::call_loop::MatRange>,
+    mat_ranges_ptr: AtomicPtr<MatRange>,
     mat_ranges_len: AtomicU64,
     mat_zero_pa: AtomicU64,
     mat_state_ptr: AtomicPtr<u8>,
@@ -320,24 +320,39 @@ fn trap_lookup(state: &LaneJitState, offset: u32) -> (u32, u32) {
     }
 }
 
-/// Find the [`crate::call_loop::MatRange`] covering page `page_va` in `ranges`,
+/// One cap-backed data mapping projected into the guest address space,
+/// lazily materialized (category #3). The #PF handler scans this list when a
+/// guest access faults inside ring 3; a hit identifies the page's **kind**
+/// (pinned read-only vs unpinned copy-on-write), so the handler knows whether a
+/// write faults or CoWs. The page's **source PA** is resolved lazily on fault
+/// from the frame's `mem` DataCap (`mem_source_pa`), so this is just a
+/// region/kind map — `O(mappings)`, with no per-page PA arena. Pages NOT
+/// covered by any `MatRange` are outside the declared data extent and fault.
+#[derive(Clone, Copy, Debug)]
+pub struct MatRange {
+    pub start: u32,
+    pub end: u32,
+    /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
+    /// `PinnedCapRo` (a write hard-faults), initial slots are
+    /// `UnpinnedCapCow` (a write copies-on-write).
+    pub kind: u8,
+}
+
+/// Find the [`MatRange`] covering page `page_va` in `ranges`,
 /// or `None` for an ephemeral page. Pinned ranges are pushed first, so the
 /// first hit is the read-only one when a VA is covered by both a pinned range
 /// and the catch-all RW range.
-fn mat_range_for_in(
-    ranges: &[crate::call_loop::MatRange],
-    page_va: u32,
-) -> Option<crate::call_loop::MatRange> {
+fn mat_range_for_in(ranges: &[MatRange], page_va: u32) -> Option<MatRange> {
     ranges
         .iter()
         .copied()
         .find(|r| r.start <= page_va && page_va < r.end)
 }
 
-/// Find the cap-backed [`crate::call_loop::MatRange`] covering page
+/// Find the cap-backed [`MatRange`] covering page
 /// `page_va` (page-aligned) in the running frame's published `mat_ranges`, or
 /// `None` for an ephemeral page.
-fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<crate::call_loop::MatRange> {
+fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<MatRange> {
     let ptr = state.mat_ranges_ptr.load(Ordering::Relaxed);
     let len = state.mat_ranges_len.load(Ordering::Relaxed) as usize;
     if ptr.is_null() || len == 0 {
@@ -890,7 +905,7 @@ pub struct FrameRuntime {
     /// Cap-backed data mappings (pinned RO / initial CoW) covering the data
     /// extent — region bounds + kind only. Per-page source PAs are resolved
     /// lazily on fault ([`mem_source_pa`]); there is no per-page PA arena.
-    mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
+    mat_ranges: alloc::vec::Vec<MatRange>,
     /// Guest VA bounds of the lazily-materialized data extent.
     data_base: u32,
     mem_top: u32,
@@ -974,7 +989,7 @@ pub unsafe fn build_frame_runtime(
     code_base: u32,
     code_pa: u64,
     mem_size: u32,
-    mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
+    mat_ranges: alloc::vec::Vec<MatRange>,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
         mem_read_u8: 0x1001,
@@ -1168,10 +1183,9 @@ pub unsafe fn enter_frame(
         .trap_table_len
         .store(rt.trap_table_len, Ordering::Relaxed);
     state.ctx_kva.store(ctx_kva, Ordering::Relaxed);
-    state.mat_ranges_ptr.store(
-        rt.mat_ranges.as_ptr() as *mut crate::call_loop::MatRange,
-        Ordering::Relaxed,
-    );
+    state
+        .mat_ranges_ptr
+        .store(rt.mat_ranges.as_ptr() as *mut MatRange, Ordering::Relaxed);
     state
         .mat_ranges_len
         .store(rt.mat_ranges.len() as u64, Ordering::Relaxed);

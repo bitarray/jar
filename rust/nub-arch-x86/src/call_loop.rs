@@ -104,7 +104,7 @@ use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
-use crate::jit_run::{self, ExitInfo, FrameRuntime};
+use crate::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
 use crate::paging;
 use crate::state_cache::CACHE;
 
@@ -628,24 +628,6 @@ fn snapshot_catch_set(frame: &KernelFrame) -> Result<Vec<Key>, u32> {
         }
         Ok(None) => Ok(Vec::new()),
     }
-}
-
-/// One cap-backed data mapping projected into the guest address space,
-/// lazily materialized (category #3). The #PF handler scans this list when a
-/// guest access faults inside ring 3; a hit identifies the page's **kind**
-/// (pinned read-only vs unpinned copy-on-write), so the handler knows whether a
-/// write faults or CoWs. The page's **source PA** is resolved lazily on fault
-/// from the frame's `mem` DataCap (`jit_run::mem_source_pa`), so this is just a
-/// region/kind map — `O(mappings)`, with no per-page PA arena. Pages NOT
-/// covered by any `MatRange` are outside the declared data extent and fault.
-#[derive(Clone, Copy, Debug)]
-pub struct MatRange {
-    pub start: u32,
-    pub end: u32,
-    /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
-    /// `PinnedCapRo` (a write hard-faults), initial slots are
-    /// `UnpinnedCapCow` (a write copies-on-write).
-    pub kind: u8,
 }
 
 /// Successful loop result — what the host RPC returns to the bench
