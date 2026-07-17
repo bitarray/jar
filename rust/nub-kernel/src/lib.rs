@@ -12,13 +12,17 @@
 //!                  │
 //!         jar-apply  (block-apply, gas, quota — separate crate, later)
 //!                  │
-//!              nub  (uniform Nub handle over backends)
+//!             javm  (JAVM entrypoint: Javm personality, typed Cap
+//!                  │  surface, guest blob + Hyperlight singleton)
+//!                  │
+//!              nub  (generic Nub<P: Personality> handle over backends)
 //!                  │
 //!     ┌────────────┼────────────────┐
 //!     │                             │
 //! nub-arch-local        nub-arch-x86
-//! (in-process,         (bare-metal guest,
-//!  std)                 no_std + no_main)
+//! (in-process,         (generic bare-metal guest-kernel lib;
+//!  std)                 javm-guest-x86 supplies the personality
+//!     │                 + binaries, no_std + no_main)
 //!     │                             │
 //!     └────────────┬────────────────┘
 //!                  │
