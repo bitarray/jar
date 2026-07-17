@@ -175,11 +175,16 @@ impl Nub {
             return r;
         }
         // Lazy encode: never runs on the host-side published_blobs hit.
-        self.inner.put_object_with_hash(hash, || {
-            rkyv::to_bytes::<rkyv::rancor::Error>(cap)
-                .map(|b| b.to_vec())
-                .map_err(|e| format!("rkyv encode (or Ref present): {e}"))
-        })
+        self.inner
+            .put_object_with_hash(hash, || {
+                rkyv::to_bytes::<rkyv::rancor::Error>(cap)
+                    .map(|b| b.to_vec())
+                    .map_err(|e| format!("rkyv encode (or Ref present): {e}"))
+            })
+            // Lead with the typed operation the caller invoked; the
+            // substrate layer's own "put_object_with_hash: ..." context
+            // stays underneath.
+            .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}"))
     }
 
     // --- Invoke surface (forwards to the substrate handle) ---
