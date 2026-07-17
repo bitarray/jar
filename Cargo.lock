@@ -1184,6 +1184,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "javm-guest-x86"
+version = "0.1.0"
+dependencies = [
+ "foldhash 0.2.0",
+ "hyperlight-guest-bin",
+ "javm-cap",
+ "javm-exec",
+ "javm-recompiler-x86",
+ "nub-arch-x86",
+ "nub-arch-x86-abi",
+ "nub-host-common",
+ "rkyv",
+ "spin",
+]
+
+[[package]]
 name = "javm-recompiler-x86"
 version = "0.1.0"
 dependencies = [
@@ -1436,12 +1452,8 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
- "bytecheck",
- "foldhash 0.2.0",
- "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
- "javm-cap",
  "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",

@@ -26,8 +26,8 @@ use javm_cap::cap::instance::InstanceCap;
 use javm_cap::{CNodeCap, CapHashOrRef, MissingOr, ResidentCap};
 use spin::Mutex as SpinMutex;
 
-use crate::jit_cache::CompiledImage;
-use crate::jit_run::FrameRuntime;
+use nub_arch_x86::jit_cache::CompiledImage;
+use nub_arch_x86::jit_run::FrameRuntime;
 
 pub type ResidentCNode = CNodeCap<Box<CachedCap>>;
 pub type ResidentInstance = InstanceCap<Box<CachedCap>>;
@@ -175,7 +175,7 @@ fn fold_cnode_to_wire(cnode: &ResidentCNode) -> CNodeCap<Box<Cap>> {
     out
 }
 
-impl crate::jit_cache::JitSlot for CachedCap {
+impl nub_arch_x86::jit_cache::JitSlot for CachedCap {
     fn with_image<R>(
         &self,
         compile: impl FnOnce() -> CompiledImage,

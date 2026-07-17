@@ -1,7 +1,7 @@
-//! Bench guest binary for `nub-arch-x86`.
+//! Bench guest binary for `javm-guest-x86`.
 //!
 //! Same kernel modules + production RPCs as the production bin
-//! (via `extern crate nub_arch_x86`), plus bench-only guest
+//! (via `extern crate javm_guest_x86`), plus bench-only guest
 //! functions whose FN_IDs live in [`nub_arch_x86::test_abi`].
 
 #![cfg_attr(target_os = "none", no_std)]
@@ -12,7 +12,7 @@ extern crate alloc;
 #[cfg(target_os = "none")]
 extern crate hyperlight_guest_bin;
 #[cfg(target_os = "none")]
-extern crate nub_arch_x86;
+extern crate javm_guest_x86;
 
 #[cfg(target_os = "none")]
 mod bench_fns {

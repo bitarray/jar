@@ -41,7 +41,7 @@ use javm_cap::cap::Cap;
 use nub_arch_x86_abi::BootInfo;
 
 use crate::cached_cap::{CachedCap, CapCache};
-use crate::personality::{GuestStore, ObjHash};
+use nub_arch_x86::personality::{GuestStore, ObjHash};
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
 /// direct-dereference reader (via `BootInfo.directory_va`) agrees on

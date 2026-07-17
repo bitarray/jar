@@ -1,8 +1,8 @@
 //! The Javm guest-kernel personality: the javm-cap state/cap system driving
-//! the generic task skeleton ([`crate::task`]) for the in-sandbox sub-VM
+//! the generic task skeleton ([`nub_arch_x86::task`]) for the in-sandbox sub-VM
 //! lifecycle.
 //!
-//! `nub_invoke_cached` calls [`crate::task::run_top`]`::<`[`Javm`]`>` with a
+//! `nub_invoke_cached` calls [`nub_arch_x86::task::run_top`]`::<`[`Javm`]`>` with a
 //! top-level `Cap::Instance` hash + endpoint. [`Javm::build_root_frame`]
 //! builds a [`KernelFrame`] from the published cap state; the task loop runs
 //! one ring-3 cycle per poll and dispatches each exit back here:
@@ -62,7 +62,7 @@
 //!
 //! What this means for [`KernelFrame::mem`]:
 //!
-//! - The CoW #PF handler ([`crate::jit_run::jit_pf_handler`])
+//! - The CoW #PF handler ([`nub_arch_x86::jit_run::jit_pf_handler`])
 //!   allocates a fresh page on every guest write to a CoW-armed
 //!   mapping and inserts it into the running frame's `mem` DataCap
 //!   `overlay`. That page is the frame's own working memory — it lets
@@ -108,12 +108,12 @@ use javm_recompiler_x86::codegen::{EXIT_HOST_CALL, EXIT_OOG, EXIT_TRAP};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
-use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
-use crate::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
-use crate::paging;
-use crate::personality::{ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource};
+use nub_arch_x86::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
+use nub_arch_x86::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
+use nub_arch_x86::paging;
+use nub_arch_x86::personality::{ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource};
 use crate::state_cache::{CACHE, JavmStore};
-use crate::task::{
+use nub_arch_x86::task::{
     EntryKind, Flow, KernelScheduler, LaneSchedulerCell, LoopOutcome, StackEntry, TaskCtx,
     frame_at, frame_at_mut,
 };
@@ -221,7 +221,7 @@ type Entry = StackEntry<Javm>;
 
 /// Per-entry personality metadata: the owner edge, its snapshotted
 /// catch-set, and the gas scope funding the entry (see the field docs on
-/// the former inline `StackEntry` — now [`crate::task::StackEntry`], which
+/// the former inline `StackEntry` — now [`nub_arch_x86::task::StackEntry`], which
 /// carries this struct opaquely as `meta`).
 ///
 /// `Default` == the pre-stamp state `StackEntry::instance` used to set:
@@ -292,7 +292,7 @@ pub struct KernelFrame {
     /// as `mat_state` above.
     ro_units: Vec<u32>,
     /// Per-frame ring-3 resources (the page table). Lazily built on the first
-    /// [`crate::task::run_one_entry`] for this frame and reused across every subsequent
+    /// [`nub_arch_x86::task::run_one_entry`] for this frame and reused across every subsequent
     /// re-entry (parent resume after a child HALT) — so a depth-N recursion
     /// pays N page-table builds, not one per re-entry. It is *not* evicted:
     /// the synchronous call stack is bounded structurally (cnode nesting depth;
@@ -711,7 +711,7 @@ impl ExecFrame for KernelFrame {
 
 // The personality's persisted register file must match the substrate's
 // ExitInfo width (the 13 host-mapped PVM slots).
-const _: () = assert!(javm_cap::NUM_REGS == crate::personality::NUM_REGS);
+const _: () = assert!(javm_cap::NUM_REGS == nub_arch_x86::personality::NUM_REGS);
 
 impl GuestPersonality for Javm {
     type Frame = KernelFrame;
@@ -1074,7 +1074,7 @@ pub fn run_two_for_test(
 /// `payload` (a YieldSender / `Gas` cap copy) into the catcher's scratchpad
 /// slot[0], flag φ[8] = YIELDED, and push a ReferenceEntry to the catcher (the
 /// yielder stays Waiting below, resumed later by `CALL_RESUME`). Gas is NOT
-/// handled here — the loop-top [`crate::task::TaskGasState::reconcile`] banks the emitter's active
+/// handled here — the loop-top [`nub_arch_x86::task::TaskGasState::reconcile`] banks the emitter's active
 /// meter and loads the catcher's on the next iteration.
 ///
 /// Returns `true` if routed, `false` if no owner ancestor catches `key` — the
@@ -1222,7 +1222,7 @@ fn unwind_to_handler(
 /// move it back into the parent's origin slot (the single-owner round trip).
 /// Returns `true` when the stack has been drained (the RPC caller hands a
 /// result back to the host). Gas is NOT touched here — the loop-top
-/// [`crate::task::TaskGasState::reconcile`] banks the popped frame's meter and loads the parent's on
+/// [`nub_arch_x86::task::TaskGasState::reconcile`] banks the popped frame's meter and loads the parent's on
 /// the next iteration.
 fn pop_and_reflect(stack: &mut Vec<Entry>, return_value: u64) -> Result<bool, u32> {
     // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler

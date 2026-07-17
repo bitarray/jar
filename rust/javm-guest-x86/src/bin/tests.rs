@@ -1,7 +1,7 @@
-//! Test guest binary for `nub-arch-x86`.
+//! Test guest binary for `javm-guest-x86`.
 //!
 //! Same kernel modules + production RPCs as the production bin
-//! (via `extern crate nub_arch_x86`), plus test-only guest
+//! (via `extern crate javm_guest_x86`), plus test-only guest
 //! functions whose FN_IDs live in [`nub_arch_x86::test_abi`].
 
 #![cfg_attr(target_os = "none", no_std)]
@@ -12,7 +12,7 @@ extern crate alloc;
 #[cfg(target_os = "none")]
 extern crate hyperlight_guest_bin;
 #[cfg(target_os = "none")]
-extern crate nub_arch_x86;
+extern crate javm_guest_x86;
 
 #[cfg(target_os = "none")]
 mod test_fns {
@@ -61,7 +61,7 @@ mod test_fns {
                     .expect("rkyv-encode scheduler probe error")
                     .into_vec();
             };
-            match nub_arch_x86::call_loop::run_two_for_test(&first, &second) {
+            match javm_guest_x86::call_loop::run_two_for_test(&first, &second) {
                 Ok((a, b)) => [
                     InvocationResult {
                         exit_reason: a.exit_reason,

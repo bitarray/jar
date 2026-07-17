@@ -3,26 +3,14 @@ name = "nub-arch-x86"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Nub Arch implementation for Hyperlight: bare-metal guest binary running the kernel on real CPU + MMU"
+description = "Generic nub guest-kernel library for Hyperlight: personality seam, task loop, and bare-metal substrate (paging, JIT runtime, ring-3)"
 
 [lib]
 name = "nub_arch_x86"
 path = "src/lib.rs"
 
-[[bin]]
-name = "nub-arch-x86"
-path = "src/main.rs"
-
-[[bin]]
-name = "nub-arch-x86-tests"
-path = "src/bin/tests.rs"
-
-[[bin]]
-name = "nub-arch-x86-benches"
-path = "src/bin/benches.rs"
-
 # Hyperlight guest deps only on the bare-metal target. On the host
-# target this crate compiles to a trivial empty `main` so it can be
+# target this crate exposes only the `test_abi` constants so it can be
 # part of `cargo build --workspace` without forcing Hyperlight deps
 # onto host platforms.
 [target.'cfg(target_os = "none")'.dependencies]
@@ -33,12 +21,10 @@ hyperlight-guest = { version = "0.15", default-features = false }
 # proc-macro's `proc_macro_crate::crate_name("hyperlight-guest-bin")`
 # lookup resolves it (the macro keys by package name, not dep name).
 hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false }
-hyperlight-common = { version = "0.15", default-features = false }
 # Built no_std; supplies the codegen + assembler used by the
 # in-kernel JIT path (Stages C1+). Direct path deps (not workspace
 # inheritance) because cargo forbids overriding workspace
 # `default-features` from the member crate.
-javm-cap = { path = "../javm-cap", default-features = false }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 javm-exec = { path = "../javm-exec", default-features = false }
 # Wire types shared between guest and host. The fn-id constants and
@@ -46,14 +32,8 @@ javm-exec = { path = "../javm-exec", default-features = false }
 # `InvocationResult` live here.
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 nub-host-common = { path = "../nub-host-common", default-features = false }
-rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
-bytecheck = { version = "0.8", default-features = false }
-# Heap-resident `CACHE: Mutex<CacheDirectory<FixedState>>` lives in
-# `state_cache.rs`; spin gives us the `const fn` Mutex constructor
-# and foldhash gives us the `const fn` FixedState seed so the static
-# initialiser runs at link time.
+rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
 spin = "0.10"
-foldhash = { version = "0.2", default-features = false }
 
 [features]
 default = []
