@@ -25,7 +25,9 @@ use nub_kernel::ObjHash;
 /// only carries what the in-process backend requires plus a label for
 /// diagnostics.
 pub trait Personality: Send + Sync + 'static {
-    /// Short personality name for diagnostics and blob labels.
+    /// Short personality name labeling substrate diagnostics — every
+    /// [`Nub::create_hyperlight`](crate::Nub::create_hyperlight)
+    /// construction error leads with `create_hyperlight[NAME]`.
     const NAME: &'static str;
 
     /// The in-process (Local backend) kernel implementation.

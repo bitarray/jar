@@ -402,8 +402,11 @@ impl<P: Personality> Nub<P> {
         cfg.set_input_data_size(16 * 1024 * 1024);
         cfg.set_output_data_size(16 * 1024 * 1024);
         cfg.set_heap_size(256 * 1024 * 1024);
-        let uninit = UninitializedSandbox::new(GuestBinary::FilePath(path.to_string()), Some(cfg))?;
-        let sandbox = uninit.evolve()?;
+        let uninit = UninitializedSandbox::new(GuestBinary::FilePath(path.to_string()), Some(cfg))
+            .map_err(|e| anyhow::anyhow!("create_hyperlight[{}]: {path}: {e}", P::NAME))?;
+        let sandbox = uninit
+            .evolve()
+            .map_err(|e| anyhow::anyhow!("create_hyperlight[{}]: evolve: {e}", P::NAME))?;
         Ok(Self {
             inner: Arc::new(NubInner {
                 backend: Mutex::new(Backend::Hyperlight(Arc::new(HyperlightDriver {
