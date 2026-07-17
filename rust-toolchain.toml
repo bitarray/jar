@@ -1,0 +1,9 @@
+[toolchain]
+# Pinned: the PVM2 gas-conformance vectors (rust/javm-bench/tests/
+# workloads.rs) assert exact gas for guest blobs compiled by THIS
+# rustc. A stable bump changes guest codegen and silently drifts the
+# vectors (1.97.x moved the ed25519 workload by +3 gas). Bump the
+# channel and re-record the vectors in the same commit.
+channel = "1.95.0"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["x86_64-unknown-none"]
