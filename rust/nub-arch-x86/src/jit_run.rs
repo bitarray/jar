@@ -54,8 +54,8 @@ use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
 use crate::jit_cache::JitSlot;
 use crate::page_alloc::GlobalPage;
-use crate::personality::{FrameMem, PageSource};
 use crate::paging::{PAGE_SIZE, PageTable};
+use crate::personality::{FrameMem, PageSource};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -171,11 +171,12 @@ static LAST_GLOBAL_ARENA_PAGES: [AtomicU64; MAX_EXECUTION_LANES] =
 // initial slots), charging category-#3 gas against the saved gas register
 // (R15). The CODE region (`MAT_CODE_*`) is `PinnedCapRo` (page-in RO,
 // write-faults). The DATA region is fully covered by `MAT_RANGES` entries
-// sourced from the Instance's `mem` DataCap: pinned VAs are `PinnedCapRo`, the
-// rest `UnpinnedCapCow` (initial slabs or — for ephemeral/zero pages — the
-// shared zero page, CoW-from-zero on write). CoW'd pages are inserted into the
-// running frame's `mem` DataCap overlay (the cap is the source of truth — see
-// `OVERLAY_SINK` and `call_loop`).
+// sourced from the frame mem ([`FrameMem`]; javm: the Instance's `mem`
+// DataCap): pinned VAs are `PinnedCapRo`, the rest `UnpinnedCapCow` (initial
+// slabs or — for ephemeral/zero pages — the shared zero page, CoW-from-zero
+// on write). CoW'd pages are committed into the running frame mem's overlay
+// (the frame mem is the source of truth — see `overlay_sink` and the
+// personality module).
 
 /// Process-global, leak-once read-only zero page — the shared CoW/page-in source
 /// for every `Empty` (absent / zero) guest data page across all frames. It is
@@ -188,7 +189,8 @@ static ZERO_PAGE: GlobalPage = GlobalPage::new();
 /// (at [`STACK_VA_M`]). Shared across frames because only **one** frame runs in
 /// ring 3 at a time (cooperative nesting — each `host_call` fully exits to ring
 /// 0), and no ctx/stack state must survive a `host_call` exit: everything the
-/// driver needs persists through [`ExitInfo`] → `KernelFrame` and is re-stamped
+/// driver needs persists through [`ExitInfo`] → the owning frame (an
+/// `ExecFrame` impl; javm: `KernelFrame`) and is re-stamped
 /// by [`enter_frame`] on resume (regs/gas/pc + the frame-constant
 /// `dispatch_table`/`code_base`); the ring-3 stack is reset to its top every
 /// entry; `host_rsp_base` and the spilled x3/x4 are per-execution scratch the
@@ -390,7 +392,7 @@ fn trap_lookup(state: &LaneJitState, offset: u32) -> (u32, u32) {
 /// guest access faults inside ring 3; a hit identifies the page's **kind**
 /// (pinned read-only vs unpinned copy-on-write), so the handler knows whether a
 /// write faults or CoWs. The page's **source PA** is resolved lazily on fault
-/// from the frame's `mem` DataCap (`mem_source_pa`), so this is just a
+/// from the frame mem ([`FrameMem`]; see [`mem_source_pa`]), so this is just a
 /// region/kind map — `O(mappings)`, with no per-page PA arena. Pages NOT
 /// covered by any `MatRange` are outside the declared data extent and fault.
 #[derive(Clone, Copy, Debug)]
@@ -607,8 +609,9 @@ fn try_materialize<M: FrameMem>(
             }
         };
         if let Some((r_start, r_end, src)) = ro_range {
-            match materialize_ro_unit::<M>(state, pv, r_start, r_end, src, ro_units, pml4, owned_vec)
-            {
+            match materialize_ro_unit::<M>(
+                state, pv, r_start, r_end, src, ro_units, pml4, owned_vec,
+            ) {
                 Some(c) => total = total.saturating_add(c),
                 None => return false,
             }
@@ -694,8 +697,9 @@ fn try_materialize<M: FrameMem>(
                         let Some(src_pa) = mem_source_pa::<M>(state, pv) else {
                             return false;
                         };
-                        if !cow_into_fresh::<M>(state, pv, src_pa, pml4, owned_vec, data_base, flush)
-                        {
+                        if !cow_into_fresh::<M>(
+                            state, pv, src_pa, pml4, owned_vec, data_base, flush,
+                        ) {
                             // Allocation / remap failure → fault (nothing charged
                             // yet for THIS page, but earlier pages of a straddle
                             // were already advanced; an OOM here is fatal anyway).
@@ -721,19 +725,21 @@ fn try_materialize<M: FrameMem>(
     true
 }
 
-/// Copy-on-write a guest page into the running frame's `mem` DataCap overlay:
-/// allocate a fresh page-aligned slab, copy the source bytes from `src_pa`,
-/// remap the leaf writable at the new PA, and insert the page into the cap's
-/// `overlay` (keyed by data-extent page index, `(page_va - data_base) / PAGE`).
-/// Returns `false` on allocation / remap failure.
+/// Copy-on-write a guest page into the running frame mem's overlay
+/// ([`FrameMem`]): allocate a fresh page-aligned private copy of the source
+/// bytes at `src_pa` ([`FrameMem::alloc_cow_page`]), remap the leaf writable
+/// at the new PA, and commit the page into the overlay
+/// ([`FrameMem::commit_overlay_page`], keyed by data-extent page index,
+/// `(page_va - data_base) / PAGE`). Returns `false` on allocation / remap
+/// failure.
 ///
 /// The overlay carries the write past the runtime's lifetime: a runtime rebuilt
 /// after a future reclamation (host-backed swap), or a Phase-3 frame move,
 /// sources the overlay page rather than the immutable backing, so the frame's
 /// writes are never lost.
-/// The slab is `unhashed` (a `[0;32]` sentinel) — overlay pages are hashed
-/// only at [`javm_cap::DataCap::flush`], which recomputes; keeping SHA-256 out
-/// of the fault path preserves interp==recomp gas parity.
+/// The page is committed unhashed — hashing happens only at the
+/// personality's flush/rehash point (javm: `DataCap::flush`); keeping
+/// SHA-256 out of the fault path preserves interp==recomp gas parity.
 ///
 /// `flush` invalidates the TLB for `page_va` after the remap: pass `true`
 /// only when an *existing* present mapping is being changed (read-then-write
@@ -811,7 +817,7 @@ fn cow_into_fresh<M: FrameMem>(
 /// read-only page-in is accounted eagerly at the CALL
 /// ([`javm_exec::gas_const::call_frame_cost`]); the `ro_units` set here is
 /// purely a fault-reduction / mapping optimization. Clamping the fault-around
-/// to one cap means a single map event touches at most one DataCap.
+/// to one cap means a single map event touches at most one frame-mem region.
 ///
 /// No `invlpg`: every page mapped here goes `NotPresent → present`, which is
 /// not TLB-cached, so the faulting retry walks the fresh entries. Returns
@@ -925,14 +931,15 @@ const STACK_SIZE: u64 = PAGE_SIZE as u64;
 /// Per-frame ring-3 resources retained across re-entries.
 ///
 /// Holds the per-call page table plus the cached `CompiledImage` fields needed
-/// to publish #PF-handler atomics on every entry. Built once per `KernelFrame`
-/// (lazily on first [`enter_frame`]) and reused across every re-entry on the
-/// same frame — it is **not** evicted (the synchronous call stack is bounded
-/// structurally, so all live page tables stay resident). CTX and STACK are
-/// lane-local scratch pages; the zero scratch page remains process-global.
+/// to publish #PF-handler atomics on every entry. Built once per owning frame
+/// (an `ExecFrame` impl; lazily on first [`enter_frame`]) and reused across
+/// every re-entry on the same frame — it is **not** evicted (the synchronous
+/// call stack is bounded structurally, so all live page tables stay
+/// resident). CTX and STACK are lane-local scratch pages; the zero scratch
+/// page remains process-global.
 ///
 /// The category-#3 materialization *bookkeeping* (`mat_state` / `ro_units`)
-/// lives on the [`KernelFrame`](crate::call_loop), not here — it is gas history
+/// lives on the owning frame, not here — it is gas history
 /// that must outlive any future reclamation of this runtime (host-backed swap),
 /// so that a resumed frame never re-charges gas for pages it already paid for
 /// (which would fork the never-reclaiming interpreter).
@@ -961,7 +968,7 @@ pub struct FrameRuntime {
     global_arena_pages: u64,
     // ---- Category-#3 lazy-materialization map (region bounds + kind;
     // published to the #PF handler each entry). The mutable per-page *state*
-    // lives on the `KernelFrame` so it survives any future reclamation of this
+    // lives on the owning frame so it survives any future reclamation of this
     // runtime (host-backed swap). ----
     /// Cap-backed data mappings (pinned RO / initial CoW) covering the data
     /// extent — region bounds + kind only. Per-page source PAs are resolved
@@ -1102,7 +1109,7 @@ pub unsafe fn build_frame_runtime<S: JitSlot>(
                 .saturating_sub(data_base)
                 .next_multiple_of(PAGE_SIZE);
 
-            // Memory is sourced lazily from the Instance's `mem` DataCap via
+            // Memory is sourced lazily from the frame mem (FrameMem) via
             // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
             // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
             // STACK are lane-local shared pages, so each frame allocates only its page
@@ -1117,10 +1124,10 @@ pub unsafe fn build_frame_runtime<S: JitSlot>(
             // into `jit_pf_handler`, which builds the PML4→PT path (recording the
             // new tables in `pt.owned`) and materializes the page (page-in / CoW),
             // charging #3. There is no eager data buffer: every page is materialized
-            // from the frame's `mem` DataCap (cap slabs or the shared zero page).
+            // from the frame mem (live slabs or the shared zero page).
             //
             // The per-page #3 *state* (`mat_state`) and the RO-unit set (`ro_units`)
-            // live on the owning `KernelFrame`, NOT here — they are gas history that
+            // live on the owning frame, NOT here — they are gas history that
             // must outlive any future reclamation of this runtime (host-backed swap).
             let mem_top = (data_base + mem_bytes) as u32;
             // Code region: page-rounded `[code_base, code_top)`, lazily paged in
@@ -1177,11 +1184,11 @@ pub unsafe fn build_frame_runtime<S: JitSlot>(
 /// category-#3 materialization state from `rt`), drops to ring 3, then
 /// reads back the post-exit state.
 ///
-/// `overlay_sink` is the running frame's `mem` DataCap; the handler inserts
-/// each CoW'd page into its `overlay` (may be null to disable bookkeeping).
-/// `mat_state` (per-page `PageState`, len = data-extent pages) and `ro_units`
-/// (sorted RO-unit set) are the category-#3 bookkeeping — they live on the
-/// owning [`KernelFrame`](crate::call_loop) (gas history that outlives any
+/// `overlay_sink` is the running frame's mem ([`FrameMem`]); the handler
+/// commits each CoW'd page into its overlay (may be null to disable
+/// bookkeeping). `mat_state` (per-page `PageState`, len = data-extent pages)
+/// and `ro_units` (sorted RO-unit set) are the category-#3 bookkeeping —
+/// they live on the owning frame (gas history that outlives any
 /// future reclamation of this runtime), and the caller passes raw pointers so
 /// the #PF handler can mutate them in place
 /// while the JIT runs. The lazily-materialized data *ranges* live in `rt` and

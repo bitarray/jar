@@ -80,8 +80,7 @@ impl GuestStore for JavmStore {
 
         let archived = rkyv::access::<rkyv::Archived<Cap>, rkyv::rancor::Error>(aligned.as_slice())
             .map_err(|_| 1u32)?;
-        let cap: Cap =
-            rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).map_err(|_| 2u32)?;
+        let cap: Cap = rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).map_err(|_| 2u32)?;
         CACHE.put_cap(&cap).map_err(|_| 3u32)
     }
 

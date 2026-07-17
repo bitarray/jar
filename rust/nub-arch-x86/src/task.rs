@@ -536,7 +536,13 @@ pub fn run_top<P: GuestPersonality>(
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    run_top_on_lane::<P>(ExecutionLane::PRIMARY, root, endpoint_idx, args, initial_gas)
+    run_top_on_lane::<P>(
+        ExecutionLane::PRIMARY,
+        root,
+        endpoint_idx,
+        args,
+        initial_gas,
+    )
 }
 
 pub fn run_top_on_lane<P: GuestPersonality>(

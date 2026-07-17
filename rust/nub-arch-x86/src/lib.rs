@@ -1,8 +1,11 @@
 //! Nub Arch implementation for Hyperlight — library form.
 //!
-//! Houses the kernel modules (page tables, JIT runtime, page
-//! allocator, state cache, call loop) and the production guest-
-//! function table. Three binary targets link against this lib:
+//! Houses the generic guest-kernel skeleton (`personality` — the
+//! pluggable-state seam, `task` — the CALL/HALT loop, `guest_fns` — the
+//! generic RPC bodies + `register_guest_kernel!`), the substrate modules
+//! (page tables, JIT runtime, page allocator), and the Javm personality
+//! (`call_loop`, `state_cache`, `cached_cap`) with its production
+//! guest-function table. Three binary targets link against this lib:
 //!
 //! - `nub-arch-x86` (`src/main.rs`) — production. Empty shell;
 //!   `extern crate nub_arch_x86` pulls in the lib's

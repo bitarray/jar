@@ -111,9 +111,7 @@ use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, Resid
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
 use crate::paging;
-use crate::personality::{
-    ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource,
-};
+use crate::personality::{ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource};
 use crate::state_cache::{CACHE, JavmStore};
 use crate::task::{
     EntryKind, Flow, KernelScheduler, LaneSchedulerCell, LoopOutcome, StackEntry, TaskCtx,
@@ -294,7 +292,7 @@ pub struct KernelFrame {
     /// as `mat_state` above.
     ro_units: Vec<u32>,
     /// Per-frame ring-3 resources (the page table). Lazily built on the first
-    /// [`run_one_entry`] for this frame and reused across every subsequent
+    /// [`crate::task::run_one_entry`] for this frame and reused across every subsequent
     /// re-entry (parent resume after a child HALT) — so a depth-N recursion
     /// pays N page-table builds, not one per re-entry. It is *not* evicted:
     /// the synchronous call stack is bounded structurally (cnode nesting depth;
@@ -339,12 +337,10 @@ impl FrameMem for JavmMem {
 
     fn page_source(&self, i: usize) -> PageSource {
         match self.0.page_slot(i) {
-            javm_cap::PageSlot::Loaded(pr) => {
-                match paging::va_to_pa(pr.bytes.as_ptr() as u64) {
-                    Some(pa) => PageSource::Pa(pa),
-                    None => PageSource::Missing,
-                }
-            }
+            javm_cap::PageSlot::Loaded(pr) => match paging::va_to_pa(pr.bytes.as_ptr() as u64) {
+                Some(pa) => PageSource::Pa(pa),
+                None => PageSource::Missing,
+            },
             javm_cap::PageSlot::Empty => PageSource::Zero,
             javm_cap::PageSlot::Missing(_) => PageSource::Missing,
         }
@@ -881,7 +877,12 @@ impl GuestPersonality for Javm {
                     YieldOutcome::Inline => {}
                     // Bad/empty sender slot or pinned dst -> guest trap.
                     YieldOutcome::Trap => {
-                        return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                        return Ok(ctx.done(
+                            EXIT_TRAP,
+                            0,
+                            info.regs[7],
+                            [0u8; SCRATCHPAD_HEAD_LEN],
+                        ));
                     }
                     // Route `key` to an owner YieldReceiver (the payload
                     // is a copy of the emitted YieldSender). No catcher
@@ -950,7 +951,12 @@ impl GuestPersonality for Javm {
                 let catch_set = match catch_result {
                     Ok(set) => set,
                     Err(EXIT_TRAP) => {
-                        return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                        return Ok(ctx.done(
+                            EXIT_TRAP,
+                            0,
+                            info.regs[7],
+                            [0u8; SCRATCHPAD_HEAD_LEN],
+                        ));
                     }
                     Err(e) => return Err(e),
                 };
@@ -1068,7 +1074,7 @@ pub fn run_two_for_test(
 /// `payload` (a YieldSender / `Gas` cap copy) into the catcher's scratchpad
 /// slot[0], flag φ[8] = YIELDED, and push a ReferenceEntry to the catcher (the
 /// yielder stays Waiting below, resumed later by `CALL_RESUME`). Gas is NOT
-/// handled here — the loop-top [`reconcile_active`] banks the emitter's active
+/// handled here — the loop-top [`crate::task::TaskGasState::reconcile`] banks the emitter's active
 /// meter and loads the catcher's on the next iteration.
 ///
 /// Returns `true` if routed, `false` if no owner ancestor catches `key` — the
@@ -1216,7 +1222,7 @@ fn unwind_to_handler(
 /// move it back into the parent's origin slot (the single-owner round trip).
 /// Returns `true` when the stack has been drained (the RPC caller hands a
 /// result back to the host). Gas is NOT touched here — the loop-top
-/// [`reconcile_active`] banks the popped frame's meter and loads the parent's on
+/// [`crate::task::TaskGasState::reconcile`] banks the popped frame's meter and loads the parent's on
 /// the next iteration.
 fn pop_and_reflect(stack: &mut Vec<Entry>, return_value: u64) -> Result<bool, u32> {
     // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler
