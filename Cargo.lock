@@ -1129,6 +1129,7 @@ dependencies = [
  "criterion",
  "javm",
  "javm-cap",
+ "javm-exec",
  "javm-guest-x86",
  "nub",
  "nub-arch-local",
@@ -1452,7 +1453,6 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
  "nub-kernel",
