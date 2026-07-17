@@ -22,7 +22,7 @@ members = [
     "rust/ssz",
     "rust/ssz-derive",
     "rust/javm-cap",
-    "rust/javm-exec",
+    "nub/nub-exec",
     "rust/javm-recompiler-x86",
     "rust/javm-bench",
     "rust/javm-fuzz",
@@ -60,7 +60,7 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 
 [workspace.dependencies]
 # Internal crates
-javm-exec = { path = "rust/javm-exec" }
+nub-exec = { path = "nub/nub-exec" }
 javm-recompiler-x86 = { path = "rust/javm-recompiler-x86" }
 javm-transpiler = { path = "rust/javm-transpiler" }
 javm-cap = { path = "rust/javm-cap" }

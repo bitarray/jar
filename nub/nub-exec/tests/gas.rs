@@ -1,4 +1,4 @@
-use javm_exec::GasCounter;
+use nub_exec::GasCounter;
 
 #[test]
 fn new_remaining_matches_initial() {

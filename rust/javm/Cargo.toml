@@ -17,9 +17,9 @@ test-support = ["nub/test-support"]
 [dependencies]
 anyhow = "1"
 javm-cap = { workspace = true }
-# `run_instance` builds the interpreter register file (javm_exec::Regs)
+# `run_instance` builds the interpreter register file (nub_exec::Regs)
 # when lowering an InstanceCap onto nub_arch_local::ProgramSpec.
-javm-exec = { workspace = true }
+nub-exec = { workspace = true }
 nub = { path = "../../nub/nub" }
 nub-arch-local = { path = "../../nub/nub-arch-local" }
 nub-arch-x86-abi = { path = "../../nub/nub-arch-x86-abi" }

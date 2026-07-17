@@ -1,7 +1,7 @@
-use javm_exec::regs::{
+use nub_exec::regs::{
     REG_SLOT_LUT, RegClass, reg_class, reg_is_reserved, reg_is_spilled, reg_slot_or_ff,
 };
-use javm_exec::{REG_COUNT, Regs};
+use nub_exec::{REG_COUNT, Regs};
 
 #[test]
 fn reg_classification_is_the_single_source() {

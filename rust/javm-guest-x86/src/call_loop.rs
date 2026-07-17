@@ -276,7 +276,7 @@ pub struct KernelFrame {
     /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
     /// so membership is a `binary_search`.
     pinned: Vec<Key>,
-    /// Per-page category-#3 [`javm_exec::mat::PageState`] (one byte/page) over
+    /// Per-page category-#3 [`nub_exec::mat::PageState`] (one byte/page) over
     /// the frame's data extent `[DATA_BASE, DATA_BASE + mem.content_len())`,
     /// advancing NotPresent → PresentRo → PresentRw as the #PF handler
     /// materializes pages. This is the category-#3 gas *history* — path
@@ -289,7 +289,7 @@ pub struct KernelFrame {
     /// never-reclaiming interpreter).
     mat_state: Vec<u8>,
     /// Materialized read-only **units** — sorted set of
-    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`, for
+    /// [`nub_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`, for
     /// code and pinned caps). Same gas-history / reclamation-survival rationale
     /// as `mat_state` above.
     ro_units: Vec<u32>,
@@ -674,7 +674,7 @@ impl ExecFrame for KernelFrame {
             mat_ranges.push(MatRange {
                 start: m.start as u32,
                 end: (m.start as u32).saturating_add(span),
-                kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
+                kind: nub_exec::mat::PageKind::PinnedCapRo.as_u8(),
             });
         }
 
@@ -683,7 +683,7 @@ impl ExecFrame for KernelFrame {
             mat_ranges.push(MatRange {
                 start: data_base,
                 end: mem_size,
-                kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
+                kind: nub_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
             });
         }
 
@@ -784,7 +784,7 @@ impl GuestPersonality for Javm {
         // instruction; custom-0 is 4 bytes) is clean. Splitting the gate
         // would double-charge the floor across an OOG+resume.
         let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
-        let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
+        let ecall_cost = nub_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
         // The CALL frame-materialization cost (JIT compile + eager RO
         // page-in + setup base), computed statically from the callee
         // Image and billed to the caller; resolved BEFORE charging so it
@@ -1832,7 +1832,7 @@ fn dispatch_host_call(
 
 /// Category-#3 call-frame cost for materializing the callee `image_hash`,
 /// computed **statically** from its Image so both engines agree (see
-/// [`javm_exec::gas_const::call_frame_cost`]): the JIT compile (`O(code)`),
+/// [`nub_exec::gas_const::call_frame_cost`]): the JIT compile (`O(code)`),
 /// the eager read-only page-in (one page-in per declared 2 MiB read-only
 /// unit — the code region plus every pinned mapping, each clustered per
 /// 2 MiB), and the fixed frame-setup base. Charged to the caller at an
@@ -1849,14 +1849,14 @@ fn call_frame_cost_for(image_hash: &CapHash) -> Result<i64, u32> {
     };
     // Declared read-only 2 MiB units: the code region (one cap) plus each
     // pinned (read-only) mapping, clustered per 2 MiB.
-    let cluster = 1u64 << javm_exec::mat::CLUSTER_SHIFT;
+    let cluster = 1u64 << nub_exec::mat::CLUSTER_SHIFT;
     let mut ro_units = (img.code.len() as u64).div_ceil(cluster);
     for m in img.mappings.iter() {
         if img.mapping_is_pinned(m.start as u32) {
             ro_units = ro_units.saturating_add(m.size.div_ceil(cluster));
         }
     }
-    let cost = javm_exec::gas_const::call_frame_cost(
+    let cost = nub_exec::gas_const::call_frame_cost(
         img.code.len().min(u32::MAX as usize) as u32,
         ro_units.min(u32::MAX as u64) as u32,
     );

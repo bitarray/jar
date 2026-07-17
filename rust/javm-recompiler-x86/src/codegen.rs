@@ -25,7 +25,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
-use javm_exec::gas_sim::GasSimulator;
+use nub_exec::gas_sim::GasSimulator;
 
 /// Map RV register index (0..12) to x86-64 register.
 /// All 13 PVM registers live in x86 registers.
@@ -52,9 +52,9 @@ pub(crate) const SCRATCH: Reg = Reg::RDX;
 /// slot" (x0, or a reserved register x16..x31). A 32-byte const LUT:
 /// one load replaces the range-match (~8.8% of compile, called
 /// ~6×/instruction across codegen + gas feed). The classification is the
-/// single source [`javm_exec::regs`]; this is its const-folded copy, so
+/// single source [`nub_exec::regs`]; this is its const-folded copy, so
 /// gas stays bit-identical with the interpreter's predecode-cached path.
-pub(crate) use javm_exec::regs::REG_SLOT_LUT as RV_SLOT_LUT;
+pub(crate) use nub_exec::regs::REG_SLOT_LUT as RV_SLOT_LUT;
 
 /// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot".
 #[inline(always)]
@@ -321,7 +321,7 @@ impl Compiler {
         // a throwaway sim only to recover the terminator flag.
         if self.suppress_gas {
             let mut throwaway = GasSimulator::new();
-            return javm_exec::gas_cost::rv_feed_gas_kind(
+            return nub_exec::gas_cost::rv_feed_gas_kind(
                 kind,
                 rv_slot_or_ff(rs1),
                 rv_slot_or_ff(rs2),
@@ -335,8 +335,8 @@ impl Compiler {
         // matches the interpreter's `block_reserves` bit-for-bit.
         self.gas_reserve_accum = self
             .gas_reserve_accum
-            .saturating_add(javm_exec::gas_cost::rv_kind_reserve(kind));
-        javm_exec::gas_cost::rv_feed_gas_kind(
+            .saturating_add(nub_exec::gas_cost::rv_kind_reserve(kind));
+        nub_exec::gas_cost::rv_feed_gas_kind(
             kind,
             rv_slot_or_ff(rs1),
             rv_slot_or_ff(rs2),
@@ -757,7 +757,7 @@ fn peek_alu_rr_trailer(rest: &[u8]) -> Option<(AluOp, u8, u8, u8, usize)> {
 
 // ----------------------------------------------------------------------
 // RV opcode majors (bits [6:2]). Bits [1:0] are always 0b11 for 4-byte.
-// Mirrors `javm_exec::instruction::OP_*`; redeclared here to keep the
+// Mirrors `nub_exec::instruction::OP_*`; redeclared here to keep the
 // recompiler self-contained on the byte-dispatch hot path. Only majors
 // PVM2 accepts are named — AUIPC, JALR, SYSTEM, CUSTOM_1, AMO, FP* etc.
 // are routed through the catch-all default branch in `compile_rv4`.
@@ -789,7 +789,7 @@ fn is_custom0_ecall(w: u32) -> bool {
 }
 
 // Sign-extended immediates straight off a 4-byte RV word. Mirrors the
-// canonical encoders in `javm_exec::instruction`.
+// canonical encoders in `nub_exec::instruction`.
 #[inline]
 fn imm_i(w: u32) -> i32 {
     (w as i32) >> 20
@@ -1219,11 +1219,11 @@ fn spill_va(x: u8) -> u64 {
 }
 
 /// True for a reserved register (`x16..x31`, which do not exist in RV64E).
-/// Single source: [`javm_exec::regs::reg_is_reserved`].
-use javm_exec::regs::reg_is_reserved as rv_is_reserved;
+/// Single source: [`nub_exec::regs::reg_is_reserved`].
+use nub_exec::regs::reg_is_reserved as rv_is_reserved;
 /// True for a host-spilled register (`x3`/`x4`). Single source:
-/// [`javm_exec::regs::reg_is_spilled`].
-use javm_exec::regs::reg_is_spilled;
+/// [`nub_exec::regs::reg_is_spilled`].
+use nub_exec::regs::reg_is_spilled;
 
 impl Compiler {
     /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
@@ -1477,7 +1477,7 @@ impl Compiler {
     /// the return-address `next_pc = pc + inst_len`; a hardcoded `pc + 4`
     /// would mis-set `ra` for `c.jalr` (a 2-byte indirect call).
     fn compile_rv4(&mut self, w: u32, pc: u32, inst_len: u32, rest: &[u8]) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let opcode = (w >> 2) & 0x1F;
         let rd = ((w >> 7) & 0x1F) as u8;
         let rs1 = ((w >> 15) & 0x1F) as u8;
@@ -1489,7 +1489,7 @@ impl Compiler {
         // panic, uniformly, matching the interpreter (which decodes such an
         // instruction as `Reserved`). Shared predicate so the two engines
         // can't drift; covers expanded RVC, which routes through here.
-        if javm_exec::instruction::word_uses_reserved_reg(w) {
+        if nub_exec::instruction::word_uses_reserved_reg(w) {
             self.rv_emit_panic_at(pc);
             self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
             return (true, false, 0);
@@ -1501,7 +1501,7 @@ impl Compiler {
         // and are materialised per access. Conformant code never names them
         // (the toolchain rejects x3/x4), so this fork is never taken for the
         // 12 bench guests — the fast-path dispatch below stays byte-identical.
-        if javm_exec::instruction::word_uses_spilled_reg(w) {
+        if nub_exec::instruction::word_uses_spilled_reg(w) {
             return self.compile_rv_spilled(w, pc, inst_len);
         }
 
@@ -1550,7 +1550,7 @@ impl Compiler {
     /// streaming loop's `pc += base_len + extra` advances by 2 for
     /// RVC regardless of what `compile_rv4` did internally.
     fn compile_rvc(&mut self, h: u16, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         match expand_rvc(h) {
             // RVC instructions are 2 bytes — pass inst_len = 2 so a
             // `c.jalr` writes the correct return address (`pc + 2`).
@@ -1578,10 +1578,10 @@ impl Compiler {
     // fast-path helpers don't double-feed.
 
     fn compile_rv_spilled(&mut self, w: u32, pc: u32, inst_len: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
+        use nub_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
         // Gas: original registers → memory-spill cost + the terminator flag,
         // matching the interpreter's per-instruction feed exactly.
-        let inst = javm_exec::instruction::decode(&w.to_le_bytes())
+        let inst = nub_exec::instruction::decode(&w.to_le_bytes())
             .expect("4-byte spilled word decodes")
             .0;
         let meta = rv_gas_meta(&inst);
@@ -1589,7 +1589,7 @@ impl Compiler {
         // instruction); the suppress_gas re-dispatch below must not.
         self.gas_reserve_accum = self
             .gas_reserve_accum
-            .saturating_add(javm_exec::gas_cost::rv_kind_reserve(meta.kind));
+            .saturating_add(nub_exec::gas_cost::rv_kind_reserve(meta.kind));
         let term = rv_feed_gas_direct(&meta, &mut self.gas_sim, self.mem_cycles);
 
         let opcode = (w >> 2) & 0x1F;
@@ -1866,7 +1866,7 @@ impl Compiler {
         pc: u32,
         rest: &[u8],
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_i(w);
         let (width, signed) = match f3 {
             0b000 => (1u32, true),
@@ -1916,7 +1916,7 @@ impl Compiler {
     }
 
     fn compile_store(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_s(w);
         let width = match f3 {
             0b000 => 1u32,
@@ -1935,7 +1935,7 @@ impl Compiler {
     }
 
     fn compile_op_imm(&mut self, rd: u8, rs1: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         match f3 {
             0b000 => {
                 // Addi
@@ -2091,7 +2091,7 @@ impl Compiler {
         w: u32,
         pc: u32,
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         match f3 {
             0b000 => {
                 let imm = imm_i(w);
@@ -2189,7 +2189,7 @@ impl Compiler {
         pc: u32,
         rest: &[u8],
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         // Mul-pair fusion: a 64-bit `mul` (f7=0000001, f3=000) followed
         // by `mulh`/`mulhu` on the SAME operand pair folds into a single
         // x86 imul/mul that produces RDX:RAX (lo:hi). See commit
@@ -2424,7 +2424,7 @@ impl Compiler {
         w: u32,
         pc: u32,
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         match (f7, f3) {
             (0b0000000, 0b000) => {
                 self.rv_alu_rr(rd, rs1, rs2, AluOp::Addw, pc);
@@ -2516,7 +2516,7 @@ impl Compiler {
     }
 
     fn compile_lui(&mut self, rd: u8, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_u(w);
 
         // Lui→Add fusion: `lui rd, imm; add rd, rd, rs2` (4-byte) or the
@@ -2568,7 +2568,7 @@ impl Compiler {
     }
 
     fn compile_jal(&mut self, rd: u8, w: u32, pc: u32, inst_len: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_j(w);
         let next_pc = pc + inst_len;
         self.rv_jal(rd, imm, pc, next_pc);
@@ -2577,7 +2577,7 @@ impl Compiler {
     }
 
     fn compile_auipc(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         // auipc result is a compile-time constant: code_base + pc + imm.
         let imm = imm_u(w);
         self.rv_auipc(rd, imm, pc);
@@ -2594,7 +2594,7 @@ impl Compiler {
         pc: u32,
         inst_len: u32,
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_i(w);
         let next_pc = pc + inst_len;
         self.rv_jalr(rd, rs1, imm, pc, next_pc);
@@ -2604,7 +2604,7 @@ impl Compiler {
     }
 
     fn compile_branch(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         let imm = imm_b(w);
         let next_pc = pc + 4;
         let cc = match f3 {
@@ -2633,7 +2633,7 @@ impl Compiler {
         w: u32,
         pc: u32,
     ) -> (bool, bool, usize) {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         // PVM2 custom-0 encoding:
         //   f3=000 → trap     (other fields ignored)
         //   f3=001 → ecall.jar
@@ -2682,7 +2682,7 @@ impl Compiler {
         rest: &[u8],
         _pc: u32,
     ) -> Option<usize> {
-        use javm_exec::gas_cost::*;
+        use nub_exec::gas_cost::*;
         if rest.len() < 4 {
             return None;
         }
@@ -3553,7 +3553,7 @@ impl Compiler {
         // generally, for divisor == -1 the quotient is -dividend (which wraps
         // INT_MIN → INT_MIN) and the remainder is always 0 — so we special-case
         // divisor == -1, skip the `idiv`, and avoid the fault. This matches the
-        // interpreter (`javm-exec/src/interp.rs`, Div/Rem). Unsigned division
+        // interpreter (`nub-exec/src/interp.rs`, Div/Rem). Unsigned division
         // cannot overflow, so the guard is signed-only.
         if signed {
             let not_neg_one = self.asm.new_label();

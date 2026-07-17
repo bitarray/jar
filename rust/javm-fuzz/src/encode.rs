@@ -4,7 +4,7 @@
 //! The two existing x3/x4 test files (`javm-recompiler-x86/tests/x3_x4_spill.rs`
 //! and `javm-bench/tests/x3_x4_differential.rs`) each hand-rolled a handful of
 //! ad-hoc encoders. This centralizes them and extends to the full implemented
-//! ISA via the [`OPS`] spec table, validated against `javm_exec::decode` in the
+//! ISA via the [`OPS`] spec table, validated against `nub_exec::decode` in the
 //! tests below (every op must round-trip to a non-`Reserved` instruction).
 
 /// Pack instruction words into a little-endian byte stream.
@@ -335,7 +335,7 @@ pub const SIG_REGS: usize = 13;
 pub const SIG_BYTES: usize = SIG_REGS * 8;
 
 /// The x-register stored at signature slot `i` (the inverse of
-/// `javm_exec::regs::reg_slot_or_ff`, matching [`crate::oracle::slot_to_xreg`]).
+/// `nub_exec::regs::reg_slot_or_ff`, matching [`crate::oracle::slot_to_xreg`]).
 /// Slot 7 = x10 (the former fold `return_value`). The epilogue stores each at
 /// byte offset `8*i` of the signature region.
 pub const SIG_XREGS: [u8; SIG_REGS] = [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -365,7 +365,7 @@ pub fn signature_epilogue(sig_base: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_exec::instruction::{Inst, decode};
+    use nub_exec::instruction::{Inst, decode};
 
     fn decode1(w: u32) -> (Inst, u8) {
         decode(&w.to_le_bytes()).unwrap_or_else(|| panic!("decode failed for {w:#010x}"))

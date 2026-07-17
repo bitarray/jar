@@ -1,4 +1,4 @@
-use javm_exec::{
+use nub_exec::{
     EcallHandler, EcallKind, EcallResult, ExitReason, Mem, Memory, PanickingHandler, Regs,
 };
 

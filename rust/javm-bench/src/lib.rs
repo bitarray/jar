@@ -11,7 +11,7 @@
 //!   * `Nub::invoke_cached(instance_hash, endpoint, args, gas)`.
 //!
 //! - `run_interpreter` — `Nub::local()` drives the byte-PVM
-//!   interpreter (`javm-exec`) in-process.
+//!   interpreter (`nub-exec`) in-process.
 //! - `run_recompiler` — the process-wide `Nub::hyperlight()` singleton
 //!   drives the in-kernel JIT path through the same `invoke_cached` API.
 //!

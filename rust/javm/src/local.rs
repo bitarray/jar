@@ -11,7 +11,7 @@ use javm_cap::cap::Cap;
 use javm_cap::cap::image::ImageCap;
 use javm_cap::cap::instance::InstanceCap;
 use javm_cap::{CacheDirectory, CapHashOrRef};
-use javm_exec::Regs;
+use nub_exec::Regs;
 use nub::{CapHash, InvocationResult, LocalKernel, ObjHash};
 use nub_arch_local::{ExitingEcallHandler, ProgramSpec, RoOverlay, run_program};
 

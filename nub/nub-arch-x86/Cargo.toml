@@ -26,7 +26,7 @@ hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false
 # inheritance) because cargo forbids overriding workspace
 # `default-features` from the member crate.
 javm-recompiler-x86 = { path = "../../rust/javm-recompiler-x86", default-features = false }
-javm-exec = { path = "../../rust/javm-exec", default-features = false }
+nub-exec = { path = "../nub-exec", default-features = false }
 # Wire types shared between guest and host. The fn-id constants and
 # `Archive` / `Serialize` derives on `InvocationSpec` /
 # `InvocationResult` live here.

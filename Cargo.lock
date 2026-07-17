@@ -1129,13 +1129,13 @@ dependencies = [
  "criterion",
  "javm",
  "javm-cap",
- "javm-exec",
  "javm-guest-x86",
  "nub",
  "nub-arch-local",
  "nub-arch-x86",
  "nub-arch-x86-abi",
  "nub-build",
+ "nub-exec",
  "rkyv",
 ]
 
@@ -1148,9 +1148,9 @@ dependencies = [
  "criterion",
  "javm",
  "javm-cap",
- "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
+ "nub-exec",
  "sha2",
  "ssz",
 ]
@@ -1170,20 +1170,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "javm-exec"
-version = "0.1.0"
-dependencies = [
- "proptest",
-]
-
-[[package]]
 name = "javm-fuzz"
 version = "0.1.0"
 dependencies = [
  "hex",
  "javm-bench",
  "javm-cap",
- "javm-exec",
+ "nub-exec",
  "serde",
  "serde_json",
 ]
@@ -1208,10 +1201,10 @@ dependencies = [
  "foldhash 0.2.0",
  "hyperlight-guest-bin",
  "javm-cap",
- "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86",
  "nub-arch-x86-abi",
+ "nub-exec",
  "nub-host-common",
  "rkyv",
  "spin",
@@ -1221,8 +1214,8 @@ dependencies = [
 name = "javm-recompiler-x86"
 version = "0.1.0"
 dependencies = [
- "javm-exec",
  "memoffset",
+ "nub-exec",
  "proptest",
 ]
 
@@ -1453,8 +1446,8 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "javm-exec",
  "nub-arch-x86-abi",
+ "nub-exec",
  "nub-kernel",
 ]
 
@@ -1464,9 +1457,9 @@ version = "0.1.0"
 dependencies = [
  "hyperlight-guest",
  "hyperlight-guest-bin",
- "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
+ "nub-exec",
  "nub-host-common",
  "rkyv",
  "spin",
@@ -1485,6 +1478,13 @@ name = "nub-build"
 version = "0.1.0"
 dependencies = [
  "build-crate",
+]
+
+[[package]]
+name = "nub-exec"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

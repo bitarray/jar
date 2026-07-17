@@ -5,13 +5,13 @@
 //! Personality-agnostic: [`run_program`] takes a prepared
 //! [`ProgramSpec`] (code, flat memory image, overlays, registers)
 //! plus an [`EcallHandler`], wires it to
-//! [`javm_exec::interp::Interpreter::run`], and produces an
+//! [`nub_exec::interp::Interpreter::run`], and produces an
 //! [`InvocationResult`]. This is the in-process counterpart to
 //! nub-arch-x86's JIT-driven `enter_frame` / `build_frame_runtime`.
 //! The personality lowers its own object types into a `ProgramSpec`
 //! (JAVM: `javm::JavmLocal`'s `run_instance`).
 
-use javm_exec::{
+use nub_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
     Regs, gas_const, interp::Interpreter, predecode::predecode_rv_with_mem_cycles,
 };
@@ -208,7 +208,7 @@ impl EcallHandler for ExitingEcallHandler {
         &mut self,
         kind: EcallKind,
         _regs: &mut Regs,
-        _mem: &mut dyn javm_exec::Memory,
+        _mem: &mut dyn nub_exec::Memory,
     ) -> EcallResult {
         match kind {
             EcallKind::Ecalli(imm) => EcallResult::Exit(ExitReason::HostCall(imm)),

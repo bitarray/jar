@@ -8,7 +8,7 @@ description = "Differential fuzzer for the JAVM PVM2 ISA — generates RV64E-sub
 
 [dependencies]
 javm-cap = { workspace = true }
-javm-exec = { workspace = true }
+nub-exec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }

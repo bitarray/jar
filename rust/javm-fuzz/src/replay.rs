@@ -244,7 +244,7 @@ pub fn diff_batch(progs: &[Program]) -> Vec<(usize, Diff)> {
 /// Convenience: seed register `xreg` (by x-number) to `val` in a slot-keyed
 /// init map. Mirrors the generator's seeding; handy for hand-built programs.
 pub fn seed_reg(init: &mut BTreeMap<u8, u64>, xreg: u8, val: u64) {
-    let slot = javm_exec::regs::reg_slot_or_ff(xreg);
+    let slot = nub_exec::regs::reg_slot_or_ff(xreg);
     if slot != 0xFF {
         init.insert(slot, val);
     }

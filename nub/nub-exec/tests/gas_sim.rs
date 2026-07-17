@@ -1,5 +1,5 @@
-use javm_exec::gas_cost::FastCost;
-use javm_exec::gas_sim::GasSimulator;
+use nub_exec::gas_cost::FastCost;
+use nub_exec::gas_sim::GasSimulator;
 use proptest::prelude::*;
 
 // === flush_and_get_cost ===
@@ -250,8 +250,8 @@ proptest! {
 
 #[test]
 fn spilled_operands_charge_memory_cost() {
-    use javm_exec::gas_cost::{DEFAULT_MEM_CYCLES, RV_KIND_ADD, rv_feed_gas_kind, rv_slot_u8};
-    use javm_exec::gas_sim::GasSimulator;
+    use nub_exec::gas_cost::{DEFAULT_MEM_CYCLES, RV_KIND_ADD, rv_feed_gas_kind, rv_slot_u8};
+    use nub_exec::gas_sim::GasSimulator;
 
     // Block cost of a single `add rd, rs1, rs2`, parameterised by the RV regs.
     let cost = |rd: u8, rs1: u8, rs2: u8| -> u32 {

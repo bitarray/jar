@@ -24,7 +24,7 @@ fn spec(name: &str) -> &'static encode::OpSpec {
 }
 
 fn seed(init: &mut BTreeMap<u8, u64>, xreg: u8, val: u64) {
-    init.insert(javm_exec::regs::reg_slot_or_ff(xreg), val);
+    init.insert(nub_exec::regs::reg_slot_or_ff(xreg), val);
 }
 
 fn git_sha() -> String {

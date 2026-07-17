@@ -18,7 +18,7 @@
 //! `javm-bench` (and its `BuiltCaps` / `run_*` harness) is gated to
 //! linux/x86_64, so this whole test is too. The interpreter's x3/x4
 //! semantics are additionally covered cross-platform by the unit test in
-//! `javm-exec` (`x3_x4_execute_as_real_registers`).
+//! `nub-exec` (`x3_x4_execute_as_real_registers`).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_bench::{BuiltCaps, run_interpreter};

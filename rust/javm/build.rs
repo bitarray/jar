@@ -45,8 +45,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../nub/nub-arch-x86/Cargo.toml");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/src");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/Cargo.toml");
-    println!("cargo:rerun-if-changed=../javm-exec/src");
-    println!("cargo:rerun-if-changed=../javm-exec/Cargo.toml");
+    println!("cargo:rerun-if-changed=../../nub/nub-exec/src");
+    println!("cargo:rerun-if-changed=../../nub/nub-exec/Cargo.toml");
     println!("cargo:rerun-if-changed=../javm-cap/src");
     println!("cargo:rerun-if-changed=../javm-cap/Cargo.toml");
     // javm-cap embeds the in-workspace SSZ crates (content hashing /

@@ -25,7 +25,7 @@ fn main() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_exec::instruction::decode;
+use nub_exec::instruction::decode;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::generate::{Gen, enumerate_boundary};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -405,7 +405,7 @@ fn trap_lookup(state: &LaneJitState, offset: u32) -> (u32, u32) {
 pub struct MatRange {
     pub start: u32,
     pub end: u32,
-    /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
+    /// [`nub_exec::mat::PageKind`] as a `u8`: pinned slots are
     /// `PinnedCapRo` (a write hard-faults), initial slots are
     /// `UnpinnedCapCow` (a write copies-on-write).
     pub kind: u8,
@@ -499,15 +499,15 @@ enum RoSrc {
     Mem,
 }
 
-/// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
+/// The static [`nub_exec::mat::PageKind`] of guest page `page_va`:
 /// cap-backed pages take their kind from the matching `MatRange`; every
 /// other page in the declared extent is ephemeral.
 #[inline]
-fn page_kind(state: &LaneJitState, page_va: u32) -> javm_exec::mat::PageKind {
+fn page_kind(state: &LaneJitState, page_va: u32) -> nub_exec::mat::PageKind {
     match mat_range_for(state, page_va) {
-        Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
-            .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
-        None => javm_exec::mat::PageKind::EphemeralZero,
+        Some(r) => nub_exec::mat::PageKind::from_u8(r.kind)
+            .unwrap_or(nub_exec::mat::PageKind::PinnedCapRo),
+        None => nub_exec::mat::PageKind::EphemeralZero,
     }
 }
 
@@ -522,7 +522,7 @@ fn page_kind(state: &LaneJitState, page_va: u32) -> javm_exec::mat::PageKind {
 /// Returns `false` (charging nothing, mutating nothing) if any page is
 /// outside the declared code/data regions or a write targets a read-only
 /// page — the caller then raises a PVM PageFault. Uses the *same*
-/// [`javm_exec::mat`] state machine + page-set rule as the interpreter,
+/// [`nub_exec::mat`] state machine + page-set rule as the interpreter,
 /// so both engines charge bit-identically (gas-cost.md §3).
 fn try_materialize<M: FrameMem>(
     state: &LaneJitState,
@@ -545,7 +545,7 @@ fn try_materialize<M: FrameMem>(
     let in_code = |pv: u64| code_top > code_base && pv >= code_base && pv < code_top;
     let in_data = |pv: u64| mem_top > data_base && pv >= data_base && pv < mem_top;
 
-    let set = javm_exec::mat::access_pages(gva as u32, width);
+    let set = nub_exec::mat::access_pages(gva as u32, width);
 
     // Region dispatch by the BASE page, then accessibility-all *within* that
     // one region — mirroring the interpreter's `touch` (base-page dispatch to
@@ -571,7 +571,7 @@ fn try_materialize<M: FrameMem>(
         } else {
             // DATA region: every page must be a data page; pinned write faults.
             if !in_data(pv)
-                || (is_write && page_kind(state, p) == javm_exec::mat::PageKind::PinnedCapRo)
+                || (is_write && page_kind(state, p) == nub_exec::mat::PageKind::PinnedCapRo)
             {
                 return false;
             }
@@ -611,7 +611,7 @@ fn try_materialize<M: FrameMem>(
             Some((code_base, code_top, RoSrc::Contig { base_pa: code_pa }))
         } else {
             match mat_range_for(state, p) {
-                Some(r) if r.kind == javm_exec::mat::PageKind::PinnedCapRo.as_u8() => {
+                Some(r) if r.kind == nub_exec::mat::PageKind::PinnedCapRo.as_u8() => {
                     Some((r.start as u64, r.end as u64, RoSrc::Mem))
                 }
                 _ => None,
@@ -633,19 +633,19 @@ fn try_materialize<M: FrameMem>(
         // page resolves to the shared zero page). A page with no range can't be
         // in-data, so it faults.
         let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
-        let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
+        let cur = nub_exec::mat::PageState::from_u8(dstate[idx]);
         let kind = match mat_range_for(state, p) {
-            Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
-                .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
+            Some(r) => nub_exec::mat::PageKind::from_u8(r.kind)
+                .unwrap_or(nub_exec::mat::PageKind::PinnedCapRo),
             None => return false,
         };
-        let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
+        let (charge, next) = match nub_exec::mat::charge_for(cur, kind, is_write) {
             Ok(v) => v,
             Err(_) => return false, // pinned write (already excluded; defensive)
         };
         match next {
-            javm_exec::mat::PageState::PresentRo => {
-                if cur == javm_exec::mat::PageState::NotPresent {
+            nub_exec::mat::PageState::PresentRo => {
+                if cur == nub_exec::mat::PageState::NotPresent {
                     // Page-in: map the page RO at its source PA (resolved lazily
                     // from the frame's mem; `None`/`Missing` → fault).
                     let Some(src_pa) = mem_source_pa::<M>(state, pv) else {
@@ -671,7 +671,7 @@ fn try_materialize<M: FrameMem>(
                     // existing present mapping changes (the CoW remap below).
                 }
             }
-            javm_exec::mat::PageState::PresentRw => {
+            nub_exec::mat::PageState::PresentRw => {
                 // Map only when *transitioning into* PresentRw (cur != PresentRw).
                 // An already-PresentRw page is mapped writable at its final PA, so
                 // re-mapping it is wrong: for a CoW cap page it would re-allocate
@@ -679,7 +679,7 @@ fn try_materialize<M: FrameMem>(
                 // This case is reached when a straddle access faults on its other
                 // (not-present) page and the loop re-visits this present partner;
                 // charge_for already returned 0, so skipping the map is gas-neutral.
-                if cur != javm_exec::mat::PageState::PresentRw {
+                if cur != nub_exec::mat::PageState::PresentRw {
                     // Page-table reuse fast path: if this page is already a
                     // private (overlay) page whose leaf was re-armed read-only at
                     // the previous HALT, just flip the leaf's W bit back and reuse
@@ -698,7 +698,7 @@ fn try_materialize<M: FrameMem>(
                         // entry may be TLB-cached. A first-touch write (cur ==
                         // NotPresent) maps a page that was never present, so it
                         // needs no invlpg.
-                        let flush = cur == javm_exec::mat::PageState::PresentRo;
+                        let flush = cur == nub_exec::mat::PageState::PresentRo;
                         // Resolve the source PA lazily (from the frame's mem): a
                         // live slab, or the shared zero page for an
                         // ephemeral page (so the CoW yields a fresh zeroed page).
@@ -717,7 +717,7 @@ fn try_materialize<M: FrameMem>(
                     }
                 }
             }
-            javm_exec::mat::PageState::NotPresent => {}
+            nub_exec::mat::PageState::NotPresent => {}
         }
         total = total.saturating_add(charge);
         dstate[idx] = next.as_u8();
@@ -818,13 +818,13 @@ fn cow_into_fresh<M: FrameMem>(
 
 /// Materialize the read-only **unit** containing `pv`: the intersection of
 /// the cap `[r_start, r_end)` with the 2 MiB cluster containing `pv`, named
-/// by [`javm_exec::mat::unit_base`]. The first time the unit faults (a fresh
+/// by [`nub_exec::mat::unit_base`]. The first time the unit faults (a fresh
 /// `unit_base` inserted into the sorted `ro_units` set) its RO pages are
 /// **fault-arounded** — mapped present read-only straight from the cap so
 /// the retry (and later reads in the unit) hit no further faults — and a
 /// later fault on the same unit is a no-op. This **charges no gas**:
 /// read-only page-in is accounted eagerly at the CALL
-/// ([`javm_exec::gas_const::call_frame_cost`]); the `ro_units` set here is
+/// ([`nub_exec::gas_const::call_frame_cost`]); the `ro_units` set here is
 /// purely a fault-reduction / mapping optimization. Clamping the fault-around
 /// to one cap means a single map event touches at most one frame-mem region.
 ///
@@ -842,7 +842,7 @@ fn materialize_ro_unit<M: FrameMem>(
     pml4: u64,
     owned_vec: u64,
 ) -> Option<u64> {
-    let ub = javm_exec::mat::unit_base(pv as u32, r_start as u32);
+    let ub = nub_exec::mat::unit_base(pv as u32, r_start as u32);
     match ro_units.binary_search(&ub) {
         // Unit already materialized (its pages are present): no charge, and
         // no re-map — the fault that brought us here was a different unit's.
@@ -850,8 +850,8 @@ fn materialize_ro_unit<M: FrameMem>(
         Err(pos) => ro_units.insert(pos, ub),
     }
     // Fault-around: map the cap's pages within this cluster, read-only.
-    let cluster_lo = (pv >> javm_exec::mat::CLUSTER_SHIFT) << javm_exec::mat::CLUSTER_SHIFT;
-    let cluster_hi = cluster_lo + (1u64 << javm_exec::mat::CLUSTER_SHIFT);
+    let cluster_lo = (pv >> nub_exec::mat::CLUSTER_SHIFT) << nub_exec::mat::CLUSTER_SHIFT;
+    let cluster_hi = cluster_lo + (1u64 << nub_exec::mat::CLUSTER_SHIFT);
     let lo = r_start.max(cluster_lo);
     let hi = r_end.min(cluster_hi);
     let mut q = lo;
@@ -1089,7 +1089,7 @@ pub unsafe fn build_frame_runtime<S: JitSlot>(
     // high-water-mark the interpreter derives, so both pick the same
     // tier (and it is per-Image — see the `mem_size` contract above — so
     // caching the compile per slot stays sound under v3 static memory).
-    let mem_cycles = javm_exec::gas_const::mem_cycles_for(javm_exec::gas_const::accessible_pages(
+    let mem_cycles = nub_exec::gas_const::mem_cycles_for(nub_exec::gas_const::accessible_pages(
         mem_size, data_base,
     ));
     jit_cache::with_compiled_image(

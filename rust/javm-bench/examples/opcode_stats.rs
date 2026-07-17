@@ -3,7 +3,7 @@
 //! worth fusion peepholes in the recompiler hot loop.
 
 use javm_cap::image::Image;
-use javm_exec::instruction::{Inst, decode};
+use nub_exec::instruction::{Inst, decode};
 use ssz::Decode;
 use std::collections::BTreeMap;
 

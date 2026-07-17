@@ -9,7 +9,7 @@
 //! spilled-source loads, the spilled-dest store-backs, and the dedicated
 //! terminator handlers — the paths most at risk of an out-of-bounds
 //! `REG_MAP[13]` index or a bad donor choice. (Execution semantics are
-//! covered by the interpreter tests in `javm-exec`; the fast path's
+//! covered by the interpreter tests in `nub-exec`; the fast path's
 //! byte-for-byte stability is covered by the 12-guest conformance suite.)
 
 use javm_recompiler_x86::codegen::{CTX_VA, Compiler, HelperFns};

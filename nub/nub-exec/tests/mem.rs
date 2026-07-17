@@ -1,5 +1,5 @@
-use javm_exec::gas_const::COW_COST;
-use javm_exec::{Access, GasCounter, MapError, Mem, MemAccess, PAGE_SIZE, TouchFault, perm};
+use nub_exec::gas_const::COW_COST;
+use nub_exec::{Access, GasCounter, MapError, Mem, MemAccess, PAGE_SIZE, TouchFault, perm};
 
 #[test]
 fn read_u8_in_bounds() {

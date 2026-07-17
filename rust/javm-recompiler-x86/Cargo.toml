@@ -7,7 +7,7 @@ authors.workspace = true
 description = "JAVM x86_64 recompiler (JIT): no_std bytes-producer. Embedded by nub-arch-x86, which supplies its own per-invocation runtime substrate."
 
 [dependencies]
-javm-exec = { path = "../javm-exec", default-features = false }
+nub-exec = { path = "../../nub/nub-exec", default-features = false }
 memoffset = "0.9"
 
 [dev-dependencies]

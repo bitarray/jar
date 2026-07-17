@@ -14,7 +14,7 @@ heap-diag = ["javm/heap-diag"]
 
 [dependencies]
 javm-cap = { workspace = true }
-javm-exec = { workspace = true }
+nub-exec = { workspace = true }
 sha2 = "0.10"
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 

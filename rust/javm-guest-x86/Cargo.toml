@@ -33,7 +33,7 @@ hyperlight-guest-bin = { path = "../../nub/nub-arch-guestbin", default-features 
 # The generic guest-kernel lib (personality/task/guest_fns/jit_run/paging/...).
 nub-arch-x86 = { path = "../../nub/nub-arch-x86", default-features = false }
 javm-cap = { path = "../javm-cap", default-features = false }
-javm-exec = { path = "../javm-exec", default-features = false }
+nub-exec = { path = "../../nub/nub-exec", default-features = false }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 nub-arch-x86-abi = { path = "../../nub/nub-arch-x86-abi", default-features = false }
 nub-host-common = { path = "../../nub/nub-host-common", default-features = false }
