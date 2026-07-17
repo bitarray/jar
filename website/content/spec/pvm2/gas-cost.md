@@ -2,14 +2,14 @@
 
 PVM2's gas accounting uses the **single-pass pipeline model**. The
 canonical definition is the Rust source
-([`gas_sim.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_sim.rs) +
-[`gas_cost.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_cost.rs)) plus this
+([`gas_sim.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_sim.rs) +
+[`gas_cost.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_cost.rs)) plus this
 reference doc. (An older Lean formalization under `spec/Jar/JAVM/` is
 stale — it predates microkernel v3 and the 15-register file — and is
 not authoritative.)
 For each basic block, predecode walks the instructions once,
 feeding each through
-[`GasSimulator`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_sim.rs); the
+[`GasSimulator`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_sim.rs); the
 final block cost is `max(max_done − 3, 1)`. This block cost is the
 **#1 (execution) component only**, and it is charged **once per block,
 at block entry** (the charging discipline — pre-reservation, OOG never
@@ -20,7 +20,7 @@ multiplier** (×1–4) before it is charged; that multiplier is defined in
 [gas-cost.md §2](../gas-cost.md). The per-instruction
 cost table (`rv_fast_cost`) and the block-driver
 (`rv_gas_cost_for_block`) live in
-[`rust/javm-exec/src/gas_cost.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_cost.rs)
+[`nub/nub-exec/src/gas_cost.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_cost.rs)
 — next to PVM's table, so when PVM is eventually retired the file
 shrinks rather than fragments.
 
@@ -300,7 +300,7 @@ emits:
 ## Sync between Rust and this doc
 
 The source of truth is
-[`rust/javm-exec/src/gas_cost.rs::rv_fast_cost`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_cost.rs).
+[`nub/nub-exec/src/gas_cost.rs::rv_fast_cost`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_cost.rs).
 Any change to a row above must update the Rust function and vice
 versa. Drift between the two should fail a future conformance
 test (TODO once we have one).

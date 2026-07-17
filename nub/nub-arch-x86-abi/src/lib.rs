@@ -1,12 +1,12 @@
 //! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
-//! The host pre-publishes each `Cap` it wants the guest to see via
-//! the [`FN_ID_NUB_PUT_CAP`] RPC (rkyv-archived `javm_cap::Cap`
-//! payload; see the `state_cache` module in `nub-arch-x86` for the
-//! guest-side heap-resident directory it lands in), then ships a
-//! fixed-size
-//! [`InvokePacket`] referencing the published `Cap::Instance` by
-//! hash on every call. The invoke packet is `#[repr(C)]` bytes (no
+//! Personality-agnostic: the host pre-publishes each state object it
+//! wants the guest to see via the [`FN_ID_NUB_PUT_CAP`] RPC — the
+//! payload is opaque bytes whose encoding the guest personality
+//! defines (JAVM: an rkyv-archived `javm_cap::Cap` landing in
+//! `javm-guest-x86`'s heap-resident directory) — then ships a
+//! fixed-size [`InvokePacket`] referencing the published root object
+//! by hash on every call. The invoke packet is `#[repr(C)]` bytes (no
 //! codec); the response is rkyv-archived ([`InvocationResult`]).
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -31,16 +31,16 @@ pub const FN_ID_NUB_HEAP_STATS: u32 = 2;
 /// JIT, and replies with rkyv-archived [`InvocationResult`].
 pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 
-/// `fn_id` for the heap-resident cap directory `put_cap` RPC.
+/// `fn_id` for the "publish a state object" RPC.
 ///
-/// Payload: rkyv-archived `javm_cap::Cap`. Guest validates and
-/// materialises via [`rkyv::access`] + [`rkyv::deserialize`], computes
-/// the cap's content hash, inserts into the guest-resident `CACHE`
-/// (a resident `CacheDirectory<FixedState, CachedCap>` holding
-/// `HashMap<CapHash, Arc<CachedCap>>` in talc heap), and replies with the
-/// rkyv-archived [`CapHash`] (raw
-/// 32 bytes). The host's `MultiUseSandbox::put_cap` propagates a
-/// `CapHasRefError` from `javm_cap` if any slot still holds a Ref.
+/// Payload: opaque personality-encoded bytes. The guest personality's
+/// `GuestStore::put_object` decodes, validates, content-hashes, and
+/// inserts the object into its store, then replies with the raw
+/// 32-byte content hash. All-`0xFF` is reserved as the error sentinel
+/// (decode/validation failure) — see `GuestStore::put_object` in
+/// `nub-arch-x86` for the contract. JAVM's personality decodes an
+/// rkyv-archived `javm_cap::Cap` into `javm-guest-x86`'s
+/// heap-resident directory.
 pub const FN_ID_NUB_PUT_CAP: u32 = 4;
 
 // fn_id 5 was FN_ID_NUB_GET_BOOT_INFO — the boot-info-read RPC that
@@ -62,10 +62,10 @@ pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
 /// with `run_top_on_lane`, and writes results back into the same slot.
 pub const FN_ID_NUB_INVOKE_WORKER: u32 = 7;
 
-/// 32-byte Cap::Instance identity hash. Matches
-/// `javm_cap::CapHash` byte-wise (kept as a local alias here so
-/// `nub-arch-x86-abi` stays free of the javm-cap dependency, which
-/// pulls in `alloc::collections` etc.).
+/// 32-byte content hash of a published state object (the legacy name
+/// from when the only personality was the JAVM cap system — matches
+/// `nub_kernel::ObjHash` and, byte-wise, `javm_cap::CapHash`; kept as
+/// a local alias so this crate stays dependency-free).
 pub type CapHash = [u8; 32];
 
 /// Fixed-layout invocation packet. Sent as raw `#[repr(C)]` bytes via

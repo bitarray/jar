@@ -7,12 +7,12 @@
  *
  * Low-half is required so the host process (user-space, can only see
  * canonical low-half) can mmap-shadow the kernel at the same VA. The
- * host's initial PT (rust/nub-host-kvm/src/sandbox/snapshot.rs) maps
+ * host's initial PT (nub/nub-host-kvm/src/sandbox/snapshot.rs) maps
  * the low GPA range [BASE_ADDRESS, ...) to the chosen GVA range via
  * a constant offset.
  *
  * Stays within a single 512 GiB PML4 slot so per-invocation ring-3
- * PTs (rust/nub-arch-x86/src/paging.rs) can inherit the kernel half
+ * PTs (nub/nub-arch-x86/src/paging.rs) can inherit the kernel half
  * by shallow-copying PML4 entries without splitting tables.
  */
 
