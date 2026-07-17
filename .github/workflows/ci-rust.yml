@@ -59,6 +59,7 @@ jobs:
           name: rust-sbom
           if-no-files-found: error
           path: |
+            nub/**/sbom.json
             rust/**/sbom.json
             components/**/sbom.json
             tools/**/sbom.json
