@@ -102,7 +102,7 @@ pub fn nub_invoke_cached_impl<P: GuestPersonality>(packet_bytes: &[u8]) -> Vec<u
     // Objects are resolved via the personality's store (javm: the
     // heap-resident `CACHE` — see `crate::state_cache`).
     let outcome = crate::task::run_top::<P>(
-        &packet.instance_hash,
+        &packet.root_hash,
         packet.endpoint_idx,
         packet.args,
         packet.initial_gas as i64,
@@ -159,7 +159,7 @@ pub fn nub_invoke_worker_impl<P: GuestPersonality>(payload: &[u8]) -> Vec<u8> {
                 let packet = unsafe { core::ptr::addr_of!((*slot).packet).read_volatile() };
                 let outcome = crate::task::run_top_on_lane::<P>(
                     lane,
-                    &packet.instance_hash,
+                    &packet.root_hash,
                     packet.endpoint_idx,
                     packet.args,
                     packet.initial_gas as i64,

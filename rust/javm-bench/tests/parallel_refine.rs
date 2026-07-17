@@ -100,7 +100,7 @@ fn cloned_nub_handles_run_compute_refine_jobs_then_serial_accumulate() {
         let handle = nub.clone();
         let job = handle
             .submit_invoke(InvokeRequest {
-                instance_hash: workload.instance_hash,
+                root: workload.instance_hash,
                 endpoint_idx: workload.endpoint_idx,
                 args: [0; 4],
                 initial_gas: javm_bench::INITIAL_GAS,

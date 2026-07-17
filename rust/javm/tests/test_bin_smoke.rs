@@ -90,14 +90,14 @@ fn scheduler_probe(
     second_gas: u64,
 ) -> [InvocationResult; 2] {
     let first = InvokePacket {
-        instance_hash: first,
+        root_hash: first,
         endpoint_idx: 0,
         _pad: 0,
         args: [0; 4],
         initial_gas: first_gas,
     };
     let second = InvokePacket {
-        instance_hash: second,
+        root_hash: second,
         endpoint_idx: 0,
         _pad: 0,
         args: [0; 4],

@@ -27,7 +27,7 @@ pub const FN_ID_NUB_HEAP_STATS: u32 = 2;
 
 /// `fn_id` for the cache-based RPC. Payload is a
 /// [`InvokePacket`] (host-side `#[repr(C)]` bytes, no rkyv); the
-/// guest dereferences cache VAs by `instance_hash` lookup, runs the
+/// guest dereferences cache VAs by `root_hash` lookup, runs the
 /// JIT, and replies with rkyv-archived [`InvocationResult`].
 pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 
@@ -119,13 +119,13 @@ pub type CapHash = [u8; 32];
 /// the existing rkyv `Request` envelope (its `payload` field). The
 /// guest reads the bytes directly with `core::ptr::read_unaligned`.
 ///
-/// `instance_hash` keys the cap to invoke (a published `Cap::Instance`).
+/// `root_hash` keys the object graph root to invoke (JAVM: a published `Cap::Instance`).
 /// `endpoint_idx` selects the entry within `ImageCap.endpoints`.
 /// `args` overlay φ[7..=10] on top of the endpoint's `initial_regs`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvokePacket {
-    pub instance_hash: CapHash,
+    pub root_hash: CapHash,
     pub endpoint_idx: u32,
     pub _pad: u32,
     pub args: [u64; 4],

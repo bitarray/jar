@@ -162,7 +162,7 @@ fn concurrent_invokes_sharing_gas_handle_are_independent_for(nub: &Nub) {
     let jobs: Vec<_> = (0..16)
         .map(|i| {
             nub.submit_invoke(InvokeRequest {
-                instance_hash: metered,
+                root: metered,
                 endpoint_idx: 0,
                 args: [0; 4],
                 initial_gas: BASE_BUDGET + i,

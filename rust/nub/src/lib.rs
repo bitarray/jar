@@ -137,7 +137,7 @@ impl Default for NubOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvokeRequest {
-    pub instance_hash: AbiCapHash,
+    pub root: AbiCapHash,
     pub endpoint_idx: u8,
     pub args: [u64; 4],
     pub initial_gas: u64,
@@ -572,7 +572,7 @@ impl<P: Personality> Nub<P> {
         let id = self.inner.next_job_id.fetch_add(1, Ordering::Relaxed);
         self.invoke_request_blocking(
             InvokeRequest {
-                instance_hash: root,
+                root,
                 endpoint_idx,
                 args,
                 initial_gas,
@@ -588,7 +588,7 @@ impl<P: Personality> Nub<P> {
     ) -> Result<InvocationResult> {
         self.invoke_cached_raw(
             job_id,
-            request.instance_hash,
+            request.root,
             request.endpoint_idx,
             request.args,
             request.initial_gas,
@@ -628,7 +628,7 @@ impl<P: Personality> Nub<P> {
         // fixed per-lane worker pool; serialized `call_raw` remains only for the
         // control plane and stops idle workers before using the legacy RPC ring.
         let packet = InvokePacket {
-            instance_hash: root,
+            root_hash: root,
             endpoint_idx: endpoint_idx as u32,
             _pad: 0,
             args,

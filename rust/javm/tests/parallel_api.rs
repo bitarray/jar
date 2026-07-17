@@ -66,7 +66,7 @@ fn invoke_job_wait_returns_result() {
     let inst = publish(&nub, 43);
     let job = nub
         .submit_invoke(InvokeRequest {
-            instance_hash: inst,
+            root: inst,
             endpoint_idx: 0,
             args: [0; 4],
             initial_gas: 1_000,

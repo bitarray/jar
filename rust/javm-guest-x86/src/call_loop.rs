@@ -1054,13 +1054,13 @@ pub fn run_two_for_test(
 ) -> Result<(LoopOutcome, LoopOutcome), u32> {
     with_lane_scheduler(ExecutionLane::PRIMARY, |scheduler| {
         let first_id = scheduler.submit_invoke(
-            &first.instance_hash,
+            &first.root_hash,
             first.endpoint_idx,
             first.args,
             first.initial_gas as i64,
         )?;
         let second_id = scheduler.submit_invoke(
-            &second.instance_hash,
+            &second.root_hash,
             second.endpoint_idx,
             second.args,
             second.initial_gas as i64,

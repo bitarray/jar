@@ -47,7 +47,7 @@ fn hyperlight_parallel_workers_complete_two_simple_invokes() {
 
     let job_a = nub
         .submit_invoke(InvokeRequest {
-            instance_hash: a,
+            root: a,
             endpoint_idx: 0,
             args: [0; 4],
             initial_gas: 1_000,
@@ -55,7 +55,7 @@ fn hyperlight_parallel_workers_complete_two_simple_invokes() {
         .expect("submit A");
     let job_b = nub
         .submit_invoke(InvokeRequest {
-            instance_hash: b,
+            root: b,
             endpoint_idx: 0,
             args: [0; 4],
             initial_gas: 1_000,
