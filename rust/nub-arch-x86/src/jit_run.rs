@@ -54,6 +54,7 @@ use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_cache;
 use crate::jit_cache::JitSlot;
 use crate::page_alloc::GlobalPage;
+use crate::personality::{FrameMem, PageSource};
 use crate::paging::{PAGE_SIZE, PageTable};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -87,7 +88,11 @@ struct LaneJitState {
     mat_code_top: AtomicU64,
     mat_code_pa: AtomicU64,
     mat_ro_units_sink: AtomicPtr<alloc::vec::Vec<u32>>,
-    overlay_sink: AtomicPtr<javm_cap::DataCap>,
+    /// The running frame's mem, type-erased. Published by `enter_frame::<M>`
+    /// and cast back to `*const M`/`*mut M` in the #PF chain — sound only
+    /// under the one-personality-per-binary invariant (see
+    /// [`install_handlers`]).
+    overlay_sink: AtomicPtr<()>,
     active_pt_pml4_kva: AtomicU64,
     owned_vec_ptr: AtomicU64,
 }
@@ -248,7 +253,13 @@ fn lane_pd_pa(
 ///
 /// Returns `false` for any fault outside the JIT window, letting
 /// Hyperlight abort.
-fn jit_pf_handler(
+///
+/// Monomorphized per frame-mem type `M`. NOTE: do NOT add `#[inline]` to this
+/// function or to [`install_handlers`] — the one-personality runtime assert
+/// keys on `jit_pf_handler::<M> as *const ()` being stable per `M`, which
+/// holds because the guest builds without LTO/ICF and the handler chain is
+/// never inlined into a merged body (see [`install_handlers`]).
+fn jit_pf_handler<M: FrameMem>(
     _exception_number: u64,
     info: *mut ExceptionInfo,
     ctx: *mut Context,
@@ -276,7 +287,7 @@ fn jit_pf_handler(
     // SAFETY: `info` is the valid iretq frame Hyperlight passed.
     let error_code = unsafe { (&raw const (*info).error_code).read_volatile() };
     let is_write = (error_code & 0x2) != 0;
-    if width != 0 && try_materialize(state, gva, width, is_write, ctx) {
+    if width != 0 && try_materialize::<M>(state, gva, width, is_write, ctx) {
         return true;
     }
 
@@ -298,6 +309,60 @@ fn jit_pf_handler(
         (&raw mut (*info).rip).write_volatile(exit_va);
     }
     true
+}
+
+/// Address of the currently-installed monomorphized #PF handler, or 0 before
+/// the first ring-3 entry. Written once (CAS from 0); every later
+/// [`install_handlers`] only re-asserts it.
+static INSTALLED_PF_HANDLER: AtomicU64 = AtomicU64::new(0);
+
+/// Install (or re-assert) the monomorphized #PF handler.
+///
+/// # One personality per binary
+///
+/// The [`LaneJitState`] pointer round-trips (`*mut M` → `*mut ()` → `*mut M`
+/// in [`mem_source_pa`] / [`overlay_has_page`] / [`cow_into_fresh`]) are
+/// sound only if every `enter_frame` in this binary uses the same `M`. Three
+/// layers, strongest first:
+///
+/// 1. **Structural (build-time)**: `register_guest_kernel!` is the only
+///    production wrapper source, and a second invocation in one crate
+///    collides on the wrapper fn idents (`nub_invoke_cached` ×2) — a compile
+///    error. This is the real guarantee.
+/// 2. **Runtime backstop**: the CAS-once assert below. A lost CAS with
+///    `prev == h` is BENIGN — two worker lanes' concurrent first entries on
+///    separate vCPUs (both claim READY slots; reachable by `cargo test -p
+///    nub` parallel_kvm/parallel_api) race to install the SAME handler, and
+///    the loser sees `Err(h)`. Only `prev != h` is the multi-personality bug.
+/// 3. **Fn-pointer identity caveat**: layer 2 keys on `jit_pf_handler::<M>
+///    as *const ()` being stable per `M` and distinct across `M`s — NOT
+///    language-guaranteed (duplicate monomorphizations across CGUs, or
+///    ICF/mergefunc folding). It holds today because the guest builds
+///    without LTO (`nub-build`) and `jit_pf_handler`/`install_handlers`
+///    carry no `#[inline]`; the ICF direction is benign anyway (folded
+///    handlers ⇒ identical code ⇒ identical erased-cast behavior). Do NOT
+///    add `#[inline]` to the handler chain; revisit if LTO/ICF is ever
+///    enabled.
+///
+/// Hot-path cost: one Relaxed load + compare per ring-3 entry (steady state:
+/// the load hits and the CAS is skipped).
+pub fn install_handlers<M: FrameMem>() {
+    let h = jit_pf_handler::<M> as *const () as u64;
+    if INSTALLED_PF_HANDLER.load(Ordering::Relaxed) != h {
+        // First entry in this binary — or a lost race against a concurrent
+        // first entry on another worker lane installing the SAME handler.
+        // Only `prev != h` is the multi-personality bug (see above; a bare
+        // `if compare_exchange(0, h, ..).is_err() { panic!() }` would
+        // false-positive on the benign lost race).
+        match INSTALLED_PF_HANDLER.compare_exchange(0, h, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => {}
+            Err(prev) => assert_eq!(prev, h, "nub: multiple guest personalities in one binary"),
+        }
+    }
+    // Shared handler, lane-local state: leave the function installed across
+    // exits so one lane cannot clear another lane's #PF hook. The handler
+    // returns `false` for non-JIT CR3s.
+    HANDLERS[14].store(h, Ordering::Release);
 }
 
 /// Resolve a faulting native offset to its `(pvm_pc, access_width)` via
@@ -365,66 +430,55 @@ fn mat_range_for(state: &LaneJitState, page_va: u32) -> Option<MatRange> {
 }
 
 /// Resolve the **source physical address** of guest data page `page_va`
-/// (page-aligned) on demand from the running frame's `mem` DataCap — the lazy
-/// replacement for the former eager per-page `MAT_PAS` arena. A `Loaded` slab
-/// resolves to its own PA (dense cap pages are non-contiguous); an `Empty`
-/// (absent / zero) page resolves to the shared zero page; a `Missing` page
-/// (elided — V1 never mints one) yields `None`, so the caller raises a PVM
-/// fault.
+/// (page-aligned) on demand from the running frame's mem ([`FrameMem`]) — the
+/// lazy replacement for the former eager per-page `MAT_PAS` arena. A live
+/// slab ([`PageSource::Pa`]) resolves to its own PA (dense pages are
+/// non-contiguous); an absent/zero page ([`PageSource::Zero`]) resolves to
+/// the shared zero page; a [`PageSource::Missing`] page yields `None`, so
+/// the caller raises a PVM fault.
 ///
-/// Reading `mem` through `OVERLAY_SINK` is sound: the guest is single-threaded,
-/// and this shared read returns a `u64` (the borrow ends) before any `&mut`
-/// write to the same cap in [`cow_into_fresh`].
-fn mem_source_pa(state: &LaneJitState, page_va: u64) -> Option<u64> {
+/// Reading the frame mem through `overlay_sink` is sound: the guest is
+/// single-threaded, and this shared read returns a `u64` (the borrow ends)
+/// before any `&mut` write to the same mem in [`cow_into_fresh`]. The
+/// `*const M` cast is sound under the one-personality-per-binary invariant
+/// ([`install_handlers`]): the pointer was published by `enter_frame::<M>`
+/// for THIS lane before the Release CR3 publish.
+fn mem_source_pa<M: FrameMem>(state: &LaneJitState, page_va: u64) -> Option<u64> {
     let data_base = state.mat_data_base.load(Ordering::Relaxed);
-    let sink = state.overlay_sink.load(Ordering::Relaxed);
+    let sink = state.overlay_sink.load(Ordering::Relaxed) as *const M;
     if sink.is_null() {
         return None;
     }
-    // SAFETY: OVERLAY_SINK is the running frame's `mem` DataCap, exclusively
-    // ours under Hyperlight serialisation; borrowed read-only here.
+    // SAFETY: overlay_sink is the running frame's mem, exclusively ours under
+    // Hyperlight serialisation; borrowed read-only here.
     let mem = unsafe { &*sink };
-    mem_source_pa_in(
-        mem,
-        data_base,
-        page_va,
-        state.mat_zero_pa.load(Ordering::Relaxed),
-    )
-}
-
-/// Core of [`mem_source_pa`] over an explicit `mem` / `data_base` / `zero_pa`.
-/// `zero_pa` is the shared zero page's PA ([`ZERO_PAGE`]); a `Loaded` slab
-/// resolves to its own PA, an `Empty` page to `zero_pa`, a `Missing` page to
-/// `None` (→ PVM fault).
-fn mem_source_pa_in(
-    mem: &javm_cap::DataCap,
-    data_base: u64,
-    page_va: u64,
-    zero_pa: u64,
-) -> Option<u64> {
     let i = ((page_va - data_base) / PAGE_SIZE as u64) as usize;
-    match mem.page_slot(i) {
-        javm_cap::PageSlot::Loaded(pr) => crate::paging::va_to_pa(pr.bytes.as_ptr() as u64),
-        javm_cap::PageSlot::Empty => (zero_pa != 0).then_some(zero_pa),
-        javm_cap::PageSlot::Missing(_) => None,
+    match mem.page_source(i) {
+        PageSource::Pa(pa) => Some(pa),
+        PageSource::Zero => {
+            let z = state.mat_zero_pa.load(Ordering::Relaxed);
+            (z != 0).then_some(z)
+        }
+        PageSource::Missing => None,
     }
 }
 
 /// Whether guest data page `page_va` is **privately CoW'd** — present in the
-/// running frame's `mem` overlay (rather than sourced read-only from the
+/// running frame's mem overlay (rather than sourced read-only from the
 /// shared backing). The page-table reuse path keys off this: a write fault
 /// on an already-private page (its leaf re-armed read-only at the previous
 /// HALT) only needs its leaf W bit flipped back, whereas a write to a shared
 /// backing page must CoW a fresh private copy.
-fn overlay_has_page(state: &LaneJitState, page_va: u64, data_base: u64) -> bool {
-    let sink = state.overlay_sink.load(Ordering::Relaxed);
+fn overlay_has_page<M: FrameMem>(state: &LaneJitState, page_va: u64, data_base: u64) -> bool {
+    let sink = state.overlay_sink.load(Ordering::Relaxed) as *const M;
     if sink.is_null() {
         return false;
     }
     let idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
-    // SAFETY: OVERLAY_SINK is the running frame's `mem` DataCap, exclusively
-    // ours under Hyperlight serialisation; borrowed read-only here.
-    unsafe { (*sink).overlay.contains_key(&idx) }
+    // SAFETY: overlay_sink is the running frame's mem, exclusively ours under
+    // Hyperlight serialisation; borrowed read-only here (same cast argument
+    // as [`mem_source_pa`]).
+    unsafe { (*sink).overlay_has(idx) }
 }
 
 /// Read-only materialization source for a 2 MiB unit: a contiguous slab (code —
@@ -459,7 +513,7 @@ fn page_kind(state: &LaneJitState, page_va: u32) -> javm_exec::mat::PageKind {
 /// page — the caller then raises a PVM PageFault. Uses the *same*
 /// [`javm_exec::mat`] state machine + page-set rule as the interpreter,
 /// so both engines charge bit-identically (gas-cost.md §3).
-fn try_materialize(
+fn try_materialize<M: FrameMem>(
     state: &LaneJitState,
     gva: u64,
     width: u32,
@@ -553,7 +607,8 @@ fn try_materialize(
             }
         };
         if let Some((r_start, r_end, src)) = ro_range {
-            match materialize_ro_unit(state, pv, r_start, r_end, src, ro_units, pml4, owned_vec) {
+            match materialize_ro_unit::<M>(state, pv, r_start, r_end, src, ro_units, pml4, owned_vec)
+            {
                 Some(c) => total = total.saturating_add(c),
                 None => return false,
             }
@@ -580,8 +635,8 @@ fn try_materialize(
             javm_exec::mat::PageState::PresentRo => {
                 if cur == javm_exec::mat::PageState::NotPresent {
                     // Page-in: map the page RO at its source PA (resolved lazily
-                    // from the frame's `mem`; `None`/`Missing` → fault).
-                    let Some(src_pa) = mem_source_pa(state, pv) else {
+                    // from the frame's mem; `None`/`Missing` → fault).
+                    let Some(src_pa) = mem_source_pa::<M>(state, pv) else {
                         return false;
                     };
                     // SAFETY: live PT, single writer; builds the path.
@@ -621,7 +676,7 @@ fn try_materialize(
                     // overlay, so it correctly falls through to a real CoW.) The
                     // RO translation may be TLB-cached by the faulting write, so
                     // invlpg after the flip.
-                    let flipped = overlay_has_page(state, pv, data_base)
+                    let flipped = overlay_has_page::<M>(state, pv, data_base)
                         && unsafe { crate::paging::pt_set_leaf_w(pml4, pv, true) };
                     if flipped {
                         crate::paging::invlpg(pv);
@@ -632,14 +687,15 @@ fn try_materialize(
                         // NotPresent) maps a page that was never present, so it
                         // needs no invlpg.
                         let flush = cur == javm_exec::mat::PageState::PresentRo;
-                        // Resolve the source PA lazily (from the frame's `mem`): a
-                        // `Loaded` cap slab, or the shared zero page for an
+                        // Resolve the source PA lazily (from the frame's mem): a
+                        // live slab, or the shared zero page for an
                         // ephemeral page (so the CoW yields a fresh zeroed page).
                         // `None` (a `Missing` page) → fault.
-                        let Some(src_pa) = mem_source_pa(state, pv) else {
+                        let Some(src_pa) = mem_source_pa::<M>(state, pv) else {
                             return false;
                         };
-                        if !cow_into_fresh(state, pv, src_pa, pml4, owned_vec, data_base, flush) {
+                        if !cow_into_fresh::<M>(state, pv, src_pa, pml4, owned_vec, data_base, flush)
+                        {
                             // Allocation / remap failure → fault (nothing charged
                             // yet for THIS page, but earlier pages of a straddle
                             // were already advanced; an OOM here is fatal anyway).
@@ -683,7 +739,7 @@ fn try_materialize(
 /// only when an *existing* present mapping is being changed (read-then-write
 /// CoW, where the page was mapped RO and may be cached); a first-touch write
 /// (the page was `NotPresent`) needs no flush.
-fn cow_into_fresh(
+fn cow_into_fresh<M: FrameMem>(
     state: &LaneJitState,
     page_va: u64,
     src_pa: u64,
@@ -698,15 +754,16 @@ fn cow_into_fresh(
     // SAFETY: src_kva is a live 4 KiB page (cap slab or shared zero page,
     // pinned by the frame), page-aligned.
     let src = unsafe { core::slice::from_raw_parts(src_kva as *const u8, PAGE_SIZE) };
-    // Fresh page-aligned overlay slab, copied from the source. Held via `Arc`
-    // in the cap overlay; the `PageBytes` pointee (and its `bytes` slab) is
-    // address-stable across later `BTreeMap` inserts, so `new_pa` stays valid.
-    let page = alloc::sync::Arc::new(javm_cap::PageBytes::from_page_copy_unhashed(src));
-    let Some(new_pa) = crate::paging::va_to_pa(page.bytes.as_ptr() as u64) else {
+    // (1) alloc + copy: a fresh page-aligned private slab, copied from the
+    // source. The personality's CowPage keeps `new_pa` address-stable across
+    // the later commit (javm: `Arc<PageBytes>` — the pointee survives
+    // `BTreeMap` inserts).
+    let Some((page, new_pa)) = M::alloc_cow_page(src) else {
         return false;
     };
-    // SAFETY: live PT, single writer; builds the path if needed (the page
-    // may be NotPresent under zero-setup) or reuses it (read-then-write).
+    // (2) map. SAFETY: live PT, single writer; builds the path if needed (the
+    // page may be NotPresent under zero-setup) or reuses it (read-then-write).
+    // A failure here leaves the overlay untouched (`page` just drops).
     if unsafe {
         crate::paging::pt_map_leaf(
             pml4,
@@ -720,22 +777,26 @@ fn cow_into_fresh(
     {
         return false;
     }
+    // (3) flush.
     if flush {
         crate::paging::invlpg(page_va);
     }
 
-    let sink_ptr = state.overlay_sink.load(Ordering::Relaxed);
+    // (4) publish into the overlay (skipped on a null sink — the page drops,
+    // still `true`).
+    let sink_ptr = state.overlay_sink.load(Ordering::Relaxed) as *mut M;
     if !sink_ptr.is_null() {
-        // SAFETY: sink_ptr is the running frame's `mem` DataCap, re-published
-        // each enter_frame; exclusively ours (single-threaded) for the
-        // handler's life.
+        // SAFETY: sink_ptr is the running frame's mem, re-published each
+        // enter_frame; exclusively ours (single-threaded, the guest is
+        // suspended in the fault) for the handler's life. Cast soundness:
+        // one-personality-per-binary ([`install_handlers`]).
         let mem = unsafe { &mut *sink_ptr };
         let page_idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
-        // Insert drops any prior overlay page at this index: always empty on the
-        // first CoW today (a frame CoWs each page at most once per run). The
-        // drop-prior logic stays correct for a future swap-reclaim re-CoW, where
-        // the old page would already be unmapped.
-        mem.insert_overlay_page(page_idx, javm_cap::PageSlot::Loaded(page));
+        // Commit drops any prior overlay page at this index: always empty on
+        // the first CoW today (a frame CoWs each page at most once per run).
+        // The drop-prior logic stays correct for a future swap-reclaim re-CoW,
+        // where the old page would already be unmapped.
+        mem.commit_overlay_page(page_idx, page);
     }
     true
 }
@@ -756,7 +817,7 @@ fn cow_into_fresh(
 /// not TLB-cached, so the faulting retry walks the fresh entries. Returns
 /// `Some(0)` on success, or `None` on a page-table allocation failure.
 #[allow(clippy::too_many_arguments)]
-fn materialize_ro_unit(
+fn materialize_ro_unit<M: FrameMem>(
     state: &LaneJitState,
     pv: u64,
     r_start: u64,
@@ -784,7 +845,7 @@ fn materialize_ro_unit(
         // cap's pages each resolve their own slab PA lazily from the frame mem.
         let page_pa = match &src {
             RoSrc::Contig { base_pa } => base_pa + (q - r_start),
-            RoSrc::Mem => mem_source_pa(state, q)?,
+            RoSrc::Mem => mem_source_pa::<M>(state, q)?,
         };
         // SAFETY: live PT, single writer; builds the path (zero-setup).
         unsafe {
@@ -1131,13 +1192,13 @@ pub unsafe fn build_frame_runtime<S: JitSlot>(
 /// Hyperlight construction. `overlay_sink`, `mat_state_ptr` (valid for
 /// `mat_state_len` bytes), and `ro_units` must outlive the call.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn enter_frame(
+pub unsafe fn enter_frame<M: FrameMem>(
     lane: ExecutionLane,
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
     initial_regs: [u64; 13],
-    overlay_sink: *mut javm_cap::DataCap,
+    overlay_sink: *mut M,
     mat_state_ptr: *mut u8,
     mat_state_len: u64,
     ro_units: *mut alloc::vec::Vec<u32>,
@@ -1210,7 +1271,9 @@ pub unsafe fn enter_frame(
         .store(rt.code_top as u64, Ordering::Relaxed);
     state.mat_code_pa.store(rt.code_pa, Ordering::Relaxed);
     state.mat_ro_units_sink.store(ro_units, Ordering::Relaxed);
-    state.overlay_sink.store(overlay_sink, Ordering::Relaxed);
+    state
+        .overlay_sink
+        .store(overlay_sink as *mut (), Ordering::Relaxed);
     state
         .active_pt_pml4_kva
         .store(rt.pt.pml4_kva(), Ordering::Relaxed);
@@ -1221,10 +1284,7 @@ pub unsafe fn enter_frame(
     // matching the CR3 implies every other field above is initialized.
     state.active_cr3.store(rt.new_cr3, Ordering::Release);
     LAST_ACTIVE_JIT_LANE.store(lane.index() as u64, Ordering::Relaxed);
-    // Shared handler, lane-local state: leave the function installed across
-    // exits so one lane cannot clear another lane's #PF hook. The handler
-    // returns `false` for non-JIT CR3s.
-    HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
+    install_handlers::<M>();
 
     crate::paging::enable_global_pages();
     flush_global_arena_on_image_switch(lane, rt.global_arena_token, rt.global_arena_pages);

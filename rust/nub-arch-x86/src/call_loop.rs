@@ -106,6 +106,7 @@ use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, Resid
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
 use crate::paging;
+use crate::personality::{FrameMem, PageSource};
 use crate::state_cache::CACHE;
 
 const EXIT_HALT: u32 = 0;
@@ -278,6 +279,61 @@ pub struct KernelFrame {
 struct FrameOrigin {
     owner: usize,
     slot: Key,
+}
+
+/// The Javm frame memory: a transparent newtype over [`DataCap`] carrying the
+/// [`FrameMem`] impl. `#[repr(transparent)]` — same layout, same validity —
+/// so a `&mut DataCap` reborrows as `&mut JavmMem` for the JIT entry. The
+/// newtype exists solely to keep the `FrameMem` impl local after the B1 crate
+/// split (orphan rule: trait in the kernel crate, `DataCap` in javm-cap).
+#[repr(transparent)]
+pub struct JavmMem(pub DataCap);
+
+impl JavmMem {
+    #[inline]
+    fn from_mut(m: &mut DataCap) -> &mut JavmMem {
+        // SAFETY: #[repr(transparent)] — same layout, same validity.
+        unsafe { &mut *(m as *mut DataCap as *mut JavmMem) }
+    }
+}
+
+impl FrameMem for JavmMem {
+    type CowPage = alloc::sync::Arc<javm_cap::PageBytes>;
+
+    fn page_source(&self, i: usize) -> PageSource {
+        match self.0.page_slot(i) {
+            javm_cap::PageSlot::Loaded(pr) => {
+                match paging::va_to_pa(pr.bytes.as_ptr() as u64) {
+                    Some(pa) => PageSource::Pa(pa),
+                    None => PageSource::Missing,
+                }
+            }
+            javm_cap::PageSlot::Empty => PageSource::Zero,
+            javm_cap::PageSlot::Missing(_) => PageSource::Missing,
+        }
+    }
+
+    fn overlay_has(&self, idx: u32) -> bool {
+        self.0.overlay.contains_key(&idx)
+    }
+
+    fn alloc_cow_page(src: &[u8]) -> Option<(Self::CowPage, u64)> {
+        // Fresh page-aligned overlay slab, copied from the source. Held via
+        // `Arc`; the `PageBytes` pointee (and its `bytes` slab) is
+        // address-stable across later `BTreeMap` inserts, so the PA stays
+        // valid. The slab is `unhashed` (a `[0;32]` sentinel) — overlay pages
+        // are hashed only at [`javm_cap::DataCap::flush`], which recomputes;
+        // keeping SHA-256 out of the fault path preserves interp==recomp gas
+        // parity.
+        let page = alloc::sync::Arc::new(javm_cap::PageBytes::from_page_copy_unhashed(src));
+        let pa = paging::va_to_pa(page.bytes.as_ptr() as u64)?;
+        Some((page, pa))
+    }
+
+    fn commit_overlay_page(&mut self, idx: u32, page: Self::CowPage) {
+        self.0
+            .insert_overlay_page(idx, javm_cap::PageSlot::Loaded(page));
+    }
 }
 
 /// What a kernel call-stack entry runs.
@@ -1325,13 +1381,13 @@ fn run_one_entry(lane: ExecutionLane, frame: &mut KernelFrame, gas: i64) -> Resu
     // overlay and advances `frame.mat_state` / `frame.ro_units` in place. The
     // raw-pointer casts end those `&mut` borrows immediately, so the subsequent
     // `frame.runtime` borrow does not conflict.
-    let overlay_sink: *mut DataCap = &mut frame.instance.mem;
+    let overlay_sink: *mut JavmMem = JavmMem::from_mut(&mut frame.instance.mem);
     let mat_state_ptr = frame.mat_state.as_mut_ptr();
     let mat_state_len = frame.mat_state.len() as u64;
     let ro_units: *mut Vec<u32> = &mut frame.ro_units;
     let rt = frame.runtime.as_mut().expect("just built");
     let info = unsafe {
-        jit_run::enter_frame(
+        jit_run::enter_frame::<JavmMem>(
             lane,
             rt,
             gas,

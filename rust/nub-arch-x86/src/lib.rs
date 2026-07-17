@@ -41,6 +41,8 @@ pub mod page_alloc;
 #[cfg(target_os = "none")]
 pub mod paging;
 #[cfg(target_os = "none")]
+pub mod personality;
+#[cfg(target_os = "none")]
 pub mod ring3;
 #[cfg(target_os = "none")]
 pub mod segments;
