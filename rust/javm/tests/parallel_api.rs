@@ -1,8 +1,8 @@
 //! Cloneable Nub handle and invoke job API smoke tests.
 
+use javm::{InvokeRequest, MAX_HYPERLIGHT_VCPUS, Nub, NubOptions};
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, DataCap, Key, NUM_REGS};
-use nub::{InvokeRequest, MAX_HYPERLIGHT_VCPUS, Nub, NubOptions};
 use std::collections::BTreeMap;
 use std::thread;
 
@@ -21,7 +21,7 @@ fn ecalli_imm_image(imm: u32) -> Image {
     img
 }
 
-fn publish(nub: &Nub, imm: u32) -> nub::AbiCapHash {
+fn publish(nub: &Nub, imm: u32) -> javm::AbiCapHash {
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&ecalli_imm_image(imm), &[], &[]).expect("image"))
         .expect("put image");
@@ -40,7 +40,7 @@ fn publish(nub: &Nub, imm: u32) -> nub::AbiCapHash {
 
 #[test]
 fn cloned_local_nub_handles_can_blocking_invoke_from_many_threads() {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     let inst = publish(&nub, 42);
 
     let handles: Vec<_> = (0..4)
@@ -62,7 +62,7 @@ fn cloned_local_nub_handles_can_blocking_invoke_from_many_threads() {
 
 #[test]
 fn invoke_job_wait_returns_result() {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     let inst = publish(&nub, 43);
     let job = nub
         .submit_invoke(InvokeRequest {
@@ -81,7 +81,7 @@ fn invoke_job_wait_returns_result() {
 
 #[test]
 fn cloned_local_nub_handles_can_idempotently_publish_from_many_threads() {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     let cap = Cap::empty_cnode();
     let hash = nub.put_cap(&cap).expect("initial put");
 

@@ -8,9 +8,9 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::{InvokeRequest, Nub, NubOptions};
 use javm_cap::image::Image;
 use javm_cap::{Cap, CapHash};
-use nub::{InvokeRequest, Nub, NubOptions};
 use ssz::Decode;
 
 #[derive(Clone, Copy)]
@@ -41,7 +41,7 @@ fn publish(
     }
 }
 
-fn assert_result(workload: PublishedWorkload, result: nub::InvocationResult) {
+fn assert_result(workload: PublishedWorkload, result: javm::InvocationResult) {
     assert_eq!(
         (result.exit_reason, result.exit_arg),
         (4, 0),

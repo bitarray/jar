@@ -18,8 +18,8 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64", feature = "heap-diag"))]
 
+use javm::Nub;
 use javm_cap::image::Image;
-use nub::Nub;
 use ssz::Decode;
 
 const PRIME_SIEVE_BLOB: &[u8] = include_bytes!(env!("PRIME_SIEVE_BLOB"));

@@ -7,10 +7,10 @@ description = "JAVM v3 benchmarks: PVM2 (RISC-V) interpreter vs JIT recompiler."
 
 [features]
 default = []
-# Pull in `nub/heap-diag` for the `tests/heap_drift.rs` regression
+# Pull in `javm/heap-diag` for the `tests/heap_drift.rs` regression
 # check. Off by default; opt in with `cargo test -p javm-bench
 # --test heap_drift --features heap-diag -- --ignored --nocapture`.
-heap-diag = ["nub/heap-diag"]
+heap-diag = ["javm/heap-diag"]
 
 [dependencies]
 javm-cap = { workspace = true }
@@ -19,7 +19,7 @@ sha2 = "0.10"
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-nub = { path = "../nub" }
+javm = { path = "../javm" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86" }
 blake3 = "1"

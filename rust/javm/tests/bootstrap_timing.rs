@@ -1,7 +1,7 @@
 //! Standalone timing for the `Nub::hyperlight()` singleton. Run with:
 //!
 //! ```bash
-//! cargo test -p nub --release --test bootstrap_timing -- --ignored --nocapture
+//! cargo test -p javm --release --test bootstrap_timing -- --ignored --nocapture
 //! ```
 //!
 //! `#[ignore]` because it's a manual measurement, not a CI gate. The
@@ -10,7 +10,7 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use nub::Nub;
+use javm::Nub;
 use std::time::Instant;
 
 const N: usize = 10;
@@ -58,13 +58,13 @@ fn nub_hyperlight_boot() {
 
 #[test]
 #[ignore]
-fn nub_new_local_boot() {
+fn nub_local_boot() {
     // Local is in-process — should be sub-microsecond, but worth
     // confirming.
     let mut samples = Vec::with_capacity(N * 100);
     for _ in 0..N * 100 {
         let t = Instant::now();
-        let nub = Nub::new_local();
+        let nub = Nub::local();
         let elapsed = t.elapsed();
         drop(nub);
         samples.push(elapsed);
@@ -78,7 +78,7 @@ fn nub_new_local_boot() {
 
     eprintln!();
     eprintln!(
-        "Nub::new_local() construction across {} samples:",
+        "Nub::local() construction across {} samples:",
         samples.len()
     );
     eprintln!("  min: {:?}", min);

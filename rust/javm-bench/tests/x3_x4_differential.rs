@@ -5,7 +5,7 @@
 //! This test hand-assembles small RV64E programs that *do*, builds a raw
 //! Image, and runs each one through both engines:
 //!
-//! - **Interpreter** (`Nub::new_local`) — executes x3/x4 as ordinary slot
+//! - **Interpreter** (`Nub::local`) — executes x3/x4 as ordinary slot
 //!   13/14 GPRs.
 //! - **Recompiler** (in-kernel Hyperlight JIT) — routes them to the cold
 //!   spill path (donor re-dispatch for ALU, dedicated branch handler).

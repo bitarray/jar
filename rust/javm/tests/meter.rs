@@ -3,12 +3,12 @@
 //! in an image's `gas_slots` participates in guest-side meter routing, but the
 //! host `Nub` does not keep a shared meter map across invocations.
 
+use javm::{InvokeRequest, Nub, NubOptions};
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{
     CNodeCap, Cap, CapHashOrRef, DataCap, KernelImage, Key, NUM_REGS, kernel_image_hash,
     key_to_regs,
 };
-use nub::{InvokeRequest, Nub, NubOptions};
 use std::collections::BTreeMap;
 
 const GAS_SLOT: u8 = 5;
@@ -35,7 +35,7 @@ fn ecalli_42_image(with_gas_slot: bool) -> Image {
 }
 
 /// Publish a plain instance (no gas slot) and return its hash.
-fn publish_plain(nub: &Nub) -> nub::AbiCapHash {
+fn publish_plain(nub: &Nub) -> javm::AbiCapHash {
     let img = ecalli_42_image(false);
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
@@ -54,7 +54,7 @@ fn publish_plain(nub: &Nub) -> nub::AbiCapHash {
 }
 
 /// Publish an instance whose `gas_slots[0]` holds a `Gas{meter_key}` handle.
-fn publish_metered_image(nub: &Nub, img: Image, meter_key: &Key) -> nub::AbiCapHash {
+fn publish_metered_image(nub: &Nub, img: Image, meter_key: &Key) -> javm::AbiCapHash {
     // Gas unit handle: a Cap::Instance with the well-known Gas image-hash chain
     // and the meter_key packed into regs[0..1].
     let (packed, len) = key_to_regs(meter_key);
@@ -93,7 +93,7 @@ fn publish_metered_image(nub: &Nub, img: Image, meter_key: &Key) -> nub::AbiCapH
     nub.put_cap(&inst).unwrap()
 }
 
-fn publish_metered(nub: &Nub, meter_key: &Key) -> nub::AbiCapHash {
+fn publish_metered(nub: &Nub, meter_key: &Key) -> javm::AbiCapHash {
     publish_metered_image(nub, ecalli_42_image(true), meter_key)
 }
 
@@ -121,7 +121,7 @@ fn initial_gas_funds_metered_invocation(nub: &Nub) {
 
 #[test]
 fn initial_gas_funds_metered_invocation_local() {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     initial_gas_funds_metered_invocation(&nub);
 }
 
@@ -135,7 +135,7 @@ fn initial_gas_funds_metered_invocation_hyperlight() {
 #[test]
 fn no_gas_slot_uses_call_budget() {
     // Without a gas slot the call-supplied budget is used and no meter touched.
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     let plain = publish_plain(&nub);
     let r = nub.invoke_cached(plain, 0, [0; 4], 1_000_000).unwrap();
     assert!(r.gas_remaining < 1_000_000 && r.gas_remaining > 0);
@@ -143,7 +143,7 @@ fn no_gas_slot_uses_call_budget() {
 
 #[test]
 fn concurrent_invokes_sharing_gas_handle_are_independent() {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     concurrent_invokes_sharing_gas_handle_are_independent_for(&nub);
 }
 

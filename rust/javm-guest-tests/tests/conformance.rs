@@ -4,9 +4,9 @@
 //!
 //! 1. **Native** — call the host fn directly.
 //! 2. **Interpreter** — publish the Image + Instance into a local
-//!    [`nub::Nub`] (`nub-arch-local`, the PVM2/RISC-V interpreter run
+//!    [`javm::Nub`] (`nub-arch-local`, the PVM2/RISC-V interpreter run
 //!    in-process) and `invoke_cached`.
-//! 3. **Recompiler** — publish into a Hyperlight-backed [`nub::Nub`] (the
+//! 3. **Recompiler** — publish into a Hyperlight-backed [`javm::Nub`] (the
 //!    `nub-arch-x86` in-kernel JIT) and `invoke_cached`.
 //!
 //! Both PVM arms go through the *same* publish + invoke code
@@ -23,9 +23,9 @@
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod backend {
+    use javm::Nub;
     use javm_cap::image::{Image, PinnedCap};
     use javm_cap::{Cap, Key, NUM_REGS};
-    use nub::Nub;
     use ssz::Decode;
 
     const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
@@ -38,7 +38,7 @@ mod backend {
     /// Interpreter arm: a fresh in-process `LocalArch` Nub per call (cheap —
     /// no sandbox).
     pub fn interp(image: &Image, ep: u8) -> (u64, u64) {
-        run(&mut Nub::new_local(), image, ep)
+        run(&mut Nub::local(), image, ep)
     }
 
     /// Recompiler arm: the shared Hyperlight sandbox.

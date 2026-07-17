@@ -17,10 +17,10 @@ default = []
 # detect per-iter leaks.
 heap-diag = []
 # Enable the `test_support` module + build the test/bench guest
-# binaries (`javm-guest-x86-tests`, `javm-guest-x86-benches`) in addition
-# to the production blob. Off by default; auto-enabled for
-# `cargo test -p nub` / `cargo bench -p nub` via the self-referencing
-# dev-dep below.
+# binaries (`javm-guest-x86-tests`, `javm-guest-x86-benches`) in
+# addition to the production blob. Off by default; enabled by
+# downstream test/bench consumers via their own feature edge (e.g.
+# `javm`'s `test-support = ["nub/test-support"]`).
 test-support = []
 
 [dependencies]
@@ -31,9 +31,6 @@ javm-cap = { path = "../javm-cap" }
 nub-host-kvm = { path = "../nub-host-kvm" }
 nub-kernel = { path = "../nub-kernel" }
 nub-arch-local = { path = "../nub-arch-local" }
-# Lib form of the guest crate — supplies `test_abi` constants on
-# host targets (and the kernel modules on bare-metal).
-nub-arch-x86 = { path = "../nub-arch-x86" }
 # Wire types shared between the host driver and the guest's
 # `nub_invoke` entry (D1+).
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
@@ -41,19 +38,3 @@ rkyv = { version = "0.8", features = ["std"] }
 
 [build-dependencies]
 nub-build = { path = "../nub-build" }
-
-[dev-dependencies]
-# Self-reference so `cargo test -p nub` and `cargo bench -p nub`
-# automatically enable the `test-support` feature, which in turn
-# builds the test/bench guest binaries and exposes the
-# `Nub::hyperlight_tests` / `hyperlight_benches` constructors.
-nub = { path = ".", features = ["test-support"] }
-criterion = "0.5"
-# Host lib form of the Javm guest crate — supplies the javm-private
-# test_abi constants (fn_id band >= 0x100) to nub's integration tests.
-# Temporary: moves to the `javm` crate with the tests at B2.
-javm-guest-x86 = { path = "../javm-guest-x86" }
-
-[[bench]]
-name = "arc_page_alloc"
-harness = false

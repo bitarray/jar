@@ -1,7 +1,7 @@
 //! CI conformance for the PVM2 bench workloads.
 //!
 //! For each workload we:
-//!   1. Drive the interpreter through `Nub::new_local()`.
+//!   1. Drive the interpreter through `Nub::local()`.
 //!   2. Drive the JIT recompiler through `Nub::hyperlight()`.
 //!   3. Assert both backends agree on `(return_value, gas_used)`.
 //!   4. Pin both against a hardcoded `(value, gas)` from the

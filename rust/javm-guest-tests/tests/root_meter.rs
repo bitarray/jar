@@ -12,10 +12,10 @@
 //! Gated to the nub Hyperlight host (linux-x86_64).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::yield_cap::YK_SET_GAS_METER;
 use javm_cap::{gas_handle, yield_sender, CNodeCap, Cap, CapHashOrRef, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_REPLY: u32 = 0;

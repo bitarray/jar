@@ -10,9 +10,9 @@
 //! - [`Nub::call_raw`]: raw RPC dispatch for fn_ids not exposed
 //!   through the typed API. Hyperlight backend only.
 //!
-//! Gated on the `test-support` Cargo feature, which is
-//! auto-enabled for `cargo test -p nub` and `cargo bench -p nub`
-//! via the self-referencing dev-dep in `Cargo.toml`.
+//! Gated on the `test-support` Cargo feature, enabled by downstream
+//! test/bench consumers via their own `test-support` feature edge
+//! (e.g. `javm`'s `test-support = ["nub/test-support"]`).
 
 use anyhow::Result;
 
@@ -25,7 +25,7 @@ impl Nub {
     /// Borrow the Hyperlight-backed singleton running the
     /// `javm-guest-x86-tests` guest binary. Same production RPCs as
     /// [`Nub::hyperlight`] plus the test-only guest functions
-    /// (whose FN_IDs live in [`nub_arch_x86::test_abi`]).
+    /// (whose FN_IDs live in the guest crates' `test_abi` modules).
     pub fn hyperlight_tests() -> Result<HyperlightNubGuard> {
         Self::hyperlight_tests_with_options(NubOptions::default())
     }
@@ -42,8 +42,8 @@ impl Nub {
 
     /// Borrow the Hyperlight-backed singleton running the
     /// `javm-guest-x86-benches` guest binary. Same production RPCs as
-    /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in
-    /// [`nub_arch_x86::test_abi`]).
+    /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in the guest
+    /// crates' `test_abi` modules).
     pub fn hyperlight_benches() -> Result<HyperlightNubGuard> {
         Self::hyperlight_benches_with_options(NubOptions::default())
     }

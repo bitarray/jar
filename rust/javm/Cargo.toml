@@ -9,9 +9,29 @@ description = "JAVM engine entrypoint: the javm-cap kernel personality on the nu
 default = []
 heap-diag = ["nub/heap-diag"]
 # Exposes hyperlight_tests/hyperlight_benches + nub's raw call_raw.
+# Auto-enabled for `cargo test/bench -p javm` via the self-referencing
+# dev-dep.
 test-support = ["nub/test-support"]
 
 [dependencies]
 anyhow = "1"
 javm-cap = { workspace = true }
 nub = { path = "../nub" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+rkyv = { version = "0.8", features = ["std"] }
+
+[dev-dependencies]
+# Self-reference so `cargo test -p javm` and `cargo bench -p javm`
+# automatically enable the `test-support` feature, which exposes the
+# `Nub::hyperlight_tests` / `hyperlight_benches` constructors + the
+# raw call_raw RPC.
+javm = { path = ".", features = ["test-support"] }
+criterion = "0.5"
+# Host lib forms of the guest crates — test_abi fn_id constants only:
+# javm-private ids (band >= 0x100) and the generic probes (100/200).
+javm-guest-x86 = { path = "../javm-guest-x86" }
+nub-arch-x86 = { path = "../nub-arch-x86" }
+
+[[bench]]
+name = "arc_page_alloc"
+harness = false

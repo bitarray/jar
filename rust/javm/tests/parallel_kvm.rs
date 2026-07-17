@@ -1,8 +1,8 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::{InvokeRequest, Nub, NubOptions};
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, DataCap, Key, NUM_REGS};
-use nub::{InvokeRequest, Nub, NubOptions};
 use std::collections::BTreeMap;
 use std::thread;
 
@@ -21,7 +21,7 @@ fn ecalli_imm_image(imm: u32) -> Image {
     img
 }
 
-fn publish(nub: &Nub, imm: u32) -> nub::AbiCapHash {
+fn publish(nub: &Nub, imm: u32) -> javm::AbiCapHash {
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&ecalli_imm_image(imm), &[], &[]).expect("image"))
         .expect("put image");

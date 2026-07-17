@@ -3,9 +3,9 @@
 //! typed API and check that `invoke_cached` returns the expected
 //! `HostCall(42)` result.
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 /// Build a minimal PVM2 Image whose endpoint 0 runs `ecalli 42` at PC 0.
@@ -30,7 +30,7 @@ fn ecalli_42_image() -> Image {
     img
 }
 
-fn publish_and_invoke(nub: &mut Nub) -> nub::InvocationResult {
+fn publish_and_invoke(nub: &mut Nub) -> javm::InvocationResult {
     let img = ecalli_42_image();
     let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
     let image_h = nub.put_cap(&image_cap).expect("put_cap image");
@@ -52,7 +52,7 @@ fn publish_and_invoke(nub: &mut Nub) -> nub::InvocationResult {
 
 #[test]
 fn local_invoke_cached_ecalli_42() {
-    let mut nub = Nub::new_local();
+    let mut nub = Nub::local();
     let result = publish_and_invoke(&mut nub);
     assert_eq!(result.exit_reason, 4, "expected HostCall");
     assert_eq!(result.exit_arg, 42, "expected ecalli imm");

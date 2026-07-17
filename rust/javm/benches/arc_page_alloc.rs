@@ -16,7 +16,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use nub::Nub;
+use javm::Nub;
 use nub_arch_x86::test_abi::FN_ID_BENCH_ARC_PAGE_ALLOC;
 
 fn bench(c: &mut Criterion) {

@@ -16,9 +16,9 @@
 //! to the nub Hyperlight host (linux-x86_64).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{yield_receiver, yield_sender, CNodeCap, Cap, CapHashOrRef, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_REPLY: u32 = 0;
@@ -64,7 +64,7 @@ fn image(code: Vec<u8>, yield_receiver_slot: Option<Key>) -> Image {
     img
 }
 
-fn put_instance(nub: &mut Nub, img: &Image, cnode_h: [u8; 32]) -> nub::AbiCapHash {
+fn put_instance(nub: &mut Nub, img: &Image, cnode_h: [u8; 32]) -> javm::AbiCapHash {
     let image_h = nub
         .put_cap(&Cap::image_with_slots(img, &[], &[]).expect("image"))
         .expect("put image");

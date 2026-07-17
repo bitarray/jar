@@ -8,8 +8,8 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::{Nub, NubOptions};
 use javm_guest_x86::test_abi::FN_ID_TEST_INVOKE_TWO_SERIAL;
-use nub::{Nub, NubOptions};
 use nub_arch_x86::test_abi::FN_ID_TEST_SMOKE;
 use nub_arch_x86_abi::{InvocationResult, InvokePacket};
 use rkyv::primitive::ArchivedU64;
@@ -64,7 +64,7 @@ fn ecalli_image(imm: u32) -> Image {
     img
 }
 
-fn publish_ecalli(nub: &mut Nub, imm: u32) -> nub::AbiCapHash {
+fn publish_ecalli(nub: &mut Nub, imm: u32) -> javm::AbiCapHash {
     let img = ecalli_image(imm);
     let image_h = nub
         .put_cap(&Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots"))
@@ -84,9 +84,9 @@ fn publish_ecalli(nub: &mut Nub, imm: u32) -> nub::AbiCapHash {
 
 fn scheduler_probe(
     nub: &mut Nub,
-    first: nub::AbiCapHash,
+    first: javm::AbiCapHash,
     first_gas: u64,
-    second: nub::AbiCapHash,
+    second: javm::AbiCapHash,
     second_gas: u64,
 ) -> [InvocationResult; 2] {
     let first = InvokePacket {

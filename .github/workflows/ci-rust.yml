@@ -140,6 +140,7 @@ jobs:
         run: >
           cargo test --locked --workspace --release
           --exclude nub
+          --exclude javm
           --exclude nub-host-kvm
           --exclude nub-host-common
           --exclude nub-host-guest-macro
