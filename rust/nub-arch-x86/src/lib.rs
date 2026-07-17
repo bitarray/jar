@@ -48,6 +48,8 @@ pub mod ring3;
 pub mod segments;
 #[cfg(target_os = "none")]
 pub mod state_cache;
+#[cfg(target_os = "none")]
+pub mod task;
 
 /// Production guest function table — `#[guest_function]` linkme
 /// contributions. Any bin that `extern crate`s `nub_arch_x86` pulls

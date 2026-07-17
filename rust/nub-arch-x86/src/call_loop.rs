@@ -1,22 +1,23 @@
-//! In-kernel CALL/HALT loop driving the in-sandbox sub-VM lifecycle.
+//! The Javm guest-kernel personality: the javm-cap state/cap system driving
+//! the generic task skeleton ([`crate::task`]) for the in-sandbox sub-VM
+//! lifecycle.
 //!
-//! `nub_invoke_cached` calls [`run_top`] with a top-level
-//! `Cap::Instance` hash + endpoint. We build a [`KernelFrame`] from
-//! the published cap state, push it on an in-memory `Vec` stack, then
-//! iterate:
+//! `nub_invoke_cached` calls [`crate::task::run_top`]`::<`[`Javm`]`>` with a
+//! top-level `Cap::Instance` hash + endpoint. [`Javm::build_root_frame`]
+//! builds a [`KernelFrame`] from the published cap state; the task loop runs
+//! one ring-3 cycle per poll and dispatches each exit back here:
 //!
-//!   1. Run one ring-3 cycle via [`crate::jit_run::enter_frame`].
-//!   2. On `EXIT_HALT` (or `EXIT_HOST_CALL` with `exit_arg == 0` —
+//!   1. On `EXIT_HALT` (or `EXIT_HOST_CALL` with `exit_arg == 0` —
 //!      `subsoil`'s endpoint trampoline issues `li t0, 0; ecall`,
 //!      which the transpiler emits as PVM `ecalli 0`): pop. If the
 //!      stack is empty, return; otherwise reflect the child's φ[7]
-//!      into the parent's φ[7].
-//!   3. On `EXIT_HOST_CALL` / `EXIT_ECALL` with a recognised host op
+//!      into the parent's φ[7]. ([`Javm::on_halt`] / `OP_REPLY`)
+//!   2. On `EXIT_HOST_CALL` / `EXIT_ECALL` with a recognised host op
 //!      (`DERIVE_SPAWN` = 18, `HOST_CALL` = 26): dispatch in-place.
 //!      MGMT ops (`COPY` etc.) are accepted as no-ops in V1 — the
-//!      bench guest doesn't need them.
-//!   4. Anything else terminates the loop and returns the exit code
-//!      to the host.
+//!      bench guest doesn't need them. ([`Javm::on_ecall`])
+//!   3. Anything else terminates the loop and returns the exit code
+//!      to the host. ([`Javm::on_exit`])
 //!
 //! ## V1 simplifications
 //!
@@ -90,7 +91,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use javm_cap::cache::CapHashOrRef;
@@ -100,23 +101,24 @@ use javm_cap::cap::instance::InstanceCap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::Key;
 use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
+// Exit-code authority is the recompiler ABI. EXIT_TRAP doubles as the guest
+// trap for a host-rejected op (e.g. a pinned-slot write), matching the
+// interpreter's `ExitReason::Trap`.
+use javm_recompiler_x86::codegen::{EXIT_HOST_CALL, EXIT_OOG, EXIT_TRAP};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
 use crate::paging;
-use crate::personality::{FrameMem, PageSource};
-use crate::state_cache::CACHE;
-
-const EXIT_HALT: u32 = 0;
-const EXIT_OOG: u32 = 2;
-const EXIT_HOST_CALL: u32 = 4;
-const EXIT_ECALL: u32 = 6;
-/// Guest trap (deliberate or host-rejected op). Matches the interpreter's
-/// `ExitReason::Trap` and the JIT codegen's `EXIT_TRAP` ABI value, so a
-/// host-side rejection (e.g. a pinned-slot write) surfaces identically.
-const EXIT_TRAP: u32 = 7;
+use crate::personality::{
+    ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource,
+};
+use crate::state_cache::{CACHE, JavmStore};
+use crate::task::{
+    EntryKind, Flow, KernelScheduler, LaneSchedulerCell, LoopOutcome, StackEntry, TaskCtx,
+    frame_at, frame_at_mut,
+};
 
 const OP_REPLY: u32 = 0;
 /// `host_yield(sender_slot=φ[7], …)` — emit the yield_key carried by the
@@ -212,6 +214,41 @@ type ResidentSlotTarget = CapHashOrRef<Box<CachedCap>>;
 type ResidentSlotEntry = (Key, MissingOr<ResidentSlotTarget>);
 type WireRootCNode = CapHashOrRef<Box<Cap>>;
 type SplitResidentRoot = (WireRootCNode, Option<Box<ResidentCNode>>);
+
+/// The javm-cap guest-kernel personality (see [`GuestPersonality`]).
+pub struct Javm;
+
+/// Shorthand for this personality's stack entries.
+type Entry = StackEntry<Javm>;
+
+/// Per-entry personality metadata: the owner edge, its snapshotted
+/// catch-set, and the gas scope funding the entry (see the field docs on
+/// the former inline `StackEntry` — now [`crate::task::StackEntry`], which
+/// carries this struct opaquely as `meta`).
+///
+/// `Default` == the pre-stamp state `StackEntry::instance` used to set:
+/// no owner, empty catch-set, host-budgeted gas (`FrameGas`'s derived
+/// `Default` equals [`FrameGas::host_budgeted`]).
+#[derive(Default)]
+pub struct JavmEntryMeta {
+    /// Logical data-flow owner of this InstanceEntry. For a normal CALL from
+    /// a handler ReferenceEntry this points to the handler's referent
+    /// InstanceEntry (so `A -> B -> ref[A] -> C` records `owner(C)=A`). Root
+    /// has no owner. ReferenceEntries carry this only for diagnostics;
+    /// routing starts at `target`, the logical frame being run.
+    owner: Option<usize>,
+    /// Snapshot of the owner's YieldReceiver at the CALL that created this
+    /// entry: the catch-list on the owner edge `owner -> this`. Yield
+    /// routing consults this edge snapshot, then walks to the owner and
+    /// repeats. Static for the in-flight sub-call.
+    owner_catch_set: Vec<Key>,
+    /// Gas sources funding this entry's frame. A frame with declared gas
+    /// slots owns an ordered list of usable Gas handles; OOG consults each
+    /// before routing `kernel:oog`. A frame with no declaration loans its
+    /// caller's gas scope. A handler ReferenceEntry inherits the catcher's
+    /// gas scope.
+    gas: FrameGas,
+}
 
 /// One stack frame on the in-kernel call stack. Holds the running Instance
 /// value, the origin reservation metadata for the owner slot it came from, and
@@ -336,76 +373,6 @@ impl FrameMem for JavmMem {
     }
 }
 
-/// What a kernel call-stack entry runs.
-enum EntryKind {
-    /// A fresh invocation of an Instance — owns the running [`KernelFrame`].
-    /// Pushed by CALL; popped (and reflected) by HALT. Boxed so the stack `Vec`
-    /// element stays pointer-sized: a [`KernelFrame`] is large (~500 B) and a
-    /// `Reference` carries no frame, so an inline variant would bloat every
-    /// stack slot. One alloc per CALL is negligible beside the per-frame page
-    /// table build.
-    Instance(Box<KernelFrame>),
-    /// A **yield activation**: re-runs an earlier [`EntryKind::Instance`] (the
-    /// one at [`StackEntry::target`]) at its post-CALL continuation, with the
-    /// yield payload reflected into its scratchpad. It carries no frame of its
-    /// own — running the top of the stack runs the *referent's* frame — so one
-    /// Instance shares a single PC/regs/mem across its InstanceEntry and every
-    /// ReferenceEntry (spec §3 "same-instance entries share PC"). Pushed by a
-    /// routed `host_yield`; popped by `CALL_RESUME`.
-    Reference,
-}
-
-/// One entry on the in-kernel call stack. The stack drives control transfer:
-/// CALL pushes an [`EntryKind::Instance`], a routed `host_yield` pushes an
-/// [`EntryKind::Reference`], and HALT / `CALL_RESUME` pop. Exactly one entry —
-/// the top — is *Running*; every entry below it is *Waiting* (kernel-internal
-/// accounting, not a σ-visible Instance state).
-struct StackEntry {
-    kind: EntryKind,
-    /// Index of the [`EntryKind::Instance`] whose [`KernelFrame`] this entry
-    /// runs: its **own** index for an InstanceEntry, the **referent's** index
-    /// for a ReferenceEntry. Lower-or-equal to the entry's own index and stable
-    /// (entries below the top never move while the top exists).
-    target: usize,
-    /// Canonical Instance identity: an InstanceEntry gets a fresh id at CALL; a
-    /// ReferenceEntry copies its referent's id, so every stack entry of one
-    /// Instance compares equal. Kept for status/debug accounting; yield routing
-    /// follows owner edges, not instance-id skipping.
-    instance_id: u64,
-    /// Logical data-flow owner of this InstanceEntry. For a normal CALL from a
-    /// handler ReferenceEntry this points to the handler's referent InstanceEntry
-    /// (so `A -> B -> ref[A] -> C` records `owner(C)=A`). Root has no owner.
-    /// ReferenceEntries carry this only for diagnostics; routing starts at
-    /// `target`, the logical frame being run.
-    owner: Option<usize>,
-    /// Snapshot of the owner's YieldReceiver at the CALL that created this
-    /// entry: the catch-list on the owner edge `owner -> this`. Yield routing
-    /// consults this edge snapshot, then walks to the owner and repeats. Static
-    /// for the in-flight sub-call.
-    owner_catch_set: Vec<Key>,
-    /// Gas sources funding this entry's frame. A frame with declared gas slots
-    /// owns an ordered list of usable Gas handles; OOG consults each before
-    /// routing `kernel:oog`. A frame with no declaration loans its caller's gas
-    /// scope. A handler ReferenceEntry inherits the catcher's gas scope.
-    gas: FrameGas,
-}
-
-impl StackEntry {
-    /// A fresh InstanceEntry at stack position `index` carrying a new
-    /// `instance_id`. `target` is its own index (it runs its own frame); owner
-    /// and gas scope are stamped by the CALL site.
-    fn instance(frame: KernelFrame, index: usize, instance_id: u64) -> Self {
-        StackEntry {
-            kind: EntryKind::Instance(Box::new(frame)),
-            target: index,
-            instance_id,
-            owner: None,
-            owner_catch_set: Vec::new(),
-            gas: FrameGas::host_budgeted(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct FrameGas {
     meters: Vec<Key>,
@@ -514,76 +481,6 @@ fn gas_meter_key_from_ref(cap_ref: &CapHashOrRef<Box<CachedCap>>) -> Result<Key,
     javm_cap::gas_meter_key(&inst).ok_or(ERR_GAS_SLOT_INVALID)
 }
 
-/// Reconcile the threaded `gas` (the live balance of the running frame's active
-/// meter) when the active meter changes between loop iterations: bank the OLD
-/// active scope's balance, load the NEW scope's. `meters[k]` is authoritative for
-/// every non-active meter; `host_budget` holds the banked host scope (the
-/// host-budgeted top + its loaned descendants, active == `None`). Aliasing falls
-/// out for free: a descendant naming the same meter has the SAME active meter, so
-/// no swap happens and it shares the live balance — no double-spend.
-fn reconcile_active(
-    old: &Option<Key>,
-    new: &Option<Key>,
-    gas: &mut i64,
-    host_budget: &mut i64,
-    meters: &mut BTreeMap<Key, i64>,
-) {
-    if old == new {
-        return;
-    }
-    match old {
-        Some(k) => {
-            meters.insert(k.clone(), *gas);
-        }
-        None => *host_budget = *gas,
-    }
-    *gas = match new {
-        Some(k) => meters.get(k).copied().unwrap_or(0),
-        None => *host_budget,
-    };
-}
-
-/// The RPC's ROOT-scope remaining gas — what a break surfaces to the host (which
-/// harvests it into the top-level meter). The live `gas` when the root scope is
-/// the running frame's active meter, else the root scope's banked balance:
-/// `meters[root]` for a metered root, or `host_budget` for a host-budgeted top.
-fn root_remaining(
-    root: &Option<Key>,
-    current: &Option<Key>,
-    gas: i64,
-    host_budget: i64,
-    meters: &BTreeMap<Key, i64>,
-) -> i64 {
-    if current == root {
-        gas
-    } else {
-        match root {
-            Some(k) => meters.get(k).copied().unwrap_or(0),
-            None => host_budget,
-        }
-    }
-}
-
-/// `&mut` to the [`KernelFrame`] the entry at `idx` runs, following a
-/// ReferenceEntry to its referent InstanceEntry. The referent is always an
-/// `Instance` (a Reference's `target` only ever names an InstanceEntry).
-fn frame_at_mut(stack: &mut [StackEntry], idx: usize) -> &mut KernelFrame {
-    let target = stack[idx].target;
-    match &mut stack[target].kind {
-        EntryKind::Instance(f) => f,
-        EntryKind::Reference => unreachable!("ReferenceEntry.target must be an InstanceEntry"),
-    }
-}
-
-/// Shared-borrow companion of [`frame_at_mut`].
-fn frame_at(stack: &[StackEntry], idx: usize) -> &KernelFrame {
-    let target = stack[idx].target;
-    match &stack[target].kind {
-        EntryKind::Instance(f) => f,
-        EntryKind::Reference => unreachable!("ReferenceEntry.target must be an InstanceEntry"),
-    }
-}
-
 #[inline]
 fn slot_is_pending(frame: &KernelFrame, slot: &Key) -> bool {
     frame.pending_origins.contains(slot)
@@ -686,21 +583,6 @@ fn snapshot_catch_set(frame: &KernelFrame) -> Result<Vec<Key>, u32> {
     }
 }
 
-/// Successful loop result — what the host RPC returns to the bench
-/// driver. On guest-side panic the loop returns `Err(code)` instead
-/// and `nub_invoke_cached` packs the code into `exit_arg`.
-pub struct LoopOutcome {
-    pub exit_reason: u32,
-    pub exit_arg: u32,
-    pub return_value: u64,
-    pub gas_remaining: i64,
-    /// Effective bytes of the running Instance's scratchpad (slot[0]) region
-    /// head at top HALT (see [`SCRATCHPAD_HEAD_LEN`]). Read from the top frame's
-    /// owned `mem` DataCap (overlay-then-backing); zero on a non-clean exit. The
-    /// host surfaces this as the uncompressed run result.
-    pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
-}
-
 /// Read the running Instance's scratchpad (slot[0]) region head — the effective
 /// bytes of `[DATA_BASE, DATA_BASE + SCRATCHPAD_HEAD_LEN)`, the V1 scratchpad
 /// convention (the scratchpad DataCap maps at the data extent's base). The
@@ -716,627 +598,445 @@ fn read_scratchpad_head(frame: &KernelFrame) -> [u8; SCRATCHPAD_HEAD_LEN] {
     out
 }
 
-type TaskId = u64;
+impl ExecFrame for KernelFrame {
+    type Mem = JavmMem;
 
-/// GAS MODEL (single reconciliation point). `live_gas` always holds the live
-/// balance of the running frame's active meter. `meters[k]` is authoritative for
-/// every non-active meter, while `host_budget` is the banked unmetered scope.
-/// Every CALL/HALT/yield/resume/drop changes the top through one scheduler poll
-/// boundary, so this one task-local state object catches all gas scope changes.
-struct TaskGasState {
-    meters: BTreeMap<Key, i64>,
-    live_gas: i64,
-    host_budget: i64,
-    root_active: Option<Key>,
-    current_active: Option<Key>,
-}
-
-impl TaskGasState {
-    fn new(root_gas: &FrameGas, initial_gas: i64) -> Self {
-        let root_active = root_gas.active_key();
-        let mut meters = BTreeMap::new();
-        if let Some(k) = &root_active {
-            meters.insert(k.clone(), initial_gas);
-        }
-        Self {
-            meters,
-            live_gas: initial_gas,
-            host_budget: initial_gas,
-            root_active: root_active.clone(),
-            current_active: root_active,
+    fn parts(&mut self) -> FrameParts<'_, JavmMem> {
+        FrameParts {
+            pc: &mut self.instance.pc,
+            regs: &mut self.instance.regs,
+            mem: JavmMem::from_mut(&mut self.instance.mem),
+            mat_state: &mut self.mat_state,
+            ro_units: &mut self.ro_units,
+            runtime: &mut self.runtime,
         }
     }
 
-    fn reconcile_for(&mut self, stack: &[StackEntry], top_idx: usize) {
-        let new_active = active_meter(stack, top_idx);
-        reconcile_active(
-            &self.current_active,
-            &new_active,
-            &mut self.live_gas,
-            &mut self.host_budget,
-            &mut self.meters,
-        );
-        self.current_active = new_active;
+    /// Build the per-frame ring-3 runtime. Every pinned + initial slot
+    /// mapping projects directly into the per-call PT; initial slots are
+    /// armed for CoW and flipped writable by the #PF handler on first write.
+    ///
+    /// Looks the image and any cap-backed slices up under one
+    /// `DIRECTORY` lock scope. The PAs installed in the PT stay valid
+    /// for the frame's lifetime per the V1 invariant (no eviction mid-
+    /// RPC) even after this function returns and the guard is dropped.
+    fn build_runtime(&self, lane: ExecutionLane) -> Result<FrameRuntime, u32> {
+        // CacheDirectory is interior-mutable; each `get` takes the inner
+        // spin::Mutex briefly and returns an `Arc<CachedCap>`. We keep the Arc
+        // locals alive for the duration of the function so any borrowed
+        // slices (used to compute PAs for direct PT mapping) stay valid.
+        // Blobs are never evicted in V0, so the PAs remain valid for the
+        // frame's lifetime past return.
+        let img_arc = CACHE
+            .get(CapHashOrRef::Hash(self.instance.image_hash))
+            .ok_or(ERR_IMAGE_NOT_FOUND)?;
+        let img = match &img_arc.cap {
+            Cap::Image(i) => i,
+            _ => return Err(ERR_IMAGE_KIND),
+        };
+
+        // Pinned mappings (RO, direct-map) become `PinnedCapRo` `MatRange`s pushed
+        // first, so they take precedence over the catch-all RW range in
+        // `mat_range_for`. Classification uses `ImageCap::mapping_is_pinned` —
+        // identical to the interpreter drivers (`javm`, `nub-arch-local`), so the
+        // engines agree on which VAs are read-only.
+        let mut mat_ranges: Vec<MatRange> = Vec::new();
+
+        // Executable code region: a `PinnedCapRo` lazily-materialized region at the
+        // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
+        // excluded from `mem_size` (the data extent).
+        let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
+        let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
+
+        // The frame's RW memory is its **owned** dense `DataCap` (`self.instance.mem`)
+        // covering the whole data extent, holding both initial and pinned content
+        // at their VAs with page-aligned slabs. Source every data page from it
+        // (overlay-then-backing, so a rebuilt runtime picks up prior CoW writes):
+        // pinned VA ranges as `PinnedCapRo`, everything else (initial + ephemeral,
+        // the latter backed by `Empty` → zero page) as one catch-all
+        // `UnpinnedCapCow` range. The slabs are owned by the frame, so their PAs
+        // stay valid for the frame's life past this function's return.
+        let data_base = javm_cap::layout::DATA_BASE;
+        let mem = &self.instance.mem;
+        let extent = mem.content_len() as u32;
+        let mem_size = data_base.saturating_add(extent);
+        let pages = (extent / paging::PAGE_SIZE as u32) as usize;
+
+        // Pinned mappings → PinnedCapRo ranges (pushed first → precedence). Bounds +
+        // kind only; the #PF handler resolves each page's source PA lazily from
+        // `self.instance.mem` (`jit_run::mem_source_pa`).
+        for m in img.mappings.iter() {
+            if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
+                continue;
+            }
+            let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
+            if span == 0 {
+                continue;
+            }
+            mat_ranges.push(MatRange {
+                start: m.start as u32,
+                end: (m.start as u32).saturating_add(span),
+                kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
+            });
+        }
+
+        // Catch-all RW range over the whole extent (initial + ephemeral).
+        if pages > 0 {
+            mat_ranges.push(MatRange {
+                start: data_base,
+                end: mem_size,
+                kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
+            });
+        }
+
+        // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
+        // `javm_transpiler::linker::link_elf`). The JIT cache
+        // predecodes the bytes once and builds the dense dispatch table
+        // (block-start validation folded in).
+        //
+        // SAFETY: image and any cap-backed slices live in the heap-
+        // resident DIRECTORY/INSTANCES; PAs survive the guard drop per
+        // the no-eviction V1 invariant.
+        unsafe {
+            jit_run::build_frame_runtime(
+                lane,
+                &*img_arc,
+                code_bytes,
+                code_base,
+                code_pa,
+                javm_cap::layout::DATA_BASE,
+                mem_size,
+                mat_ranges,
+            )
+        }
+        .ok_or(ERR_JIT_FAILED)
+    }
+}
+
+// The personality's persisted register file must match the substrate's
+// ExitInfo width (the 13 host-mapped PVM slots).
+const _: () = assert!(javm_cap::NUM_REGS == crate::personality::NUM_REGS);
+
+impl GuestPersonality for Javm {
+    type Frame = KernelFrame;
+    type MeterKey = Key;
+    type EntryMeta = JavmEntryMeta;
+    type Store = JavmStore;
+
+    fn store() -> &'static JavmStore {
+        &crate::state_cache::JAVM_STORE
     }
 
-    fn root_remaining(&self) -> i64 {
-        root_remaining(
-            &self.root_active,
-            &self.current_active,
-            self.live_gas,
-            self.host_budget,
-            &self.meters,
-        )
-    }
-}
-
-enum TaskPoll {
-    Pending,
-    Done(LoopOutcome),
-}
-
-/// One top-level invocation as a resumable kernel task. The task owns exactly
-/// the state that used to live in `run_top` locals: one physical caller stack,
-/// one task-local gas bank, and one monotonic Instance id allocator.
-struct KernelTask {
-    id: TaskId,
-    lane: ExecutionLane,
-    stack: Vec<StackEntry>,
-    next_iid: u64,
-    gas_state: TaskGasState,
-}
-
-impl KernelTask {
-    fn new(
-        id: TaskId,
-        lane: ExecutionLane,
-        instance_hash: &CapHash,
+    fn build_root_frame(
+        root: &ObjHash,
         endpoint_idx: u32,
         args: [u64; 4],
-        initial_gas: i64,
-    ) -> Result<Self, u32> {
-        let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
-        let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
-        // Monotonic Instance identity. The top-level invocation is instance 0;
-        // every CALL mints the next id.
-        let mut next_iid: u64 = 0;
-        stack.push(StackEntry::instance(top, 0, next_iid));
-        next_iid += 1;
-
-        // The TOP frame's primary usable meter, if declared, is the task's root
-        // scope. A top with no gas slot is host-budgeted.
-        stack[0].gas =
-            resolve_frame_gas(frame_at(&stack, 0))?.unwrap_or_else(FrameGas::host_budgeted);
-        let gas_state = TaskGasState::new(&stack[0].gas, initial_gas);
-        Ok(Self {
-            id,
-            lane,
-            stack,
-            next_iid,
-            gas_state,
-        })
+    ) -> Result<(KernelFrame, JavmEntryMeta), u32> {
+        let frame = build_frame_from_published(root, endpoint_idx, args)?;
+        // The TOP frame's primary usable meter, if declared, is the task's
+        // root scope. A top with no gas slot is host-budgeted.
+        // (`resolve_frame_gas` reads only the frame, so resolving pre-push is
+        // identical to the old post-push stamp — same results, same errors.)
+        let gas = resolve_frame_gas(&frame)?.unwrap_or_else(FrameGas::host_budgeted);
+        Ok((
+            frame,
+            JavmEntryMeta {
+                owner: None,
+                owner_catch_set: Vec::new(),
+                gas,
+            },
+        ))
     }
 
-    fn outcome(
-        &self,
-        exit_reason: u32,
-        exit_arg: u32,
-        return_value: u64,
-        scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
-    ) -> LoopOutcome {
-        LoopOutcome {
-            exit_reason,
-            exit_arg,
-            return_value,
-            gas_remaining: self.gas_state.root_remaining(),
-            scratchpad_head,
-        }
+    fn active_meter(stack: &[Entry], idx: usize) -> Option<Key> {
+        active_meter(stack, idx)
     }
 
-    fn poll_once(&mut self) -> Result<TaskPoll, u32> {
-        let top_idx = self.stack.len() - 1;
-        // Reconcile the active meter for the (possibly new) top frame.
-        self.gas_state.reconcile_for(&self.stack, top_idx);
-
-        // Phase 1: run one ring-3 entry on the top entry's frame (an
-        // InstanceEntry runs its own frame; a ReferenceEntry runs its referent's
-        // — the same Instance, sharing one PC/regs/mem).
-        let info = {
-            let frame = frame_at_mut(&mut self.stack, top_idx);
-            run_one_entry(self.lane, frame, self.gas_state.live_gas)?
+    fn on_halt(ctx: &mut TaskCtx<'_, Javm>, info: &ExitInfo) -> Result<Flow, u32> {
+        let top_idx = ctx.top_idx();
+        // Read the scratchpad head from the InstanceEntry that will
+        // drain before it is popped — meaningful only at top-level HALT.
+        let head = if ctx.stack[top_idx].target == 0 {
+            read_scratchpad_head(frame_at(ctx.stack, top_idx))
+        } else {
+            [0u8; SCRATCHPAD_HEAD_LEN]
         };
-        self.gas_state.live_gas = info.gas_remaining;
-
-        // Mirror the JIT's post-exit state back into the running frame.
-        {
-            let frame = frame_at_mut(&mut self.stack, top_idx);
-            frame.instance.regs = info.regs;
-            frame.instance.pc = info.pc as u64;
+        // A handler activation (ReferenceEntry) that HALTs without
+        // resuming/dropping its yielder triggers the sub-tree-atomic
+        // unwind; an ordinary InstanceEntry pops and reflects.
+        let drained = if ctx.stack[top_idx].target != top_idx {
+            unwind_to_handler(ctx.stack, top_idx, info.regs[7])?
+        } else {
+            pop_and_reflect(ctx.stack, info.regs[7])?
+        };
+        if drained {
+            return Ok(ctx.done(info.exit_reason, info.exit_arg, info.regs[7], head));
         }
+        Ok(Flow::Resume)
+    }
 
-        // Phase 2: classify the exit. Borrow scopes are kept tight so we can
-        // mutate `stack` (push/pop) inside each arm.
-        match info.exit_reason {
-            EXIT_HALT => {
-                // Read the scratchpad head from the InstanceEntry that will
-                // drain before it is popped — meaningful only at top-level HALT.
-                let head = if self.stack[top_idx].target == 0 {
-                    read_scratchpad_head(frame_at(&self.stack, top_idx))
+    fn on_ecall(ctx: &mut TaskCtx<'_, Javm>, op: u32, info: &ExitInfo) -> Result<Flow, u32> {
+        let top_idx = ctx.top_idx();
+        // ecall block: charge its dynamic cost (check-before-charge)
+        // BEFORE doing the work. The cost is the ecall floor PLUS, for an
+        // in-kernel CALL (OP_HOST_CALL), the callee's call_frame_cost —
+        // and these are charged ATOMICALLY as one `actual` (gas-cost.md
+        // §3): a single gate, so an OOG leaves gas UNCHANGED and the
+        // re-attempt from the ecall's OWN pc (info.pc is the next
+        // instruction; custom-0 is 4 bytes) is clean. Splitting the gate
+        // would double-charge the floor across an OOG+resume.
+        let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
+        let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
+        // The CALL frame-materialization cost (JIT compile + eager RO
+        // page-in + setup base), computed statically from the callee
+        // Image and billed to the caller; resolved BEFORE charging so it
+        // joins the floor in one atomic gate. Depth-limit is a hard Err,
+        // not an OOG.
+        let mut host_call_pending = false;
+        let frame_cost = if op == OP_HOST_CALL {
+            if ctx.stack.len() >= MAX_DEPTH {
+                return Err(ERR_DEPTH_LIMIT);
+            }
+            let parent = frame_at(ctx.stack, top_idx);
+            match host_call_frame_cost(parent)? {
+                Some(cost) => cost,
+                None => {
+                    host_call_pending = true;
+                    0
+                }
+            }
+        } else {
+            0
+        };
+        let total_cost = ecall_cost + frame_cost;
+        if ctx.gas.live_gas < total_cost {
+            // A metered frame re-attempts THIS ecall after a kernel:oog
+            // topup; unmetered / uncaught -> bubble EXIT_OOG.
+            if try_oog_yield(ctx.stack, top_idx, info.pc.saturating_sub(4)) {
+                return Ok(Flow::Resume);
+            }
+            return Ok(ctx.done(EXIT_OOG, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+        }
+        ctx.gas.live_gas -= total_cost;
+
+        match op {
+            OP_REPLY => {
+                // Read the scratchpad head from the InstanceEntry that
+                // will drain before the pop (see on_halt).
+                let head = if ctx.stack[top_idx].target == 0 {
+                    read_scratchpad_head(frame_at(ctx.stack, top_idx))
                 } else {
                     [0u8; SCRATCHPAD_HEAD_LEN]
                 };
-                // A handler activation (ReferenceEntry) that HALTs without
-                // resuming/dropping its yielder triggers the sub-tree-atomic
+                // A handler REPLYing without resuming/dropping -> sub-tree
                 // unwind; an ordinary InstanceEntry pops and reflects.
-                let drained = if self.stack[top_idx].target != top_idx {
-                    unwind_to_handler(&mut self.stack, top_idx, info.regs[7])?
+                let drained = if ctx.stack[top_idx].target != top_idx {
+                    unwind_to_handler(ctx.stack, top_idx, info.regs[7])?
                 } else {
-                    pop_and_reflect(&mut self.stack, info.regs[7])?
+                    pop_and_reflect(ctx.stack, info.regs[7])?
                 };
                 if drained {
-                    return Ok(TaskPoll::Done(self.outcome(
-                        info.exit_reason,
-                        info.exit_arg,
-                        info.regs[7],
-                        head,
-                    )));
+                    // Preserve the JIT exit shape so the host bench
+                    // harness (which asserts `(reason=4, arg=0)` for the
+                    // subsoil trampoline halt) doesn't trip.
+                    return Ok(ctx.done(info.exit_reason, info.exit_arg, info.regs[7], head));
+                }
+                // Stack still has frames; the parent picks up at the next
+                // poll with the child's phi[7] reflected.
+            }
+            OP_DERIVE_SPAWN => {
+                let trapped = {
+                    let frame = frame_at_mut(ctx.stack, top_idx);
+                    dispatch_derive_spawn(frame)?
+                };
+                if trapped {
+                    // Pinned dst -> guest trap, mirroring the interpreter.
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
                 }
             }
-            EXIT_HOST_CALL | EXIT_ECALL => {
-                // ecall block: charge its dynamic cost (check-before-charge)
-                // BEFORE doing the work. The cost is the ecall floor PLUS, for an
-                // in-kernel CALL (OP_HOST_CALL), the callee's call_frame_cost —
-                // and these are charged ATOMICALLY as one `actual` (gas-cost.md
-                // §3): a single gate, so an OOG leaves gas UNCHANGED and the
-                // re-attempt from the ecall's OWN pc (info.pc is the next
-                // instruction; custom-0 is 4 bytes) is clean. Splitting the gate
-                // would double-charge the floor across an OOG+resume.
-                let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
-                let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
-                let op = if info.exit_reason == EXIT_HOST_CALL {
-                    info.exit_arg
-                } else {
-                    info.regs[11] as u32
+            OP_IMAGE_HASH_CHAIN => {
+                let trapped = {
+                    let frame = frame_at_mut(ctx.stack, top_idx);
+                    dispatch_image_hash_chain(frame)?
                 };
-                // The CALL frame-materialization cost (JIT compile + eager RO
-                // page-in + setup base), computed statically from the callee
-                // Image and billed to the caller; resolved BEFORE charging so it
-                // joins the floor in one atomic gate. Depth-limit is a hard Err,
-                // not an OOG.
-                let mut host_call_pending = false;
-                let frame_cost = if op == OP_HOST_CALL {
-                    if self.stack.len() >= MAX_DEPTH {
-                        return Err(ERR_DEPTH_LIMIT);
-                    }
-                    let parent = frame_at(&self.stack, top_idx);
-                    match host_call_frame_cost(parent)? {
-                        Some(cost) => cost,
-                        None => {
-                            host_call_pending = true;
-                            0
-                        }
-                    }
-                } else {
-                    0
-                };
-                let total_cost = ecall_cost + frame_cost;
-                if self.gas_state.live_gas < total_cost {
-                    // A metered frame re-attempts THIS ecall after a kernel:oog
-                    // topup; unmetered / uncaught -> bubble EXIT_OOG.
-                    if try_oog_yield(&mut self.stack, top_idx, info.pc.saturating_sub(4)) {
-                        return Ok(TaskPoll::Pending);
-                    }
-                    return Ok(TaskPoll::Done(self.outcome(
-                        EXIT_OOG,
-                        0,
-                        info.regs[7],
-                        [0u8; SCRATCHPAD_HEAD_LEN],
-                    )));
+                if trapped {
+                    // Pinned/empty dst or wrong src kind -> guest trap.
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
                 }
-                self.gas_state.live_gas -= total_cost;
-
-                match op {
-                    OP_REPLY => {
-                        // Read the scratchpad head from the InstanceEntry that
-                        // will drain before the pop (see EXIT_HALT).
-                        let head = if self.stack[top_idx].target == 0 {
-                            read_scratchpad_head(frame_at(&self.stack, top_idx))
-                        } else {
-                            [0u8; SCRATCHPAD_HEAD_LEN]
-                        };
-                        // A handler REPLYing without resuming/dropping -> sub-tree
-                        // unwind; an ordinary InstanceEntry pops and reflects.
-                        let drained = if self.stack[top_idx].target != top_idx {
-                            unwind_to_handler(&mut self.stack, top_idx, info.regs[7])?
-                        } else {
-                            pop_and_reflect(&mut self.stack, info.regs[7])?
-                        };
-                        if drained {
-                            // Preserve the JIT exit shape so the host bench
-                            // harness (which asserts `(reason=4, arg=0)` for the
-                            // subsoil trampoline halt) doesn't trip.
-                            return Ok(TaskPoll::Done(self.outcome(
-                                info.exit_reason,
-                                info.exit_arg,
-                                info.regs[7],
-                                head,
-                            )));
-                        }
-                        // Stack still has frames; the parent picks up at the next
-                        // poll with the child's phi[7] reflected.
+            }
+            OP_HOST_YIELD => {
+                let outcome = {
+                    let frame = frame_at_mut(ctx.stack, top_idx);
+                    dispatch_host_yield(
+                        frame,
+                        &mut ctx.gas.meters,
+                        &mut ctx.gas.live_gas,
+                        &ctx.gas.current_active,
+                    )?
+                };
+                match outcome {
+                    // A kernel-root pure-cap syscall handled inline; the
+                    // guest resumes at the next instruction (the
+                    // "conceptually push a kernel frame but don't" path).
+                    YieldOutcome::Inline => {}
+                    // Bad/empty sender slot or pinned dst -> guest trap.
+                    YieldOutcome::Trap => {
+                        return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
                     }
-                    OP_DERIVE_SPAWN => {
-                        let trapped = {
-                            let frame = frame_at_mut(&mut self.stack, top_idx);
-                            dispatch_derive_spawn(frame)?
-                        };
-                        if trapped {
-                            // Pinned dst -> guest trap, mirroring the interpreter.
-                            return Ok(TaskPoll::Done(self.outcome(
+                    // Route `key` to an owner YieldReceiver (the payload
+                    // is a copy of the emitted YieldSender). No catcher
+                    // -> the emitter faults ("unhandled yield_key").
+                    YieldOutcome::Route { key, sender_slot } => {
+                        let payload = read_instance_cap(frame_at(ctx.stack, top_idx), &sender_slot);
+                        if !route_yield(ctx.stack, top_idx, &key, payload) {
+                            return Ok(ctx.done(
                                 EXIT_TRAP,
-                                0,
+                                ERR_YIELD_UNHANDLED,
                                 info.regs[7],
                                 [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
+                            ));
                         }
-                    }
-                    OP_IMAGE_HASH_CHAIN => {
-                        let trapped = {
-                            let frame = frame_at_mut(&mut self.stack, top_idx);
-                            dispatch_image_hash_chain(frame)?
-                        };
-                        if trapped {
-                            // Pinned/empty dst or wrong src kind -> guest trap.
-                            return Ok(TaskPoll::Done(self.outcome(
-                                EXIT_TRAP,
-                                0,
-                                info.regs[7],
-                                [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
-                        }
-                    }
-                    OP_HOST_YIELD => {
-                        let outcome = {
-                            let frame = frame_at_mut(&mut self.stack, top_idx);
-                            dispatch_host_yield(
-                                frame,
-                                &mut self.gas_state.meters,
-                                &mut self.gas_state.live_gas,
-                                &self.gas_state.current_active,
-                            )?
-                        };
-                        match outcome {
-                            // A kernel-root pure-cap syscall handled inline; the
-                            // guest resumes at the next instruction (the
-                            // "conceptually push a kernel frame but don't" path).
-                            YieldOutcome::Inline => {}
-                            // Bad/empty sender slot or pinned dst -> guest trap.
-                            YieldOutcome::Trap => {
-                                return Ok(TaskPoll::Done(self.outcome(
-                                    EXIT_TRAP,
-                                    0,
-                                    info.regs[7],
-                                    [0u8; SCRATCHPAD_HEAD_LEN],
-                                )));
-                            }
-                            // Route `key` to an owner YieldReceiver (the payload
-                            // is a copy of the emitted YieldSender). No catcher
-                            // -> the emitter faults ("unhandled yield_key").
-                            YieldOutcome::Route { key, sender_slot } => {
-                                let payload =
-                                    read_instance_cap(frame_at(&self.stack, top_idx), &sender_slot);
-                                if !route_yield(&mut self.stack, top_idx, &key, payload) {
-                                    return Ok(TaskPoll::Done(self.outcome(
-                                        EXIT_TRAP,
-                                        ERR_YIELD_UNHANDLED,
-                                        info.regs[7],
-                                        [0u8; SCRATCHPAD_HEAD_LEN],
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    OP_CALL_RESUME => {
-                        // Resume the Waiting yielder directly below this handler
-                        // activation. The top MUST be a ReferenceEntry (we are
-                        // running as a yield handler); an InstanceEntry top has no
-                        // outstanding yield to resume -> trap.
-                        if self.stack[top_idx].target == top_idx {
-                            return Ok(TaskPoll::Done(self.outcome(
-                                EXIT_TRAP,
-                                0,
-                                info.regs[7],
-                                [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
-                        }
-                        // Reflect the handler's scratchpad slot[0] (its response)
-                        // to the yielder, pop the ReferenceEntry, and let the
-                        // yielder become the running top (it continues at its
-                        // post-yield PC next poll).
-                        let response = {
-                            let handler = frame_at_mut(&mut self.stack, top_idx);
-                            frame_cnode_take_key(handler, &[javm_cap::abi::SCRATCHPAD_SLOT])
-                        };
-                        self.stack.pop();
-                        let yielder_idx = self.stack.len() - 1;
-                        let yielder = frame_at_mut(&mut self.stack, yielder_idx);
-                        if let Some(cap) = response {
-                            frame_cnode_set_key(
-                                yielder,
-                                &[javm_cap::abi::SCRATCHPAD_SLOT],
-                                Some(cap),
-                            );
-                        }
-                        // Spec section 4: a resumed yielder sees phi[8] = Ok.
-                        yielder.instance.regs[8] = STATUS_OK;
-                    }
-                    OP_DROP_RESUME => {
-                        // Give up on the Waiting yielder: discard the WHOLE caught
-                        // subtree, but keep the handler running.
-                        if self.stack[top_idx].target == top_idx {
-                            return Ok(TaskPoll::Done(self.outcome(
-                                EXIT_TRAP,
-                                0,
-                                info.regs[7],
-                                [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
-                        }
-                        let handler_inst = self.stack[top_idx].target;
-                        release_pending_origins_for_dropped(&mut self.stack, handler_inst + 1);
-                        self.stack.truncate(handler_inst + 1);
-                    }
-                    OP_HOST_CALL => {
-                        if host_call_pending {
-                            return Ok(TaskPoll::Done(self.outcome(
-                                EXIT_TRAP,
-                                0,
-                                info.regs[7],
-                                [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
-                        }
-                        // Snapshot the logical owner's catch-set at this CALL:
-                        // the keys on the owner edge `owner -> child`. When A is
-                        // running via `ref[A]`, the physical caller is the
-                        // ReferenceEntry but the logical owner is A itself.
-                        let logical_owner = self.stack[top_idx].target;
-                        let catch_result = {
-                            let parent = frame_at(&self.stack, top_idx);
-                            snapshot_catch_set(parent)
-                        };
-                        let catch_set = match catch_result {
-                            Ok(set) => set,
-                            Err(EXIT_TRAP) => {
-                                return Ok(TaskPoll::Done(self.outcome(
-                                    EXIT_TRAP,
-                                    0,
-                                    info.regs[7],
-                                    [0u8; SCRATCHPAD_HEAD_LEN],
-                                )));
-                            }
-                            Err(e) => return Err(e),
-                        };
-                        let child_result = {
-                            let parent = frame_at_mut(&mut self.stack, top_idx);
-                            dispatch_host_call(parent, logical_owner)?
-                        };
-                        let Some(mut child) = child_result else {
-                            return Ok(TaskPoll::Done(self.outcome(
-                                EXIT_TRAP,
-                                0,
-                                info.regs[7],
-                                [0u8; SCRATCHPAD_HEAD_LEN],
-                            )));
-                        };
-                        // Scratchpad: MOVE the caller's slot[0] into the callee.
-                        {
-                            let parent = frame_at_mut(&mut self.stack, top_idx);
-                            if let Some(cap) =
-                                frame_cnode_take_key(parent, &[javm_cap::abi::SCRATCHPAD_SLOT])
-                            {
-                                frame_cnode_set_key(
-                                    &mut child,
-                                    &[javm_cap::abi::SCRATCHPAD_SLOT],
-                                    Some(cap),
-                                );
-                            }
-                        }
-                        let child_idx = self.stack.len();
-                        self.stack
-                            .push(StackEntry::instance(child, child_idx, self.next_iid));
-                        self.next_iid += 1;
-                        // Stamp owner-edge routing and funding. The child owns
-                        // its declared gas scope if it has one; otherwise it
-                        // loans the caller/catcher's current gas scope.
-                        self.stack[child_idx].owner = Some(logical_owner);
-                        self.stack[child_idx].owner_catch_set = catch_set;
-                        let inherited_gas = self.stack[top_idx].gas.clone();
-                        self.stack[child_idx].gas =
-                            resolve_frame_gas(frame_at(&self.stack, child_idx))?
-                                .unwrap_or(inherited_gas);
-                    }
-                    // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD, arbitrary
-                    // `ecalli imm`, ...) is not in-kernel-handled in V1: bubble it
-                    // up to the host with the JIT's reported exit reason/arg.
-                    _ => {
-                        return Ok(TaskPoll::Done(self.outcome(
-                            info.exit_reason,
-                            info.exit_arg,
-                            info.regs[7],
-                            [0u8; SCRATCHPAD_HEAD_LEN],
-                        )));
                     }
                 }
             }
-            _ => {
-                // PageFault (3), Panic (1), OOG (2), Trap (7), ...
-                // An in-block OOG on a metered frame re-attempts the SAME block
-                // after a kernel:oog topup. Unmetered / uncaught OOG, and every
-                // other exit, bubble verbatim.
-                if info.exit_reason == EXIT_OOG && try_oog_yield(&mut self.stack, top_idx, info.pc)
+            OP_CALL_RESUME => {
+                // Resume the Waiting yielder directly below this handler
+                // activation. The top MUST be a ReferenceEntry (we are
+                // running as a yield handler); an InstanceEntry top has no
+                // outstanding yield to resume -> trap.
+                if ctx.stack[top_idx].target == top_idx {
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                }
+                // Reflect the handler's scratchpad slot[0] (its response)
+                // to the yielder, pop the ReferenceEntry, and let the
+                // yielder become the running top (it continues at its
+                // post-yield PC next poll).
+                let response = {
+                    let handler = frame_at_mut(ctx.stack, top_idx);
+                    frame_cnode_take_key(handler, &[javm_cap::abi::SCRATCHPAD_SLOT])
+                };
+                ctx.stack.pop();
+                let yielder_idx = ctx.stack.len() - 1;
+                let yielder = frame_at_mut(ctx.stack, yielder_idx);
+                if let Some(cap) = response {
+                    frame_cnode_set_key(yielder, &[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                }
+                // Spec section 4: a resumed yielder sees phi[8] = Ok.
+                yielder.instance.regs[8] = STATUS_OK;
+            }
+            OP_DROP_RESUME => {
+                // Give up on the Waiting yielder: discard the WHOLE caught
+                // subtree, but keep the handler running.
+                if ctx.stack[top_idx].target == top_idx {
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                }
+                let handler_inst = ctx.stack[top_idx].target;
+                release_pending_origins_for_dropped(ctx.stack, handler_inst + 1);
+                ctx.stack.truncate(handler_inst + 1);
+            }
+            OP_HOST_CALL => {
+                if host_call_pending {
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                }
+                // Snapshot the logical owner's catch-set at this CALL:
+                // the keys on the owner edge `owner -> child`. When A is
+                // running via `ref[A]`, the physical caller is the
+                // ReferenceEntry but the logical owner is A itself.
+                let logical_owner = ctx.stack[top_idx].target;
+                let catch_result = {
+                    let parent = frame_at(ctx.stack, top_idx);
+                    snapshot_catch_set(parent)
+                };
+                let catch_set = match catch_result {
+                    Ok(set) => set,
+                    Err(EXIT_TRAP) => {
+                        return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                    }
+                    Err(e) => return Err(e),
+                };
+                let child_result = {
+                    let parent = frame_at_mut(ctx.stack, top_idx);
+                    dispatch_host_call(parent, logical_owner)?
+                };
+                let Some(mut child) = child_result else {
+                    return Ok(ctx.done(EXIT_TRAP, 0, info.regs[7], [0u8; SCRATCHPAD_HEAD_LEN]));
+                };
+                // Scratchpad: MOVE the caller's slot[0] into the callee.
                 {
-                    return Ok(TaskPoll::Pending);
+                    let parent = frame_at_mut(ctx.stack, top_idx);
+                    if let Some(cap) =
+                        frame_cnode_take_key(parent, &[javm_cap::abi::SCRATCHPAD_SLOT])
+                    {
+                        frame_cnode_set_key(
+                            &mut child,
+                            &[javm_cap::abi::SCRATCHPAD_SLOT],
+                            Some(cap),
+                        );
+                    }
                 }
-                return Ok(TaskPoll::Done(self.outcome(
+                let child_idx = ctx.stack.len();
+                ctx.stack
+                    .push(StackEntry::instance(child, child_idx, *ctx.next_iid));
+                *ctx.next_iid += 1;
+                // Stamp owner-edge routing and funding. The child owns
+                // its declared gas scope if it has one; otherwise it
+                // loans the caller/catcher's current gas scope.
+                ctx.stack[child_idx].meta.owner = Some(logical_owner);
+                ctx.stack[child_idx].meta.owner_catch_set = catch_set;
+                let inherited_gas = ctx.stack[top_idx].meta.gas.clone();
+                ctx.stack[child_idx].meta.gas =
+                    resolve_frame_gas(frame_at(ctx.stack, child_idx))?.unwrap_or(inherited_gas);
+            }
+            // Anything else (MGMT ops, SET_IMAGE, arbitrary `ecalli imm`,
+            // ...) is not in-kernel-handled in V1: bubble it up to the host
+            // with the JIT's reported exit reason/arg.
+            _ => {
+                return Ok(ctx.done(
                     info.exit_reason,
                     info.exit_arg,
                     info.regs[7],
                     [0u8; SCRATCHPAD_HEAD_LEN],
-                )));
+                ));
             }
         }
 
-        Ok(TaskPoll::Pending)
+        Ok(Flow::Resume)
     }
 
-    fn run_to_completion(&mut self) -> Result<LoopOutcome, u32> {
-        loop {
-            match self.poll_once()? {
-                TaskPoll::Pending => {}
-                TaskPoll::Done(outcome) => return Ok(outcome),
-            }
+    fn on_exit(ctx: &mut TaskCtx<'_, Javm>, info: &ExitInfo) -> Result<Flow, u32> {
+        let top_idx = ctx.top_idx();
+        // PageFault (3), Panic (1), OOG (2), Trap (7), ...
+        // An in-block OOG on a metered frame re-attempts the SAME block
+        // after a kernel:oog topup. Unmetered / uncaught OOG, and every
+        // other exit, bubble verbatim.
+        if info.exit_reason == EXIT_OOG && try_oog_yield(ctx.stack, top_idx, info.pc) {
+            return Ok(Flow::Resume);
         }
+        Ok(ctx.done(
+            info.exit_reason,
+            info.exit_arg,
+            info.regs[7],
+            [0u8; SCRATCHPAD_HEAD_LEN],
+        ))
     }
 }
 
-/// Cooperative per-lane scheduler: many task stacks can be resident for one
-/// execution lane, but exactly one task is active on that lane at any instant.
-/// Switching only happens at existing ring-3 exits. Multi-vCPU Hyperlight runs
-/// one worker per lane; each worker submits into its lane's persistent scheduler.
-/// Cross-lane task migration and work stealing remain future scheduler work.
-struct KernelScheduler {
-    lane: ExecutionLane,
-    next_task_id: TaskId,
-    tasks: BTreeMap<TaskId, KernelTask>,
-    completed: BTreeMap<TaskId, LoopOutcome>,
-    ready: VecDeque<TaskId>,
-}
-
-impl KernelScheduler {
-    fn new(lane: ExecutionLane) -> Self {
-        Self {
-            lane,
-            next_task_id: 0,
-            tasks: BTreeMap::new(),
-            completed: BTreeMap::new(),
-            ready: VecDeque::new(),
-        }
-    }
-
-    fn submit_invoke(
-        &mut self,
-        instance_hash: &CapHash,
-        endpoint_idx: u32,
-        args: [u64; 4],
-        initial_gas: i64,
-    ) -> Result<TaskId, u32> {
-        let id = self.next_task_id;
-        self.next_task_id += 1;
-        let task = KernelTask::new(
-            id,
-            self.lane,
-            instance_hash,
-            endpoint_idx,
-            args,
-            initial_gas,
-        )?;
-        self.tasks.insert(id, task);
-        self.ready.push_back(id);
-        Ok(id)
-    }
-
-    fn run_until_result(&mut self, target: TaskId) -> Result<LoopOutcome, u32> {
-        if let Some(outcome) = self.completed.remove(&target) {
-            return Ok(outcome);
-        }
-        while let Some(id) = self.ready.pop_front() {
-            let mut task = self.tasks.remove(&id).ok_or(ERR_PENDING_ORIGIN_INVARIANT)?;
-            debug_assert_eq!(task.id, id);
-            match task.poll_once()? {
-                TaskPoll::Pending => {
-                    self.tasks.insert(id, task);
-                    self.ready.push_back(id);
-                }
-                TaskPoll::Done(outcome) if id == target => return Ok(outcome),
-                TaskPoll::Done(outcome) => {
-                    self.completed.insert(id, outcome);
-                }
-            }
-            if let Some(outcome) = self.completed.remove(&target) {
-                return Ok(outcome);
-            }
-        }
-        Err(ERR_PENDING_ORIGIN_INVARIANT)
-    }
-}
-
-struct LaneSchedulerCell {
-    scheduler: spin::Mutex<Option<KernelScheduler>>,
-}
-
-impl LaneSchedulerCell {
-    const fn new() -> Self {
-        Self {
-            scheduler: spin::Mutex::new(None),
-        }
-    }
-}
-
-// SAFETY: a `KernelScheduler` may contain live `FrameRuntime`s, which are
-// lane-affine raw page-table/JIT pointers and deliberately not `Send`. The static
-// table is indexed by lane, and the host owns each lane with exactly one KVM
-// worker thread; the spin lock guards accidental same-lane re-entry. We mark the
-// cell `Sync` without making the scheduler or runtime generally sendable.
-unsafe impl Sync for LaneSchedulerCell {}
-
-static LANE_SCHEDULERS: [LaneSchedulerCell; MAX_EXECUTION_LANES] =
+/// Guest-global lane scheduler table, concretely instantiated for the
+/// [`Javm`] personality (one personality per binary — no type erasure
+/// needed; the hot invoke path bypasses the scheduler anyway).
+static LANE_SCHEDULERS: [LaneSchedulerCell<Javm>; MAX_EXECUTION_LANES] =
     [const { LaneSchedulerCell::new() }; MAX_EXECUTION_LANES];
 
 /// Guest-global lane scheduler table. The host owns each lane through one KVM
 /// worker, so the lock is a structural guard rather than a hot contention point.
-fn with_lane_scheduler<R>(lane: ExecutionLane, f: impl FnOnce(&mut KernelScheduler) -> R) -> R {
+fn with_lane_scheduler<R>(
+    lane: ExecutionLane,
+    f: impl FnOnce(&mut KernelScheduler<Javm>) -> R,
+) -> R {
     lane.assert_in_range();
     let mut guard = LANE_SCHEDULERS[lane.index()].scheduler.lock();
     let scheduler = guard.get_or_insert_with(|| KernelScheduler::new(lane));
     f(scheduler)
-}
-
-/// Drive the CALL/HALT loop until either the top frame HALTs (clean
-/// exit) or the JIT signals an unrecoverable condition (page fault,
-/// gas exhaustion, ...). See module docs for the loop body.
-///
-/// Cap lookups go through the heap-resident [`CACHE`] static. Each
-/// lookup takes the cache's spinlock; we keep lock scopes tight
-/// (clone out the fields we need, drop the guard) so other guest-mode
-/// lookups can proceed concurrently.
-pub fn run_top(
-    instance_hash: &CapHash,
-    endpoint_idx: u32,
-    args: [u64; 4],
-    initial_gas: i64,
-) -> Result<LoopOutcome, u32> {
-    run_top_on_lane(
-        ExecutionLane::PRIMARY,
-        instance_hash,
-        endpoint_idx,
-        args,
-        initial_gas,
-    )
-}
-
-pub fn run_top_on_lane(
-    lane: ExecutionLane,
-    instance_hash: &CapHash,
-    endpoint_idx: u32,
-    args: [u64; 4],
-    initial_gas: i64,
-) -> Result<LoopOutcome, u32> {
-    // The production ABI submits exactly one top-level invoke per worker/lane
-    // call. Drive that task directly so the hot CALL/HALT path does not pay the
-    // cooperative scheduler's map/queue churn on every ring-3 exit. The
-    // scheduler stays available for the test-only two-task probe below and for
-    // future batch/async guest entry points.
-    let mut task = KernelTask::new(0, lane, instance_hash, endpoint_idx, args, initial_gas)?;
-    task.run_to_completion()
 }
 
 #[doc(hidden)]
@@ -1363,147 +1063,6 @@ pub fn run_two_for_test(
     })
 }
 
-/// Run exactly one ring-3 cycle for `frame`. The first call on a
-/// frame builds [`FrameRuntime`] (the page table); subsequent calls
-/// (parent resumes after a child HALT) reuse it — the runtime is never
-/// evicted, so it is built exactly once per frame. Frame mem + `mat_state`
-/// persist across re-entries — the parent's writes and gas history survive
-/// the child's execution.
-fn run_one_entry(lane: ExecutionLane, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
-    if frame.runtime.is_none() {
-        let rt = build_runtime(lane, frame)?;
-        frame.runtime = Some(rt);
-    }
-    let pc = frame.instance.pc as u32;
-    let regs = frame.instance.regs;
-    // Split borrow of disjoint fields: while the JIT runs against
-    // `frame.runtime`'s PT, the #PF handler CoWs guest writes into `frame.instance.mem`'s
-    // overlay and advances `frame.mat_state` / `frame.ro_units` in place. The
-    // raw-pointer casts end those `&mut` borrows immediately, so the subsequent
-    // `frame.runtime` borrow does not conflict.
-    let overlay_sink: *mut JavmMem = JavmMem::from_mut(&mut frame.instance.mem);
-    let mat_state_ptr = frame.mat_state.as_mut_ptr();
-    let mat_state_len = frame.mat_state.len() as u64;
-    let ro_units: *mut Vec<u32> = &mut frame.ro_units;
-    let rt = frame.runtime.as_mut().expect("just built");
-    let info = unsafe {
-        jit_run::enter_frame::<JavmMem>(
-            lane,
-            rt,
-            gas,
-            pc,
-            regs,
-            overlay_sink,
-            mat_state_ptr,
-            mat_state_len,
-            ro_units,
-        )
-    };
-    Ok(info)
-}
-
-/// Build the per-frame ring-3 runtime. Every pinned + initial slot
-/// mapping projects directly into the per-call PT; initial slots are
-/// armed for CoW via `frame.cow_ranges` and flipped writable by the
-/// #PF handler on first write. Instance `rw_overlays` (per-instance
-/// state, not page-aligned) still memcpy into the mem_buf.
-///
-/// Looks the image and any cap-backed slices up under one
-/// `DIRECTORY` lock scope. The PAs installed in the PT stay valid
-/// for the frame's lifetime per the V1 invariant (no eviction mid-
-/// RPC) even after this function returns and the guard is dropped.
-fn build_runtime(lane: ExecutionLane, frame: &KernelFrame) -> Result<FrameRuntime, u32> {
-    // CacheDirectory is interior-mutable; each `get` takes the inner
-    // spin::Mutex briefly and returns an `Arc<CachedCap>`. We keep the Arc
-    // locals alive for the duration of the function so any borrowed
-    // slices (used to compute PAs for direct PT mapping) stay valid.
-    // Blobs are never evicted in V0, so the PAs remain valid for the
-    // frame's lifetime past return.
-    let img_arc = CACHE
-        .get(CapHashOrRef::Hash(frame.instance.image_hash))
-        .ok_or(ERR_IMAGE_NOT_FOUND)?;
-    let img = match &img_arc.cap {
-        Cap::Image(i) => i,
-        _ => return Err(ERR_IMAGE_KIND),
-    };
-
-    // Pinned mappings (RO, direct-map) become `PinnedCapRo` `MatRange`s pushed
-    // first, so they take precedence over the catch-all RW range in
-    // `mat_range_for`. Classification uses `ImageCap::mapping_is_pinned` —
-    // identical to the interpreter drivers (`javm`, `nub-arch-local`), so the
-    // engines agree on which VAs are read-only.
-    let mut mat_ranges: Vec<MatRange> = Vec::new();
-
-    // Executable code region: a `PinnedCapRo` lazily-materialized region at the
-    // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
-    // excluded from `mem_size` (the data extent).
-    let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
-    let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
-
-    // The frame's RW memory is its **owned** dense `DataCap` (`frame.instance.mem`)
-    // covering the whole data extent, holding both initial and pinned content
-    // at their VAs with page-aligned slabs. Source every data page from it
-    // (overlay-then-backing, so a rebuilt runtime picks up prior CoW writes):
-    // pinned VA ranges as `PinnedCapRo`, everything else (initial + ephemeral,
-    // the latter backed by `Empty` → zero page) as one catch-all
-    // `UnpinnedCapCow` range. The slabs are owned by the frame, so their PAs
-    // stay valid for the frame's life past this function's return.
-    let data_base = javm_cap::layout::DATA_BASE;
-    let mem = &frame.instance.mem;
-    let extent = mem.content_len() as u32;
-    let mem_size = data_base.saturating_add(extent);
-    let pages = (extent / paging::PAGE_SIZE as u32) as usize;
-
-    // Pinned mappings → PinnedCapRo ranges (pushed first → precedence). Bounds +
-    // kind only; the #PF handler resolves each page's source PA lazily from
-    // `frame.instance.mem` (`jit_run::mem_source_pa`).
-    for m in img.mappings.iter() {
-        if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
-            continue;
-        }
-        let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
-        if span == 0 {
-            continue;
-        }
-        mat_ranges.push(MatRange {
-            start: m.start as u32,
-            end: (m.start as u32).saturating_add(span),
-            kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
-        });
-    }
-
-    // Catch-all RW range over the whole extent (initial + ephemeral).
-    if pages > 0 {
-        mat_ranges.push(MatRange {
-            start: data_base,
-            end: mem_size,
-            kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
-        });
-    }
-
-    // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
-    // `javm_transpiler::linker::link_elf`). The JIT cache
-    // predecodes the bytes once and builds the dense dispatch table
-    // (block-start validation folded in).
-    //
-    // SAFETY: image and any cap-backed slices live in the heap-
-    // resident DIRECTORY/INSTANCES; PAs survive the guard drop per
-    // the no-eviction V1 invariant.
-    unsafe {
-        jit_run::build_frame_runtime(
-            lane,
-            &*img_arc,
-            code_bytes,
-            code_base,
-            code_pa,
-            javm_cap::layout::DATA_BASE,
-            mem_size,
-            mat_ranges,
-        )
-    }
-    .ok_or(ERR_JIT_FAILED)
-}
-
 /// Walk owner edges for a catcher of `key` and, if one is found, suspend the
 /// emitter and transfer control to the owner as a yield handler: reflect
 /// `payload` (a YieldSender / `Gas` cap copy) into the catcher's scratchpad
@@ -1516,15 +1075,15 @@ fn build_runtime(lane: ExecutionLane, frame: &KernelFrame) -> Result<FrameRuntim
 /// caller decides (fault the emitter for a user key, or bubble EXIT_OOG for
 /// kernel:oog).
 fn route_yield(
-    stack: &mut Vec<StackEntry>,
+    stack: &mut Vec<Entry>,
     top_idx: usize,
     key: &Key,
     payload: Option<InstanceCap>,
 ) -> bool {
     let mut node = stack[top_idx].target;
     let mut catcher = None;
-    while let Some(owner) = stack[node].owner {
-        if stack[node].owner_catch_set.binary_search(key).is_ok() {
+    while let Some(owner) = stack[node].meta.owner {
+        if stack[node].meta.owner_catch_set.binary_search(key).is_ok() {
             catcher = Some(owner);
             break;
         }
@@ -1537,7 +1096,7 @@ fn route_yield(
     let recv_iid = stack[owner].instance_id;
     // The handler runs the catcher's frame, so it is funded by the catcher's
     // gas scope (NOT the emitter's).
-    let recv_gas = stack[owner].gas.clone();
+    let recv_gas = stack[owner].meta.gas.clone();
     {
         let catcher_frame = frame_at_mut(stack, owner);
         if let Some(inst) = payload {
@@ -1553,9 +1112,11 @@ fn route_yield(
         kind: EntryKind::Reference,
         target,
         instance_id: recv_iid,
-        owner: stack[target].owner,
-        owner_catch_set: Vec::new(),
-        gas: recv_gas,
+        meta: JavmEntryMeta {
+            owner: stack[target].meta.owner,
+            owner_catch_set: Vec::new(),
+            gas: recv_gas,
+        },
     });
     true
 }
@@ -1563,8 +1124,8 @@ fn route_yield(
 /// The gas meter funding the frame run by the entry at `idx` — the precomputed
 /// active key from its gas scope (own declared meter list, or inherited from the
 /// caller/catcher at push). O(1), unambiguous under yields.
-fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
-    stack[idx].gas.active_key()
+fn active_meter(stack: &[Entry], idx: usize) -> Option<Key> {
+    stack[idx].meta.gas.active_key()
 }
 
 /// On gas exhaustion, first consult the frame's remaining declared gas slots by
@@ -1573,31 +1134,31 @@ fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
 /// yield. The OOG payload is the primary usable Gas handle so the receiver can
 /// top up that meter and `CALL_RESUME`; before routing, the frame resets to the
 /// primary so resume deterministically re-reads the top-up.
-fn try_oog_yield(stack: &mut Vec<StackEntry>, top_idx: usize, reattempt_pc: u32) -> bool {
+fn try_oog_yield(stack: &mut Vec<Entry>, top_idx: usize, reattempt_pc: u32) -> bool {
     if active_meter(stack, top_idx).is_none() {
         return false;
     }
     frame_at_mut(stack, top_idx).instance.pc = reattempt_pc as u64;
-    if stack[top_idx].gas.advance() {
+    if stack[top_idx].meta.gas.advance() {
         return true;
     }
-    let Some(meter) = stack[top_idx].gas.primary_key() else {
+    let Some(meter) = stack[top_idx].meta.gas.primary_key() else {
         return false;
     };
-    stack[top_idx].gas.reset_to_primary();
+    stack[top_idx].meta.gas.reset_to_primary();
     let oog_key = Key::from(&javm_cap::yield_cap::YK_OOG[..]);
     let payload = Some(javm_cap::gas_handle(&meter));
     route_yield(stack, top_idx, &oog_key, payload)
 }
 
-fn entry_origin(entry: &StackEntry) -> Option<FrameOrigin> {
+fn entry_origin(entry: &Entry) -> Option<FrameOrigin> {
     match &entry.kind {
         EntryKind::Instance(frame) => frame.origin.clone(),
         EntryKind::Reference => None,
     }
 }
 
-fn release_pending_origins_for_dropped(stack: &mut [StackEntry], start: usize) {
+fn release_pending_origins_for_dropped(stack: &mut [Entry], start: usize) {
     let origins: Vec<FrameOrigin> = stack[start..].iter().filter_map(entry_origin).collect();
     for origin in origins {
         if origin.owner < start {
@@ -1609,7 +1170,7 @@ fn release_pending_origins_for_dropped(stack: &mut [StackEntry], start: usize) {
 }
 
 fn restore_instance_to_origin(
-    stack: &mut [StackEntry],
+    stack: &mut [Entry],
     origin: FrameOrigin,
     cap: CachedCap,
 ) -> Result<(), u32> {
@@ -1634,7 +1195,7 @@ fn restore_instance_to_origin(
 /// InstanceEntry's HALT exactly as a normal pop. Returns `true` when the stack
 /// drains.
 fn unwind_to_handler(
-    stack: &mut Vec<StackEntry>,
+    stack: &mut Vec<Entry>,
     top_idx: usize,
     return_value: u64,
 ) -> Result<bool, u32> {
@@ -1657,7 +1218,7 @@ fn unwind_to_handler(
 /// result back to the host). Gas is NOT touched here — the loop-top
 /// [`reconcile_active`] banks the popped frame's meter and loads the parent's on
 /// the next iteration.
-fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<bool, u32> {
+fn pop_and_reflect(stack: &mut Vec<Entry>, return_value: u64) -> Result<bool, u32> {
     // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler
     // activation) is removed by CALL_RESUME, and a handler that HALTs without
     // resuming is caught by the EXIT_HALT/OP_REPLY guards before this point.

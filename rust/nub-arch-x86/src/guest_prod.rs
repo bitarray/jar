@@ -48,7 +48,7 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
 
     // Caps are resolved via the heap-resident `CACHE`
     // (`CacheDirectory<FixedState, CachedCap>`) — see `crate::state_cache`.
-    let outcome = crate::call_loop::run_top(
+    let outcome = crate::task::run_top::<crate::call_loop::Javm>(
         &packet.instance_hash,
         packet.endpoint_idx,
         packet.args,
@@ -86,7 +86,7 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn invocation_result_from_outcome(
-    outcome: Result<crate::call_loop::LoopOutcome, u32>,
+    outcome: Result<crate::task::LoopOutcome, u32>,
 ) -> InvocationResult {
     match outcome {
         Ok(o) => InvocationResult {
@@ -154,7 +154,7 @@ pub fn nub_invoke_worker(payload: &[u8]) -> Vec<u8> {
                     continue;
                 }
                 let packet = unsafe { core::ptr::addr_of!((*slot).packet).read_volatile() };
-                let outcome = crate::call_loop::run_top_on_lane(
+                let outcome = crate::task::run_top_on_lane::<crate::call_loop::Javm>(
                     lane,
                     &packet.instance_hash,
                     packet.endpoint_idx,

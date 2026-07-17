@@ -30,13 +30,18 @@
 //! section from the kernel ELF after sandbox startup to learn where
 //! to find the cap directory.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use foldhash::fast::FixedState;
 use javm_cap::cache::CacheDirectory;
+use javm_cap::cap::Cap;
 use nub_arch_x86_abi::BootInfo;
 
 use crate::cached_cap::{CachedCap, CapCache};
+use crate::personality::{GuestStore, ObjHash};
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
 /// direct-dereference reader (via `BootInfo.directory_va`) agrees on
@@ -70,6 +75,61 @@ pub fn evict_jit_all() {
         if matches!(&*cache, CapCache::Image(_)) {
             *cache = CapCache::None;
         }
+    }
+}
+
+/// The Javm personality's [`GuestStore`]: a stateless handle onto the
+/// process-global [`CACHE`] directory + [`BOOT_INFO`] block.
+pub struct JavmStore;
+
+pub static JAVM_STORE: JavmStore = JavmStore;
+
+impl GuestStore for JavmStore {
+    /// Validate the rkyv-archived [`Cap`] payload via [`rkyv::access`]
+    /// (zero-copy), materialise an owned `Cap` via [`rkyv::deserialize`],
+    /// and insert it into [`CACHE`]. Error codes 1/2/3 (access /
+    /// deserialize / put) are diagnostics only — the RPC wrapper maps any
+    /// `Err` to the all-`0xFF` sentinel hash.
+    fn put_object(&self, bytes: &[u8]) -> Result<ObjHash, u32> {
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+
+        let archived = rkyv::access::<rkyv::Archived<Cap>, rkyv::rancor::Error>(aligned.as_slice())
+            .map_err(|_| 1u32)?;
+        let cap: Cap =
+            rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).map_err(|_| 2u32)?;
+        CACHE.put_cap(&cap).map_err(|_| 3u32)
+    }
+
+    fn sweep(&self) {
+        CACHE.sweep_instances();
+    }
+
+    fn evict_jit(&self) {
+        evict_jit_all();
+    }
+
+    fn init_boot_info(&self) {
+        init_directory_va();
+    }
+
+    /// Read the current [`BOOT_INFO`] block out as raw bytes.
+    fn boot_info_bytes(&self) -> Vec<u8> {
+        // SAFETY: `BOOT_INFO` is `static mut`; callers read it after the
+        // `init_boot_info` hook ran, and we publish bytes out via a fresh
+        // copy. Reads of a freshly-patched `directory_va` field are safe in
+        // this single-threaded boot context.
+        let info: BootInfo = unsafe {
+            let p = &raw const BOOT_INFO;
+            core::ptr::read(p)
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &info as *const BootInfo as *const u8,
+                core::mem::size_of::<BootInfo>(),
+            )
+        };
+        bytes.to_vec()
     }
 }
 
