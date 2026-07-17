@@ -62,22 +62,6 @@ pub static CACHE: CacheDirectory<FixedState, CachedCap> = CacheDirectory::new_co
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
 );
 
-/// Drop every compiled-image artifact from [`CACHE`].
-///
-/// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
-/// and template PD/PT pages, which is fine between invocations (no
-/// in-flight call references them). The next compile-cache miss will
-/// pay full recompile cost. Safe under Hyperlight serialisation; not
-/// meant for production paths.
-pub fn evict_jit_all() {
-    for (_, cap) in CACHE.iter_blobs() {
-        let mut cache = cap.cache.lock();
-        if matches!(&*cache, CapCache::Image(_)) {
-            *cache = CapCache::None;
-        }
-    }
-}
-
 /// The Javm personality's [`GuestStore`]: a stateless handle onto the
 /// process-global [`CACHE`] directory + [`BOOT_INFO`] block.
 pub struct JavmStore;
@@ -105,8 +89,20 @@ impl GuestStore for JavmStore {
         CACHE.sweep_instances();
     }
 
+    /// Drop every compiled-image artifact from [`CACHE`].
+    ///
+    /// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
+    /// and template PD/PT pages, which is fine between invocations (no
+    /// in-flight call references them). The next compile-cache miss will
+    /// pay full recompile cost. Safe under Hyperlight serialisation; not
+    /// meant for production paths.
     fn evict_jit(&self) {
-        evict_jit_all();
+        for (_, cap) in CACHE.iter_blobs() {
+            let mut cache = cap.cache.lock();
+            if matches!(&*cache, CapCache::Image(_)) {
+                *cache = CapCache::None;
+            }
+        }
     }
 
     fn init_boot_info(&self) {
