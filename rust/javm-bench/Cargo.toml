@@ -21,7 +21,7 @@ ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 javm = { path = "../javm" }
 nub-arch-x86-abi = { path = "../../nub/nub-arch-x86-abi" }
-javm-recompiler-x86 = { path = "../javm-recompiler-x86" }
+nub-recompiler-x86 = { path = "../../nub/nub-recompiler-x86" }
 blake3 = "1"
 # `javm-bench` is a benchmark crate: criterion is a normal (not dev)
 # dependency so the shared criterion drivers can live in `src/lib.rs`.

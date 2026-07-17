@@ -16,7 +16,7 @@ fn main() {
 mod imp {
     use javm_cap::image::Image;
     use nub_exec::predecode::predecode;
-    use javm_recompiler_x86::codegen::{Compiler, HelperFns};
+    use nub_recompiler_x86::codegen::{Compiler, HelperFns};
     use ssz::Decode;
     use std::time::Instant;
 

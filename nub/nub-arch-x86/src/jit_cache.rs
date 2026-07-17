@@ -32,7 +32,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
+use nub_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
 use crate::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use crate::page_alloc::PageBuf;

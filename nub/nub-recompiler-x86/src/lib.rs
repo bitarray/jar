@@ -12,7 +12,7 @@
 //! - [`JitContext`] — `#[repr(C)]` execution context, written by the
 //!   driver before entry and read after exit. Layout is mirrored by
 //!   the codegen-side `CTX_*` offset constants in
-//!   `javm-recompiler-x86::codegen`.
+//!   `nub-recompiler-x86::codegen`.
 //! - [`asm`], [`codegen`] — codegen pipeline.
 
 extern crate alloc;

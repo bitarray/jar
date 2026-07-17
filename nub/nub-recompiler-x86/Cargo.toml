@@ -1,5 +1,5 @@
 [package]
-name = "javm-recompiler-x86"
+name = "nub-recompiler-x86"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ authors.workspace = true
 description = "JAVM x86_64 recompiler (JIT): no_std bytes-producer. Embedded by nub-arch-x86, which supplies its own per-invocation runtime substrate."
 
 [dependencies]
-nub-exec = { path = "../../nub/nub-exec", default-features = false }
+nub-exec = { path = "../nub-exec", default-features = false }
 memoffset = "0.9"
 
 [dev-dependencies]

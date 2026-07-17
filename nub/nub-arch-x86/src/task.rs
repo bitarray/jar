@@ -28,7 +28,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use javm_recompiler_x86::codegen::{EXIT_ECALL, EXIT_HALT, EXIT_HOST_CALL};
+use nub_recompiler_x86::codegen::{EXIT_ECALL, EXIT_HALT, EXIT_HOST_CALL};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::execution_lane::ExecutionLane;

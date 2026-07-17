@@ -13,7 +13,7 @@
 //! It asserts both agree **bit-for-bit** on the return value (`φ[7]` = x10)
 //! and gas — the consensus property. This is the only test that validates
 //! the *executed* result of the spilled emit (the compile-time structural
-//! coverage lives in `javm-recompiler-x86/tests/x3_x4_spill.rs`).
+//! coverage lives in `nub-recompiler-x86/tests/x3_x4_spill.rs`).
 //!
 //! `javm-bench` (and its `BuiltCaps` / `run_*` harness) is gated to
 //! linux/x86_64, so this whole test is too. The interpreter's x3/x4

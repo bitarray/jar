@@ -12,7 +12,7 @@
 //! covered by the interpreter tests in `nub-exec`; the fast path's
 //! byte-for-byte stability is covered by the 12-guest conformance suite.)
 
-use javm_recompiler_x86::codegen::{CTX_VA, Compiler, HelperFns};
+use nub_recompiler_x86::codegen::{CTX_VA, Compiler, HelperFns};
 
 /// Dummy helper addresses — this test only *compiles*, never executes, so
 /// the emitted `call` targets are never reached.

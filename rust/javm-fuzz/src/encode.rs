@@ -1,7 +1,7 @@
 //! RV64E-subset instruction encoders — the single source the generator and the
 //! decode round-trip test both drive off.
 //!
-//! The two existing x3/x4 test files (`javm-recompiler-x86/tests/x3_x4_spill.rs`
+//! The two existing x3/x4 test files (`nub-recompiler-x86/tests/x3_x4_spill.rs`
 //! and `javm-bench/tests/x3_x4_differential.rs`) each hand-rolled a handful of
 //! ad-hoc encoders. This centralizes them and extends to the full implemented
 //! ISA via the [`OPS`] spec table, validated against `nub_exec::decode` in the

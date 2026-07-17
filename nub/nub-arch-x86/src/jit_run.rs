@@ -59,8 +59,8 @@ use crate::personality::{FrameMem, PageSource};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
-use javm_recompiler_x86::JitContext;
-use javm_recompiler_x86::codegen::HelperFns;
+use nub_recompiler_x86::JitContext;
+use nub_recompiler_x86::codegen::HelperFns;
 
 // === Per-invocation context for the #PF handler ===========================
 //
@@ -925,7 +925,7 @@ pub struct ExitInfo {
 /// ```
 const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
-/// `javm_recompiler_x86::codegen::CTX_VA`.
+/// `nub_recompiler_x86::codegen::CTX_VA`.
 const CTX_VA_M: u64 = META_PML4_BASE;
 /// Base of the per-Image arena (DISPATCH | JIT | TRAMP).
 /// 1 GiB past CTX so the arena occupies its own PDPT slot, enabling

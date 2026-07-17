@@ -104,7 +104,7 @@ use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 // Exit-code authority is the recompiler ABI. EXIT_TRAP doubles as the guest
 // trap for a host-rejected op (e.g. a pinned-slot write), matching the
 // interpreter's `ExitReason::Trap`.
-use javm_recompiler_x86::codegen::{EXIT_HOST_CALL, EXIT_OOG, EXIT_TRAP};
+use nub_recompiler_x86::codegen::{EXIT_HOST_CALL, EXIT_OOG, EXIT_TRAP};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};

@@ -1148,9 +1148,9 @@ dependencies = [
  "criterion",
  "javm",
  "javm-cap",
- "javm-recompiler-x86",
  "nub-arch-x86-abi",
  "nub-exec",
+ "nub-recompiler-x86",
  "sha2",
  "ssz",
 ]
@@ -1201,22 +1201,13 @@ dependencies = [
  "foldhash 0.2.0",
  "hyperlight-guest-bin",
  "javm-cap",
- "javm-recompiler-x86",
  "nub-arch-x86",
  "nub-arch-x86-abi",
  "nub-exec",
  "nub-host-common",
+ "nub-recompiler-x86",
  "rkyv",
  "spin",
-]
-
-[[package]]
-name = "javm-recompiler-x86"
-version = "0.1.0"
-dependencies = [
- "memoffset",
- "nub-exec",
- "proptest",
 ]
 
 [[package]]
@@ -1457,10 +1448,10 @@ version = "0.1.0"
 dependencies = [
  "hyperlight-guest",
  "hyperlight-guest-bin",
- "javm-recompiler-x86",
  "nub-arch-x86-abi",
  "nub-exec",
  "nub-host-common",
+ "nub-recompiler-x86",
  "rkyv",
  "spin",
 ]
@@ -1542,6 +1533,15 @@ dependencies = [
 [[package]]
 name = "nub-kernel"
 version = "0.1.0"
+
+[[package]]
+name = "nub-recompiler-x86"
+version = "0.1.0"
+dependencies = [
+ "memoffset",
+ "nub-exec",
+ "proptest",
+]
 
 [[package]]
 name = "num-traits"

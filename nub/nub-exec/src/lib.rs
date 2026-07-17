@@ -3,7 +3,7 @@
 //! JAR v3 execution engine.
 //!
 //! Pure PVM2 (RV+C+Zbb+Zba+Zbs+Zicond+custom-0) execution:
-//! interpreter, recompiler (JIT, lives in the `javm-recompiler-x86`
+//! interpreter, recompiler (JIT, lives in the `nub-recompiler-x86`
 //! crate), memory pages, gas metering, registers, ExitReason, and an
 //! `EcallHandler` trait that abstracts the ecall ABI from the engine.
 //!
