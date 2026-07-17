@@ -43,12 +43,12 @@ pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 /// `CapHasRefError` from `javm_cap` if any slot still holds a Ref.
 pub const FN_ID_NUB_PUT_CAP: u32 = 4;
 
-/// `fn_id` for the boot-info-read diagnostic RPC. Empty payload; the
-/// guest replies with the raw bytes of its [`BootInfo`] struct. The
-/// host can also obtain the same data by reading the kernel's
-/// `.boot_info` ELF section directly — this RPC exists as a
-/// belt-and-braces fallback in case the ELF symbol lookup misses.
-pub const FN_ID_NUB_GET_BOOT_INFO: u32 = 5;
+// fn_id 5 was FN_ID_NUB_GET_BOOT_INFO — the boot-info-read RPC that
+// fed the host's direct dereference of the guest cap directory. That
+// host path was deleted (host/guest hashbrown deref is unsound; see
+// `nub-host-kvm::MultiUseSandbox::published_blobs`), and the RPC with
+// it. The id stays reserved so old blobs and new hosts never disagree
+// about what 5 means.
 
 /// `fn_id` for the bench-only "evict the entire JIT compile cache"
 /// RPC. Empty payload; empty response. Used by `javm-bench` to force
@@ -61,53 +61,6 @@ pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
 /// it polls that lane's [`ParallelInvokeSlot`] in scratch memory, runs invokes
 /// with `run_top_on_lane`, and writes results back into the same slot.
 pub const FN_ID_NUB_INVOKE_WORKER: u32 = 7;
-
-/// Boot-time info published by the guest at a known location (linker
-/// section `.boot_info`). The host reads it after the sandbox boots
-/// to learn the VA of the guest's cap directory, then dereferences
-/// the directory directly from host code (the kernel half is mapped
-/// at the same VA via the shallow-PML4-copy mechanism, so a
-/// directory-VA pointer is valid both in guest kernel mode and via
-/// the host's mmap shadow of the kernel image).
-///
-/// `magic` is checked first as a sanity guard against reading a
-/// stale or wrong-binary boot region. `directory_va` is the address
-/// of the guest's resident cap directory.
-/// `directory_type_id` lets future protocol upgrades reject a
-/// mismatched layout (today: opaque sentinel matching
-/// `CacheDirectory<FixedState, CachedCap>` — bumped when any field is added or
-/// its type changes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct BootInfo {
-    /// `BootInfo::MAGIC` ("JAR_BOOT" in ASCII, little-endian). Host
-    /// reader rejects a region whose first 8 bytes don't match.
-    pub magic: u64,
-    /// VA of the cap directory's inner `HashMap` (NOT the wrapping
-    /// `Mutex`). Resolved by `nub-arch-x86` at boot via
-    /// `init_directory_va`.
-    pub directory_va: u64,
-    /// Hash of the directory's type signature. Bumped when the wire
-    /// layout of the directory changes. Today: opaque sentinel, the
-    /// host just compares for equality.
-    pub directory_type_id: u64,
-    /// Base of the per-process GUEST_VA reservation. Mirrors the
-    /// host-side constant; reproduced here so the host can sanity-
-    /// check the guest agrees on the layout.
-    pub guest_va_base: u64,
-    /// Reserved space for future fields. Zero-initialised; host
-    /// readers should not depend on the contents.
-    pub _reserved: [u64; 12],
-}
-
-impl BootInfo {
-    /// Constant numeric guard. The hex digits spell "JAR_BOOT" when
-    /// interpreted as ASCII bytes in big-endian order
-    /// (`0x4A 0x41 0x52 0x5F 0x42 0x4F 0x4F 0x54`). Stored as the
-    /// numeric u64 with that big-endian interpretation — read+compare
-    /// is a single u64 load.
-    pub const MAGIC: u64 = 0x4A41_525F_424F_4F54;
-}
 
 /// 32-byte Cap::Instance identity hash. Matches
 /// `javm_cap::CapHash` byte-wise (kept as a local alias here so

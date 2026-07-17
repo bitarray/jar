@@ -1,6 +1,4 @@
-//! Guest-side cap directory + boot info publishing.
-//!
-//! ## CACHE
+//! Guest-side cap directory.
 //!
 //! The cap store is a `CacheDirectory<FixedState, CachedCap>` that lives entirely
 //! in the guest's talc heap. The host populates blobs via the
@@ -16,37 +14,23 @@
 //! serialises all public methods), so the static holds it directly
 //! without an outer `Mutex<...>` wrapper.
 //!
-//! The directory is initialised with a const-seeded
-//! `foldhash::fast::FixedState` so both host (when it dereferences
-//! the directory via the `BOOT_INFO`-published VA — see
-//! `nub-host-kvm::guest_cache_reader`) and guest hash to the same
-//! buckets.
-//!
-//! ## BootInfo
-//!
-//! At boot the guest writes the directory's VA (the `CacheDirectory`
-//! struct's address) into [`BOOT_INFO`], a `static mut BootInfo`
-//! placed in the `.boot_info` linker section. The host reads the
-//! section from the kernel ELF after sandbox startup to learn where
-//! to find the cap directory.
-
-extern crate alloc;
-
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+//! The directory is guest-private: the host never dereferences it
+//! (host/guest hashbrown deref is unsound — see
+//! `nub-host-kvm::MultiUseSandbox::published_blobs`) and only tracks
+//! published hashes on its own side.
 
 use foldhash::fast::FixedState;
 use javm_cap::cache::CacheDirectory;
 use javm_cap::cap::Cap;
-use nub_arch_x86_abi::BootInfo;
 
 use crate::cached_cap::{CachedCap, CapCache};
 use nub_arch_x86::personality::{GuestStore, ObjHash};
 
-/// Per-cache hasher seed. Pinned at a constant so the host's
-/// direct-dereference reader (via `BootInfo.directory_va`) agrees on
-/// bucket assignments. Any value works; using the magic for symmetry
-/// with BootInfo makes diagnostics easier.
+/// Per-cache hasher seed. A const seed (rather than a boot-time random
+/// one) is required only because `CacheDirectory::new_const` runs at
+/// link time; the value itself is arbitrary — nothing outside the
+/// guest hashes into this table. ("JAR_DIR0" in ASCII, for
+/// recognisability in memory dumps.)
 const DIRECTORY_HASHER_SEED: u64 = 0x4A41_525F_4449_5230; // "JAR_DIR0"
 
 /// Heap-resident cap directory. Populated by the host via the `put_cap` RPC
@@ -63,7 +47,7 @@ pub static CACHE: CacheDirectory<FixedState, CachedCap> = CacheDirectory::new_co
 );
 
 /// The Javm personality's [`GuestStore`]: a stateless handle onto the
-/// process-global [`CACHE`] directory + [`BOOT_INFO`] block.
+/// process-global [`CACHE`] directory.
 pub struct JavmStore;
 
 pub static JAVM_STORE: JavmStore = JavmStore;
@@ -102,82 +86,5 @@ impl GuestStore for JavmStore {
                 *cache = CapCache::None;
             }
         }
-    }
-
-    fn init_boot_info(&self) {
-        init_directory_va();
-    }
-
-    /// Read the current [`BOOT_INFO`] block out as raw bytes.
-    fn boot_info_bytes(&self) -> Vec<u8> {
-        // SAFETY: `BOOT_INFO` is `static mut`; callers read it after the
-        // `init_boot_info` hook ran, and we publish bytes out via a fresh
-        // copy. Reads of a freshly-patched `directory_va` field are safe in
-        // this single-threaded boot context.
-        let info: BootInfo = unsafe {
-            let p = &raw const BOOT_INFO;
-            core::ptr::read(p)
-        };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                &info as *const BootInfo as *const u8,
-                core::mem::size_of::<BootInfo>(),
-            )
-        };
-        bytes.to_vec()
-    }
-}
-
-/// `BootInfo` placed in the `.boot_info` linker section. Initialised
-/// at link time with the magic and reserved fields; the
-/// `directory_va` and `guest_va_base` slots are patched at boot by
-/// [`init_directory_va`].
-///
-/// `static mut` because we patch two fields at boot — the host reads
-/// them post-boot via the section's symbol address (resolved from
-/// the kernel ELF).
-#[unsafe(link_section = ".boot_info")]
-#[unsafe(no_mangle)]
-pub static mut BOOT_INFO: BootInfo = BootInfo {
-    magic: BootInfo::MAGIC,
-    directory_va: 0,
-    // Sentinel: hash of the published directory's type signature.
-    // Bumped to 0x0004 when the guest resident directory payload changed from
-    // `Arc<Cap>` to `Arc<CachedCap>`.
-    directory_type_id: 0x0004,
-    // Patched at boot from `kernel_base_va() - KERNEL_OFFSET`.
-    guest_va_base: 0,
-    _reserved: [0u64; 12],
-};
-
-unsafe extern "C" {
-    /// Linker symbol; PIE-relocated at load time to the kernel's
-    /// actual runtime base GVA. See `paging.rs` for context.
-    safe static _kernel_start: u8;
-}
-
-/// Idempotent: write the VA of [`CACHE`] into `BOOT_INFO.directory_va`
-/// and the kernel's actual runtime base into `BOOT_INFO.guest_va_base`.
-/// Called once at guest boot (we do it from the `put_cap` RPC's first
-/// call as a lazy hook — see `nub-arch-x86/src/main.rs`).
-pub fn init_directory_va() {
-    static INITIALISED: AtomicBool = AtomicBool::new(false);
-    if INITIALISED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    let va = &CACHE as *const CacheDirectory<FixedState, CachedCap> as u64;
-    let kernel_base = &_kernel_start as *const u8 as u64;
-    let guest_va_base = kernel_base - nub_host_common::layout::KERNEL_OFFSET;
-    // SAFETY: `BOOT_INFO` is `static mut` but we're the only writer
-    // (single-threaded guest at boot) and the read side is loaded
-    // by the host only after sandbox boot completes. The atomic
-    // guard ensures we run once.
-    unsafe {
-        let p = &raw mut BOOT_INFO;
-        (*p).directory_va = va;
-        (*p).guest_va_base = guest_va_base;
     }
 }

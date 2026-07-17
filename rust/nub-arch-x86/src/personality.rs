@@ -124,12 +124,6 @@ pub trait GuestStore: Sync {
     /// Drop all compiled-image artifacts (javm: walk the cap directory
     /// clearing `CapCache::Image` slots).
     fn evict_jit(&self) {}
-
-    /// Idempotent boot-info publication (javm: `state_cache::init_directory_va`).
-    fn init_boot_info(&self) {}
-
-    /// Raw bytes of the personality's boot-info block.
-    fn boot_info_bytes(&self) -> Vec<u8>;
 }
 
 /// A guest-kernel personality: the pluggable state/cap system driving the

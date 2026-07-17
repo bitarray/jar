@@ -28,8 +28,8 @@ use crate::personality::{GuestPersonality, GuestStore};
 /// direct dep on the abi crate.
 pub mod fn_ids {
     pub use nub_arch_x86_abi::{
-        FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_HEAP_STATS,
-        FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP,
+        FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_HEAP_STATS, FN_ID_NUB_INVOKE_CACHED,
+        FN_ID_NUB_INVOKE_WORKER, FN_ID_NUB_PUT_CAP,
     };
 }
 
@@ -222,10 +222,6 @@ pub fn nub_invoke_worker_impl<P: GuestPersonality>(payload: &[u8]) -> Vec<u8> {
 /// heap-resident directory). On any decode failure returns the all-`0xFF`
 /// sentinel hash; the host compares against it and surfaces a typed error.
 pub fn nub_put_object_impl<P: GuestPersonality>(payload: &[u8]) -> Vec<u8> {
-    // Lazy first-call boot-info patch. Idempotent + cheap; nicer than
-    // wiring a custom `hyperlight_main` for just this one publication.
-    P::store().init_boot_info();
-
     match P::store().put_object(payload) {
         Ok(hash) => hash.to_vec(),
         Err(_) => error_hash_sentinel(),
@@ -241,14 +237,6 @@ pub fn nub_put_object_impl<P: GuestPersonality>(payload: &[u8]) -> Vec<u8> {
 pub fn nub_evict_jit_all_impl<P: GuestPersonality>(_input: &[u8]) -> Vec<u8> {
     P::store().evict_jit();
     Vec::new()
-}
-
-/// Read the personality's boot-info block out as raw bytes. Used by the
-/// host as a fallback when ELF-section lookup fails. Payload is empty.
-pub fn nub_get_boot_info_impl<P: GuestPersonality>(_input: &[u8]) -> Vec<u8> {
-    // Patch the VA on first read if it wasn't already published.
-    P::store().init_boot_info();
-    P::store().boot_info_bytes()
 }
 
 /// Diagnostic: report talc's current allocation state as 40 LE
@@ -316,11 +304,6 @@ macro_rules! register_guest_kernel {
         #[hyperlight_guest_bin::guest_function(fn_id = $crate::guest_fns::fn_ids::FN_ID_NUB_EVICT_JIT_ALL)]
         pub fn nub_evict_jit_all(input: &[u8]) -> ::alloc::vec::Vec<u8> {
             $crate::guest_fns::nub_evict_jit_all_impl::<$p>(input)
-        }
-
-        #[hyperlight_guest_bin::guest_function(fn_id = $crate::guest_fns::fn_ids::FN_ID_NUB_GET_BOOT_INFO)]
-        pub fn nub_get_boot_info(input: &[u8]) -> ::alloc::vec::Vec<u8> {
-            $crate::guest_fns::nub_get_boot_info_impl::<$p>(input)
         }
 
         #[cfg(feature = "heap-diag")]

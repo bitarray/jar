@@ -46,11 +46,6 @@ SECTIONS {
 
     . = ALIGN(4096);
     .got     : { *(.got .got.plt) }
-    /* BootInfo lives in a named section so the host can resolve it
-     * by symbol lookup against the kernel ELF. Page-aligned so the
-     * host can mmap-shadow it if needed. */
-    . = ALIGN(4096);
-    .boot_info : { KEEP(*(.boot_info)) }
     .data    : { *(.data .data.*) }
     .bss     : { *(.bss .bss.* COMMON) }
 
