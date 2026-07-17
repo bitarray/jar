@@ -25,7 +25,10 @@ fn main() {
 
     if std::env::var("CARGO_FEATURE_TEST_SUPPORT").is_ok() {
         let tests = nub_build::build("../javm-guest-x86", "javm-guest-x86-tests", &features);
-        println!("cargo:rustc-env=NUB_ARCH_X86_TESTS_BLOB={}", tests.display());
+        println!(
+            "cargo:rustc-env=NUB_ARCH_X86_TESTS_BLOB={}",
+            tests.display()
+        );
         let benches = nub_build::build("../javm-guest-x86", "javm-guest-x86-benches", &features);
         println!(
             "cargo:rustc-env=NUB_ARCH_X86_BENCHES_BLOB={}",

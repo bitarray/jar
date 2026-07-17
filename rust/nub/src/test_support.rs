@@ -1,10 +1,10 @@
 //! Test/bench driver infra for [`Nub`].
 //!
 //! Provides:
-//! - [`Nub::hyperlight_tests`]: borrow the singleton `nub-arch-x86-tests`
+//! - [`Nub::hyperlight_tests`]: borrow the singleton `javm-guest-x86-tests`
 //!   guest binary (production RPCs + test-only fns like
 //!   `nub_smoke`).
-//! - [`Nub::hyperlight_benches`]: borrow the singleton `nub-arch-x86-benches`
+//! - [`Nub::hyperlight_benches`]: borrow the singleton `javm-guest-x86-benches`
 //!   guest binary (production RPCs + bench probes like
 //!   `bench_arc_page_alloc`).
 //! - [`Nub::call_raw`]: raw RPC dispatch for fn_ids not exposed
@@ -23,7 +23,7 @@ const BENCHES_BLOB_PATH: &str = env!("NUB_ARCH_X86_BENCHES_BLOB");
 
 impl Nub {
     /// Borrow the Hyperlight-backed singleton running the
-    /// `nub-arch-x86-tests` guest binary. Same production RPCs as
+    /// `javm-guest-x86-tests` guest binary. Same production RPCs as
     /// [`Nub::hyperlight`] plus the test-only guest functions
     /// (whose FN_IDs live in [`nub_arch_x86::test_abi`]).
     pub fn hyperlight_tests() -> Result<HyperlightNubGuard> {
@@ -41,7 +41,7 @@ impl Nub {
     }
 
     /// Borrow the Hyperlight-backed singleton running the
-    /// `nub-arch-x86-benches` guest binary. Same production RPCs as
+    /// `javm-guest-x86-benches` guest binary. Same production RPCs as
     /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in
     /// [`nub_arch_x86::test_abi`]).
     pub fn hyperlight_benches() -> Result<HyperlightNubGuard> {

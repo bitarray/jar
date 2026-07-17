@@ -8,7 +8,7 @@
 //!   `nub_arch_local::run_instance`. Used for tests, deterministic
 //!   replay, and any host that doesn't need real ring-0 isolation.
 //! - **Hyperlight**: ships the invocation as an RPC into a
-//!   `nub-arch-x86` guest binary running inside a Hyperlight
+//!   `javm-guest-x86` guest binary running inside a Hyperlight
 //!   sandbox. The actual `Kernel<HyperlightArch>` lives guest-side;
 //!   the host holds only the sandbox + a state cache.
 //!
@@ -362,7 +362,7 @@ enum Backend {
         cache: CacheDirectory,
     },
     /// Hyperlight backend: the cap directory lives guest-side as a
-    /// `static CacheDirectory<FixedState>` in `nub-arch-x86`; the host
+    /// `static CacheDirectory<FixedState>` in `javm-guest-x86`; the host
     /// writes via the `FN_ID_NUB_PUT_CAP` RPC and tracks published blob
     /// hashes host-side to short-circuit idempotent re-puts (it does
     /// *not* dereference the guest's hashbrown — see
@@ -407,7 +407,7 @@ impl Nub {
     }
 
     /// Borrow the process-wide Hyperlight-backed Nub loaded from the
-    /// `nub-arch-x86` guest blob.
+    /// `javm-guest-x86` guest blob.
     pub fn hyperlight() -> Result<HyperlightNubGuard> {
         Self::hyperlight_with_options(NubOptions::default())
     }

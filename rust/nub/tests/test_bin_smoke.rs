@@ -1,4 +1,4 @@
-//! End-to-end smoke for the `nub-arch-x86-tests` guest binary.
+//! End-to-end smoke for the `javm-guest-x86-tests` guest binary.
 //!
 //! Loads the test guest binary via [`Nub::hyperlight_tests`],
 //! calls the `nub_smoke` RPC, and verifies it returns `42u64`.

@@ -108,11 +108,13 @@ use javm_recompiler_x86::codegen::{EXIT_HOST_CALL, EXIT_OOG, EXIT_TRAP};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::cached_cap::{CachedCap, CapCache, InstanceCache, ResidentCNode, ResidentInstance};
+use crate::state_cache::{CACHE, JavmStore};
 use nub_arch_x86::execution_lane::{ExecutionLane, MAX_EXECUTION_LANES};
 use nub_arch_x86::jit_run::{self, ExitInfo, FrameRuntime, MatRange};
 use nub_arch_x86::paging;
-use nub_arch_x86::personality::{ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource};
-use crate::state_cache::{CACHE, JavmStore};
+use nub_arch_x86::personality::{
+    ExecFrame, FrameMem, FrameParts, GuestPersonality, ObjHash, PageSource,
+};
 use nub_arch_x86::task::{
     EntryKind, Flow, KernelScheduler, LaneSchedulerCell, LoopOutcome, StackEntry, TaskCtx,
     frame_at, frame_at_mut,

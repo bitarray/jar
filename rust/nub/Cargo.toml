@@ -17,7 +17,7 @@ default = []
 # detect per-iter leaks.
 heap-diag = []
 # Enable the `test_support` module + build the test/bench guest
-# binaries (`nub-arch-x86-tests`, `nub-arch-x86-benches`) in addition
+# binaries (`javm-guest-x86-tests`, `javm-guest-x86-benches`) in addition
 # to the production blob. Off by default; auto-enabled for
 # `cargo test -p nub` / `cargo bench -p nub` via the self-referencing
 # dev-dep below.

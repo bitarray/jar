@@ -2,7 +2,7 @@
 //! in the ring-0 guest.
 //!
 //! Drives the `bench_arc_page_alloc` guest function in the
-//! `nub-arch-x86-benches` binary. Each iteration:
+//! `javm-guest-x86-benches` binary. Each iteration:
 //!
 //! 1. RPC into the guest with `N` as a u32 LE payload.
 //! 2. Guest allocates `N × Arc<Page>` where `Page` is a 4 KiB
