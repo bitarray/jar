@@ -49,8 +49,21 @@ fn main() {
     println!("cargo:rerun-if-changed=../javm-exec/Cargo.toml");
     println!("cargo:rerun-if-changed=../javm-cap/src");
     println!("cargo:rerun-if-changed=../javm-cap/Cargo.toml");
+    // javm-cap embeds the in-workspace SSZ crates (content hashing /
+    // hash_tree_root run guest-side) — an untracked edit here would
+    // silently diverge host and guest content hashes.
+    println!("cargo:rerun-if-changed=../ssz/src");
+    println!("cargo:rerun-if-changed=../ssz/Cargo.toml");
+    println!("cargo:rerun-if-changed=../ssz-derive/src");
+    println!("cargo:rerun-if-changed=../ssz-derive/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-arch-x86-abi/src");
     println!("cargo:rerun-if-changed=../nub-host-common/src");
     println!("cargo:rerun-if-changed=../nub-host-guest-macro/src");
     println!("cargo:rerun-if-changed=../nub-arch-guestbin/src");
+    // The guest build resolves through the same workspace: the root
+    // manifest's [workspace.dependencies] feed the tracked crates'
+    // `workspace = true` deps, and external version bumps land in the
+    // shared lockfile. Both change the blob with no tracked src edit.
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.lock");
 }
