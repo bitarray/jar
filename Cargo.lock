@@ -1131,8 +1131,10 @@ dependencies = [
  "javm-cap",
  "javm-guest-x86",
  "nub",
+ "nub-arch-local",
  "nub-arch-x86",
  "nub-arch-x86-abi",
+ "nub-build",
  "rkyv",
 ]
 
@@ -1441,13 +1443,9 @@ name = "nub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "javm-cap",
- "nub-arch-local",
  "nub-arch-x86-abi",
- "nub-build",
  "nub-host-kvm",
  "nub-kernel",
- "rkyv",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@ name = "nub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Nub: the JAR v3 microkernel — uniform Nub handle over interchangeable Arch backends (local interpreter + Hyperlight)"
+description = "Nub: the JAR v3 microkernel substrate — uniform Nub handle over interchangeable backends, generic over the kernel personality"
 
 [lib]
 name = "nub"
@@ -25,16 +25,10 @@ test-support = []
 
 [dependencies]
 anyhow = "1"
-javm-cap = { path = "../javm-cap" }
 # Forked KVM-only Hyperlight host (vendored + stripped from
 # `hyperlight-host` 0.15.0; see `rust/nub-host-kvm`).
 nub-host-kvm = { path = "../nub-host-kvm" }
 nub-kernel = { path = "../nub-kernel" }
-nub-arch-local = { path = "../nub-arch-local" }
 # Wire types shared between the host driver and the guest's
 # `nub_invoke` entry (D1+).
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
-rkyv = { version = "0.8", features = ["std"] }
-
-[build-dependencies]
-nub-build = { path = "../nub-build" }

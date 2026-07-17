@@ -1,14 +1,9 @@
-//! Test/bench driver infra for [`Nub`].
+//! Test/bench driver infra for [`Nub`]: raw RPC dispatch for fn_ids
+//! not exposed through the typed API. Hyperlight backend only.
 //!
-//! Provides:
-//! - [`Nub::hyperlight_tests`]: borrow the singleton `javm-guest-x86-tests`
-//!   guest binary (production RPCs + test-only fns like
-//!   `nub_smoke`).
-//! - [`Nub::hyperlight_benches`]: borrow the singleton `javm-guest-x86-benches`
-//!   guest binary (production RPCs + bench probes like
-//!   `bench_arc_page_alloc`).
-//! - [`Nub::call_raw`]: raw RPC dispatch for fn_ids not exposed
-//!   through the typed API. Hyperlight backend only.
+//! The test/bench guest-blob constructors live with the personality
+//! entrypoint crates (e.g. `javm::Nub::hyperlight_tests`), which own
+//! the blobs.
 //!
 //! Gated on the `test-support` Cargo feature, enabled by downstream
 //! test/bench consumers via their own `test-support` feature edge
@@ -16,48 +11,9 @@
 
 use anyhow::Result;
 
-use crate::{Backend, HyperlightBlob, HyperlightNubGuard, Nub, NubOptions};
+use crate::{Backend, Nub, Personality};
 
-const TESTS_BLOB_PATH: &str = env!("NUB_ARCH_X86_TESTS_BLOB");
-const BENCHES_BLOB_PATH: &str = env!("NUB_ARCH_X86_BENCHES_BLOB");
-
-impl Nub {
-    /// Borrow the Hyperlight-backed singleton running the
-    /// `javm-guest-x86-tests` guest binary. Same production RPCs as
-    /// [`Nub::hyperlight`] plus the test-only guest functions
-    /// (whose FN_IDs live in the guest crates' `test_abi` modules).
-    pub fn hyperlight_tests() -> Result<HyperlightNubGuard> {
-        Self::hyperlight_tests_with_options(NubOptions::default())
-    }
-
-    pub fn hyperlight_tests_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
-        Self::hyperlight_with_blob(
-            HyperlightBlob {
-                label: "test",
-                path: TESTS_BLOB_PATH,
-            },
-            options,
-        )
-    }
-
-    /// Borrow the Hyperlight-backed singleton running the
-    /// `javm-guest-x86-benches` guest binary. Same production RPCs as
-    /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in the guest
-    /// crates' `test_abi` modules).
-    pub fn hyperlight_benches() -> Result<HyperlightNubGuard> {
-        Self::hyperlight_benches_with_options(NubOptions::default())
-    }
-
-    pub fn hyperlight_benches_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
-        Self::hyperlight_with_blob(
-            HyperlightBlob {
-                label: "bench",
-                path: BENCHES_BLOB_PATH,
-            },
-            options,
-        )
-    }
-
+impl<P: Personality> Nub<P> {
     /// Raw RPC dispatch. Sends `payload` to the guest's `fn_id`
     /// handler and returns the response bytes verbatim. Test/bench
     /// callers use this for FN_IDs not exposed through the typed
@@ -73,9 +29,7 @@ impl Nub {
                 .sandbox
                 .call_raw(fn_id, payload)
                 .map_err(|e| anyhow::anyhow!("call_raw: {e}")),
-            Backend::Local { .. } => {
-                Err(anyhow::anyhow!("call_raw not supported on Local backend"))
-            }
+            Backend::Local(_) => Err(anyhow::anyhow!("call_raw not supported on Local backend")),
         }
     }
 
@@ -98,7 +52,7 @@ impl Nub {
                 .sandbox
                 .call_raw_on_vcpu(vcpu_index, fn_id, payload)
                 .map_err(|e| anyhow::anyhow!("call_raw_on_vcpu: {e}")),
-            Backend::Local { .. } => Err(anyhow::anyhow!(
+            Backend::Local(_) => Err(anyhow::anyhow!(
                 "call_raw_on_vcpu not supported on Local backend"
             )),
         }

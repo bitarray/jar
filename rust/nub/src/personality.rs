@@ -29,7 +29,7 @@ pub trait Personality: Send + Sync + 'static {
     const NAME: &'static str;
 
     /// The in-process (Local backend) kernel implementation.
-    type Local: LocalKernel + Default + Send;
+    type Local: LocalKernel + Default + Send + 'static;
 }
 
 /// In-process kernel: the personality's object store + interpreter

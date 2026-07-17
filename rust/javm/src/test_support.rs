@@ -13,41 +13,51 @@
 //!
 //! Gated on the `test-support` Cargo feature, which is auto-enabled
 //! for `cargo test -p javm` and `cargo bench -p javm` via the
-//! self-referencing dev-dep in `Cargo.toml`.
+//! self-referencing dev-dep in `Cargo.toml` (and also makes
+//! `build.rs` produce the test/bench blobs).
 
 use anyhow::Result;
 
-use crate::{HyperlightNubGuard, Nub, NubOptions};
+use crate::{HyperlightBlob, HyperlightNubGuard, Nub, NubOptions};
+
+const TESTS_BLOB_PATH: &str = env!("JAVM_GUEST_X86_BLOB_TESTS");
+const BENCHES_BLOB_PATH: &str = env!("JAVM_GUEST_X86_BLOB_BENCHES");
 
 impl Nub {
     /// Borrow the Hyperlight-backed singleton running the
     /// `javm-guest-x86-tests` guest binary. Same production RPCs as
-    /// [`Nub::hyperlight`] plus the test-only guest functions.
+    /// [`Nub::hyperlight`] plus the test-only guest functions (whose
+    /// FN_IDs live in the guest crates' `test_abi` modules).
     pub fn hyperlight_tests() -> Result<HyperlightNubGuard> {
-        Ok(Self {
-            inner: nub::Nub::hyperlight_tests()?,
-        })
+        Self::hyperlight_tests_with_options(NubOptions::default())
     }
 
     pub fn hyperlight_tests_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
-        Ok(Self {
-            inner: nub::Nub::hyperlight_tests_with_options(options)?,
-        })
+        Self::hyperlight_with_blob(
+            HyperlightBlob {
+                label: "test",
+                path: TESTS_BLOB_PATH,
+            },
+            options,
+        )
     }
 
     /// Borrow the Hyperlight-backed singleton running the
     /// `javm-guest-x86-benches` guest binary. Same production RPCs as
-    /// [`Nub::hyperlight`] plus the bench probes.
+    /// [`Nub::hyperlight`] plus the bench probes (FN_IDs in the guest
+    /// crates' `test_abi` modules).
     pub fn hyperlight_benches() -> Result<HyperlightNubGuard> {
-        Ok(Self {
-            inner: nub::Nub::hyperlight_benches()?,
-        })
+        Self::hyperlight_benches_with_options(NubOptions::default())
     }
 
     pub fn hyperlight_benches_with_options(options: NubOptions) -> Result<HyperlightNubGuard> {
-        Ok(Self {
-            inner: nub::Nub::hyperlight_benches_with_options(options)?,
-        })
+        Self::hyperlight_with_blob(
+            HyperlightBlob {
+                label: "bench",
+                path: BENCHES_BLOB_PATH,
+            },
+            options,
+        )
     }
 
     /// Raw RPC dispatch. Sends `payload` to the guest's `fn_id`

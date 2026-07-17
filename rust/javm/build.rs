@@ -2,17 +2,17 @@
 //! `x86_64-unknown-none` and expose the ELF paths to the host binary
 //! via env vars.
 //!
-//! - Production blob: always built. Exposed as `NUB_ARCH_X86_BLOB`.
+//! - Production blob: always built. Exposed as `JAVM_GUEST_X86_BLOB`.
 //! - Tests + benches blobs: only built when the `test-support`
 //!   feature is on (auto-enabled by the self-referencing dev-dep
-//!   in `Cargo.toml`). Exposed as `NUB_ARCH_X86_TESTS_BLOB` and
-//!   `NUB_ARCH_X86_BENCHES_BLOB`.
+//!   in `Cargo.toml`). Exposed as `JAVM_GUEST_X86_BLOB_TESTS` and
+//!   `JAVM_GUEST_X86_BLOB_BENCHES`.
 
 fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
         return;
     }
-    // Forward `nub`'s features that the guest binary needs to know
+    // Forward `javm`'s features that the guest binary needs to know
     // about. Right now: `heap-diag` enables talc allocation counters
     // + the `nub_heap_stats` guest function.
     let mut features: Vec<&str> = Vec::new();
@@ -21,17 +21,17 @@ fn main() {
     }
 
     let prod = nub_build::build("../javm-guest-x86", "javm-guest-x86", &features);
-    println!("cargo:rustc-env=NUB_ARCH_X86_BLOB={}", prod.display());
+    println!("cargo:rustc-env=JAVM_GUEST_X86_BLOB={}", prod.display());
 
     if std::env::var("CARGO_FEATURE_TEST_SUPPORT").is_ok() {
         let tests = nub_build::build("../javm-guest-x86", "javm-guest-x86-tests", &features);
         println!(
-            "cargo:rustc-env=NUB_ARCH_X86_TESTS_BLOB={}",
+            "cargo:rustc-env=JAVM_GUEST_X86_BLOB_TESTS={}",
             tests.display()
         );
         let benches = nub_build::build("../javm-guest-x86", "javm-guest-x86-benches", &features);
         println!(
-            "cargo:rustc-env=NUB_ARCH_X86_BENCHES_BLOB={}",
+            "cargo:rustc-env=JAVM_GUEST_X86_BLOB_BENCHES={}",
             benches.display()
         );
     }
