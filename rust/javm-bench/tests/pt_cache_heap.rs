@@ -31,8 +31,8 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64", feature = "heap-diag"))]
 
+use javm::Nub;
 use javm_bench::{PtCacheTop, build_pt_cache_top};
-use nub::Nub;
 
 const BLOB: &[u8] = include_bytes!(env!("PT_CACHE_BLOB"));
 

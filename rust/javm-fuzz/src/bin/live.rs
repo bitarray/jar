@@ -25,8 +25,6 @@ fn main() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_exec::instruction::decode;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::generate::{Gen, enumerate_boundary};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::oracle::spike_signature;
@@ -38,6 +36,8 @@ use javm_fuzz::shrink::shrink;
 use javm_fuzz::{
     Gold, ISA, Program, SIG_BASE, SIG_VERSION, Vector, VectorFile, VectorMeta, encode,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use nub_exec::instruction::decode;
 
 /// Do Spike, the interpreter, and the recompiler disagree on `prog`? `None` if
 /// Spike couldn't run it (skip). A divergence is any of: either engine's

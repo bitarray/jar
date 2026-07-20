@@ -1,8 +1,8 @@
 //! Quick dump of PVM2 Image.code + predecode for debugging.
 
 use javm_cap::image::Image;
-use javm_exec::instruction::Inst;
-use javm_exec::predecode::predecode;
+use nub_exec::instruction::Inst;
+use nub_exec::predecode::predecode;
 use ssz::Decode;
 
 fn dump(name: &str, blob: &[u8]) {

@@ -4,15 +4,17 @@ members = [
     "tools/jar-genesis",
     "rust/build-crate",
     "rust/build-javm",
-    "rust/nub-build",
-    "rust/nub",
-    "rust/nub-arch-x86",
-    "rust/nub-arch-x86-abi",
-    "rust/nub-host-kvm",
-    "rust/nub-host-common",
-    "rust/nub-host-guest-macro",
-    "rust/nub-arch-local",
-    "rust/nub-kernel",
+    "nub/nub-build",
+    "nub/nub",
+    "nub/nub-arch-x86",
+    "nub/nub-arch-x86-abi",
+    "rust/javm-guest-x86",
+    "rust/javm",
+    "nub/nub-host-kvm",
+    "nub/nub-host-common",
+    "nub/nub-host-guest-macro",
+    "nub/nub-arch-local",
+    "nub/nub-kernel",
     "rust/subsoil",
     "rust/subsoil-derive",
     "rust/javm-guest-tests",
@@ -20,8 +22,8 @@ members = [
     "rust/ssz",
     "rust/ssz-derive",
     "rust/javm-cap",
-    "rust/javm-exec",
-    "rust/javm-recompiler-x86",
+    "nub/nub-exec",
+    "nub/nub-recompiler-x86",
     "rust/javm-bench",
     "rust/javm-fuzz",
     "components/benches/blake2b",
@@ -47,7 +49,7 @@ exclude = [
     # the `cfg(target_os = "none")` cross-compile; excluding it from
     # the workspace prevents `cargo build --workspace` (host target)
     # from trying to link a no_std panic_impl into a std world.
-    "rust/nub-arch-guestbin",
+    "nub/nub-arch-guestbin",
 ]
 
 [workspace.package]
@@ -58,8 +60,8 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 
 [workspace.dependencies]
 # Internal crates
-javm-exec = { path = "rust/javm-exec" }
-javm-recompiler-x86 = { path = "rust/javm-recompiler-x86" }
+nub-exec = { path = "nub/nub-exec" }
+nub-recompiler-x86 = { path = "nub/nub-recompiler-x86" }
 javm-transpiler = { path = "rust/javm-transpiler" }
 javm-cap = { path = "rust/javm-cap" }
 subsoil = { path = "rust/subsoil" }

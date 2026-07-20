@@ -3,7 +3,8 @@
 ## Monorepo Layout
 
 - `spec/` — JAR formal specification (Lean 4).
-- `rust/` — minimum-JAR kernel + javm (Rust workspace).
+- `nub/` — nub: standalone, personality-generic execution engine (KVM/Hyperlight sandbox + PVM2 interpreter + x86-64 JIT). No JAVM knowledge; a kernel personality plugs in via the `Personality` (host) and `GuestPersonality` (guest) traits.
+- `rust/` — the JAVM layer on top of nub: `javm` (the entrypoint crate for invoking JAVM), `javm-cap` (capability system = the JAVM personality), `javm-guest-x86` (JAVM guest personality + blob bins), plus transpiler/bench/fuzz/test crates.
 - `components/` — guest crates (PVM blobs) consumed by `rust/` (today: bench guests).
 - `tools/jar-genesis` — Genesis Proof-of-Intelligence tooling.
 
@@ -20,9 +21,11 @@ cargo bench -p javm-bench                           # javm interp/recomp vs polk
 Useful single-crate runs:
 
 ```bash
-cargo test -p jar-kernel                            # kernel unit + integration tests
+cargo test -p javm                                  # JAVM entrypoint + sandbox integration tests
 cargo test -p javm-guest-tests                      # javm guest conformance vectors
 ```
+
+Bench comparisons: criterion baselines on this class of machine drift several percent across runs — never compare against a baseline saved at another time; always A/B head-to-head (save a fresh baseline at the old commit, compare immediately).
 
 ## Conventions
 

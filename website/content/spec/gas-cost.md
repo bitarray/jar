@@ -596,18 +596,18 @@ recompiler. The load-bearing rules:
 ## 6. Source of truth
 
 #1's source of truth is
-[`rust/javm-exec/src/gas_cost.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_cost.rs)
+[`nub/nub-exec/src/gas_cost.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_cost.rs)
 plus [gas-cost.md](pvm2/gas-cost.md). #2's tiers
 trace to internal memory-gas measurements and live in
-[`rust/javm-exec/src/gas_const.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_const.rs).
+[`nub/nub-exec/src/gas_const.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_const.rs).
 #3's per-page state machine + page-set rule is the shared
-[`rust/javm-exec/src/mat.rs`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/mat.rs)
+[`nub/nub-exec/src/mat.rs`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/mat.rs)
 (`charge_for` returns `0` for a read, `cow_cost` for a write), driven
 identically by **both** engines: the interpreter's software first-touch
 (`CopyingMemory::touch_read`/`touch_write`) and the recompiler's hardware
 page-fault materializer (`nub-arch-x86`'s `try_materialize` over a
 not-present data extent). The CALL-time charge is
-[`gas_const::call_frame_cost`](https://github.com/jarchain/jar/blob/master/rust/javm-exec/src/gas_const.rs)
+[`gas_const::call_frame_cost`](https://github.com/jarchain/jar/blob/master/nub/nub-exec/src/gas_const.rs)
 (compile + eager read-only page-in + frame base), applied by the recompiler's
 in-kernel CALL dispatch (`nub-arch-x86`'s `call_loop.rs`, OP_HOST_CALL).
 #4 (storage quota) is realized at HALT

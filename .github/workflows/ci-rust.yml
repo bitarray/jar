@@ -38,7 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `toolchain:` inputs mirror rust-toolchain.toml — the action's
+      # ref would otherwise override the file. Keep all three in sync.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
 
       - uses: Swatinem/rust-cache@v2
 
@@ -59,6 +63,7 @@ jobs:
           name: rust-sbom
           if-no-files-found: error
           path: |
+            nub/**/sbom.json
             rust/**/sbom.json
             components/**/sbom.json
             tools/**/sbom.json
@@ -71,6 +76,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.95.0
           components: rustfmt, clippy, rust-src
           targets: x86_64-unknown-none
 
@@ -98,6 +104,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.95.0
           components: rust-src
           targets: x86_64-unknown-none
 
@@ -122,9 +129,10 @@ jobs:
   test-macos:
     # macOS only exercises the interpreter / spec-facing portion of
     # the workspace. The `nub` stack (KVM host + cross-compiled x86_64
-    # guest binary) and `javm-recompiler-x86` are Linux-x86_64 only,
-    # so we exclude them here. See ci-rust.yml comments for the
-    # interpreter-only crate set.
+    # guest binary), the JAVM guest personality crate, and
+    # `nub-recompiler-x86` are Linux-x86_64 only, so we exclude them
+    # here. See ci-rust.yml comments for the interpreter-only crate
+    # set.
     name: Tests (macOS, interpreter)
     runs-on: macos-latest
     steps:
@@ -132,6 +140,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.95.0
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
@@ -140,6 +149,7 @@ jobs:
         run: >
           cargo test --locked --workspace --release
           --exclude nub
+          --exclude javm
           --exclude nub-host-kvm
           --exclude nub-host-common
           --exclude nub-host-guest-macro
@@ -148,6 +158,7 @@ jobs:
           --exclude nub-arch-x86
           --exclude nub-arch-x86-abi
           --exclude nub-build
-          --exclude javm-recompiler-x86
+          --exclude nub-recompiler-x86
+          --exclude javm-guest-x86
         env:
           RUSTFLAGS: "-D warnings"

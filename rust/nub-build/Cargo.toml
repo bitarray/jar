@@ -1,9 +1,0 @@
-[package]
-name = "nub-build"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "build.rs helper: cross-compile a nub bare-metal Arch guest crate (e.g. nub-arch-x86) for a bare-metal target"
-
-[dependencies]
-build-crate = { path = "../build-crate" }

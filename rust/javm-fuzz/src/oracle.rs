@@ -162,7 +162,7 @@ pub fn spike_signature(prog: &Program) -> std::io::Result<[u8; SIG_BYTES]> {
         let val = if (10..=13).contains(&xreg) {
             0
         } else {
-            let slot = javm_exec::regs::reg_slot_or_ff(xreg);
+            let slot = nub_exec::regs::reg_slot_or_ff(xreg);
             prog.init_regs.get(&slot).copied().unwrap_or(0)
         };
         words.extend(crate::encode::li64(xreg, val));
@@ -245,7 +245,7 @@ mod tests {
     #[ignore = "needs spike on PATH"]
     fn spike_computes_addi() {
         let mut init = BTreeMap::new();
-        init.insert(javm_exec::regs::reg_slot_or_ff(8), 10u64); // x8 = s0
+        init.insert(nub_exec::regs::reg_slot_or_ff(8), 10u64); // x8 = s0
         let prog = Program {
             code: vec![encode::addi(8, 8, 5)],
             init_regs: init,
@@ -253,7 +253,7 @@ mod tests {
         };
         let sig = spike_signature(&prog).unwrap();
         // Signature slot for x8 (s0) holds the LE u64 result 15.
-        let s = javm_exec::regs::reg_slot_or_ff(8) as usize;
+        let s = nub_exec::regs::reg_slot_or_ff(8) as usize;
         let val = u64::from_le_bytes(sig[s * 8..s * 8 + 8].try_into().unwrap());
         assert_eq!(val, 15);
     }

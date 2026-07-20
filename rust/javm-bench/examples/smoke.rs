@@ -15,9 +15,9 @@ fn main() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod imp {
+    use javm::Nub;
     use javm_bench::BuiltCaps;
     use javm_cap::image::Image;
-    use nub::Nub;
     use ssz::Decode;
 
     struct Workload {
@@ -92,7 +92,7 @@ mod imp {
     }
 
     pub fn main() {
-        let mut interp = Nub::new_local();
+        let mut interp = Nub::local();
         // One long-lived Hyperlight sandbox for every workload — never torn
         // down and rebuilt (that re-mmap'd the snapshot at the same fixed guest
         // VA and corrupted host heap). It publishes all workloads' caps cleanly.

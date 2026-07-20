@@ -15,8 +15,8 @@ fn main() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod imp {
     use javm_cap::image::Image;
-    use javm_exec::predecode::predecode;
-    use javm_recompiler_x86::codegen::{Compiler, HelperFns};
+    use nub_exec::predecode::predecode;
+    use nub_recompiler_x86::codegen::{Compiler, HelperFns};
     use ssz::Decode;
     use std::time::Instant;
 

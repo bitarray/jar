@@ -14,9 +14,9 @@
 //! Gated to the nub Hyperlight host (linux-x86_64), like the other guest tests.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image, ImageBuilder};
 use javm_cap::{Cap, CapHash, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_IMAGE_HASH_CHAIN: u32 = 20;

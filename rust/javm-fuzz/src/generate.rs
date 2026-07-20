@@ -22,7 +22,7 @@
 
 use crate::Program;
 use crate::encode::{self, Fmt, OpSpec};
-use javm_exec::regs::reg_slot_or_ff;
+use nub_exec::regs::reg_slot_or_ff;
 use std::collections::BTreeMap;
 
 /// Boundary-biased operand pool — the values bugs hide at.
@@ -220,7 +220,7 @@ impl Gen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_exec::instruction::{Inst, decode};
+    use nub_exec::instruction::{Inst, decode};
 
     /// Every generated instruction must decode to a non-`Reserved`,
     /// non-terminator instruction (terminators come only from the appended

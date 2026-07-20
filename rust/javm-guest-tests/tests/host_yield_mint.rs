@@ -12,10 +12,10 @@
 //! Hyperlight host (linux-x86_64).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image};
 use javm_cap::yield_cap::YK_MINT_YIELD;
 use javm_cap::{yield_sender, CNodeCap, Cap, CapHashOrRef, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_HOST_YIELD: u32 = 16;

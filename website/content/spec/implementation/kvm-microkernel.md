@@ -78,13 +78,13 @@ userspace and microkernel models (see below). The decision isn't
 "is it theoretically possible," it's "which model is the cleaner
 engineering bet over the next 5 years."
 
-## End-state architecture: Arch → nub → javm-exec
+## End-state architecture: Arch → nub → nub-exec
 
 Three layers, like a real OS:
 
 ```
 ┌──────────────────────────────────────────┐
-│  javm-exec  (interpreter + recompiler)   │  ← execution backends
+│  nub-exec  (interpreter + recompiler)   │  ← execution backends
 ├──────────────────────────────────────────┤
 │  nub  (the microkernel)                  │  ← cap manager, σ-filesystem,
 │  (cap mgmt, state root, scheduler, the   │     IDT/page-table mgmt, JIT cache,
@@ -129,13 +129,13 @@ The post-prototype shape is more refined; see
 
 ### Three Arch implementations
 
-| Arch | Substrate | javm-exec backend | Deployment target |
+| Arch | Substrate | nub-exec backend | Deployment target |
 |---|---|---|---|
 | **`nub-arch-hyperlight`** | KVM / Hyper-V / WHP, guest ring 0 long mode | **Recompiler** (in-guest JIT) | Linux/macOS/Windows/BSD with hardware virt |
 | **`nub-arch-local`** | Plain Rust, runs in the host process | **Interpreter only** (no JIT — see below) | Any platform; portable fallback |
 | **`nub-arch-pci-soc`** (future) | ARM SoC or FPGA on PCIe; nub cross-compiled to device arch | Recompiler (device-resident JIT) | Validators with execution-accelerator hardware |
 
-**Why the Arch determines the javm-exec backend.** The recompiler
+**Why the Arch determines the nub-exec backend.** The recompiler
 emits and executes native code; it requires hardware isolation
 from the host process to avoid the JIT-injection security
 property we want. So an Arch with hardware isolation
@@ -148,7 +148,7 @@ avoiding. So `nub-arch-local` exposes only the interpreter.
 ### The cross-Arch determinism invariant
 
 The same `(prior_root, block)` input must produce byte-identical
-`new_state_root` regardless of which Arch/javm-exec combination
+`new_state_root` regardless of which Arch/nub-exec combination
 ran the block. Validators on different deployment targets must
 not diverge in consensus. This is **the load-bearing correctness
 condition** for the multi-Arch deployment story; it's the same
@@ -243,8 +243,8 @@ rust/
 ├── nub-arch-hyperlight/      bin  — Hyperlight Arch (bare-metal guest, no_std + no_main)
 ├── nub-build/                lib  — cross-compile helper for bare-metal arch guests
 │
-├── javm-interpreter/         lib  — PVM interpreter, no_std (lifted from javm-exec)
-├── javm-recompiler-x86/      lib  — x86_64 PVM recompiler (lifted from javm-exec)
+├── javm-interpreter/         lib  — PVM interpreter, no_std (lifted from nub-exec)
+├── nub-recompiler-x86/      lib  — x86_64 PVM recompiler (lifted from nub-exec)
 │
 └── jar-apply/                lib  — block-apply, gas, quota; built on Nub (future)
 ```
@@ -255,7 +255,7 @@ Dependency edges:
   portable, lives with the kernel, runs against any
   `Arch::Memory`).
 - `nub-arch-hyperlight` depends on `nub-kernel` +
-  `javm-recompiler-x86` (the recompiler is hardware-locked to
+  `nub-recompiler-x86` (the recompiler is hardware-locked to
   x86_64 + real pages, lives only with Arch impls that can run
   it).
 - `nub-arch-local` depends only on `nub-kernel`.
@@ -263,10 +263,10 @@ Dependency edges:
   `build.rs`) `nub-arch-hyperlight` as a guest blob.
 - `jar-apply` (future) depends on `nub`.
 
-Today's `javm-exec` crate is slated to split into
-`javm-interpreter` + `javm-recompiler-x86` to make the
+Today's `nub-exec` crate is slated to split into
+`javm-interpreter` + `nub-recompiler-x86` to make the
 no_std-vs-x86-only boundary explicit. Until that split lands,
-`nub-kernel` and `nub-arch-hyperlight` consume `javm-exec`
+`nub-kernel` and `nub-arch-hyperlight` consume `nub-exec`
 selectively via feature gates.
 
 `nub` (the entrypoint crate) exposes a single uniform handle:
@@ -311,9 +311,9 @@ This determines where each piece lives:
   guest (over `HyperlightArch::Memory`).
 - **Recompiler → outside `nub-kernel`.** It's CPU-arch-specific
   (today x86_64) and memory-mode-specific (hardware only). Lives
-  in `javm-recompiler-x86`, consumed only by
+  in `nub-recompiler-x86`, consumed only by
   `nub-arch-hyperlight`. Future ARM Arch impls would consume a
-  hypothetical `javm-recompiler-aarch64`.
+  hypothetical `nub-recompiler-aarch64`.
 
 The Arch trait grows accordingly:
 
@@ -662,8 +662,8 @@ Each stage has a decision gate; we stop if the gate fails.
 | 0 | This design doc | Written spec; open questions identified | **done** |
 | 1 | Arch trait + boot prototype | Sketch the `Arch` trait. Build a minimal `nub-arch-hyperlight` impl: boots a guest, exposes one host-callable function, calls back to host. Also: confirm `x86_64-unknown-none` works as the compile target. Measure per-call latency, host-callback round-trip, in-guest `#PF` round-trip. | **done** (5 commits, ~1 week; all gates passed) |
 | 1.5 | Crate skeleton | Lift the prototype into proper crates: `nub-kernel`, `nub-arch-local`, `nub-arch-hyperlight`, `nub`, `nub-build`. Define the `Arch` trait and `Nub` handle. Stub `invoke` / `state_root` on both backends to prove the boundary end-to-end. | **done** (5 commits) |
-| 2 | σ filesystem + interpreter through `nub-kernel` | Split `javm-exec` into `javm-interpreter` (no_std, depended on by `nub-kernel`) and `javm-recompiler-x86` (x86-only, depended on by `nub-arch-hyperlight`). Wire `javm-interpreter` through `Kernel<A>::invoke` over `A::Memory` for both Arches. Implement LSM-style content-addressed σ store inside the kernel; port cap encode/decode. Assert post-state root matches host-replay across both Arches. | 1 month |
-| 3 | Recompiler in-guest, delete standalone host JIT | Wire `javm-recompiler-x86` through `nub-arch-hyperlight` (via `Arch::enter_native`); **delete the userspace recompiler from the legacy `javm-exec`**; assert pvm_bench numbers hold; measure new performance (bounds-check elimination, CoW fault speedup). | 1 month |
+| 2 | σ filesystem + interpreter through `nub-kernel` | Split `nub-exec` into `javm-interpreter` (no_std, depended on by `nub-kernel`) and `nub-recompiler-x86` (x86-only, depended on by `nub-arch-hyperlight`). Wire `javm-interpreter` through `Kernel<A>::invoke` over `A::Memory` for both Arches. Implement LSM-style content-addressed σ store inside the kernel; port cap encode/decode. Assert post-state root matches host-replay across both Arches. | 1 month |
+| 3 | Recompiler in-guest, delete standalone host JIT | Wire `nub-recompiler-x86` through `nub-arch-hyperlight` (via `Arch::enter_native`); **delete the userspace recompiler from the legacy `nub-exec`**; assert pvm_bench numbers hold; measure new performance (bounds-check elimination, CoW fault speedup). | 1 month |
 | 4 | Production shape | Cross-Arch × backend determinism audit; commit/rollback wiring; per-OS hypervisor shim (Linux/KVM, macOS/Hypervisor.framework, Windows/WHP); observability; performance tuning. | 1 month |
 
 Total: ~3 months from Stage 1 to a working prototype.
@@ -929,8 +929,8 @@ replaces `cargo-hyperlight` and picolibc). Stage 1.5 lifted the
 prototype into proper crates and proved the `Arch` boundary
 through both backends.
 
-Stage 2 (~1 month) splits `javm-exec` into
-`javm-interpreter` + `javm-recompiler-x86`, wires the interp
+Stage 2 (~1 month) splits `nub-exec` into
+`javm-interpreter` + `nub-recompiler-x86`, wires the interp
 through `nub-kernel` over `Arch::Memory`, and stands up the
 in-guest σ filesystem. The decision point for Stage 3 (delete
 the userspace JIT, run only in-guest) is the cross-Arch

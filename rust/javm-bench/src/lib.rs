@@ -10,8 +10,8 @@
 //!     few tens of nanoseconds per cap.
 //!   * `Nub::invoke_cached(instance_hash, endpoint, args, gas)`.
 //!
-//! - `run_interpreter` — `Nub::new_local()` drives the byte-PVM
-//!   interpreter (`javm-exec`) in-process.
+//! - `run_interpreter` — `Nub::local()` drives the byte-PVM
+//!   interpreter (`nub-exec`) in-process.
 //! - `run_recompiler` — the process-wide `Nub::hyperlight()` singleton
 //!   drives the in-kernel JIT path through the same `invoke_cached` API.
 //!
@@ -19,17 +19,17 @@
 //! hashes. Construction happens once per workload at bench warm-up via
 //! [`BuiltCaps::for_image`]; the iter loop reuses the resulting handles.
 //!
-//! Linux x86-64 only — `nub` pulls the Hyperlight host stack
+//! Linux x86-64 only — `javm` pulls the Hyperlight host stack
 //! unconditionally.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use criterion::{BenchmarkId, Criterion, Throughput};
+use javm::{HyperlightNubGuard, InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
-use nub::{HyperlightNubGuard, InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
 /// (`ecalli 0`). Both backends surface it as `exit_reason=4,
@@ -174,11 +174,11 @@ pub fn invoke(nub: &Nub, built: &BuiltCaps) -> (u64, u64) {
 }
 
 /// Drive `built[endpoint_idx]` through the PVM2 (RISC-V) interpreter via
-/// a fresh `Nub::new_local()` (the Local backend has no per-invocation
+/// a fresh `Nub::local()` (the Local backend has no per-invocation
 /// state, so a fresh Nub each call is fine — and matches the chain's
 /// per-event allocation model).
 pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     built.put_into(&nub);
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
@@ -272,7 +272,7 @@ impl RawRun {
 /// `Ok` in practice; an `Err` is still mapped to the abort sentinel for
 /// symmetry with the recompiler.
 pub fn run_interpreter_raw(built: &BuiltCaps) -> RawRun {
-    let nub = Nub::new_local();
+    let nub = Nub::local();
     built.put_into(&nub);
     match nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS) {
         Ok(r) => RawRun::from_result(&r),

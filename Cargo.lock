@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arrayref"
@@ -549,9 +549,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1122,17 +1122,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "javm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "javm",
+ "javm-cap",
+ "javm-guest-x86",
+ "nub",
+ "nub-arch-local",
+ "nub-arch-x86",
+ "nub-arch-x86-abi",
+ "nub-build",
+ "nub-exec",
+ "rkyv",
+]
+
+[[package]]
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "build-javm",
  "criterion",
+ "javm",
  "javm-cap",
- "javm-exec",
- "javm-recompiler-x86",
- "nub",
  "nub-arch-x86-abi",
+ "nub-exec",
+ "nub-recompiler-x86",
  "sha2",
  "ssz",
 ]
@@ -1152,20 +1170,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "javm-exec"
-version = "0.1.0"
-dependencies = [
- "proptest",
-]
-
-[[package]]
 name = "javm-fuzz"
 version = "0.1.0"
 dependencies = [
  "hex",
  "javm-bench",
  "javm-cap",
- "javm-exec",
+ "nub-exec",
  "serde",
  "serde_json",
 ]
@@ -1176,20 +1187,27 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "build-javm",
+ "javm",
  "javm-cap",
- "nub",
  "sha3",
  "ssz",
  "subsoil",
 ]
 
 [[package]]
-name = "javm-recompiler-x86"
+name = "javm-guest-x86"
 version = "0.1.0"
 dependencies = [
- "javm-exec",
- "memoffset",
- "proptest",
+ "foldhash 0.2.0",
+ "hyperlight-guest-bin",
+ "javm-cap",
+ "nub-arch-x86",
+ "nub-arch-x86-abi",
+ "nub-exec",
+ "nub-host-common",
+ "nub-recompiler-x86",
+ "rkyv",
+ "spin",
 ]
 
 [[package]]
@@ -1410,25 +1428,17 @@ name = "nub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "criterion",
- "javm-cap",
- "nub",
- "nub-arch-local",
- "nub-arch-x86",
  "nub-arch-x86-abi",
- "nub-build",
  "nub-host-kvm",
  "nub-kernel",
- "rkyv",
 ]
 
 [[package]]
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "javm-cap",
- "javm-exec",
  "nub-arch-x86-abi",
+ "nub-exec",
  "nub-kernel",
 ]
 
@@ -1436,16 +1446,12 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
- "bytecheck",
- "foldhash 0.2.0",
- "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
- "javm-cap",
- "javm-exec",
- "javm-recompiler-x86",
  "nub-arch-x86-abi",
+ "nub-exec",
  "nub-host-common",
+ "nub-recompiler-x86",
  "rkyv",
  "spin",
 ]
@@ -1463,6 +1469,13 @@ name = "nub-build"
 version = "0.1.0"
 dependencies = [
  "build-crate",
+]
+
+[[package]]
+name = "nub-exec"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
@@ -1497,10 +1510,8 @@ dependencies = [
  "bitflags 2.11.1",
  "blake3",
  "cfg_aliases",
- "foldhash 0.2.0",
  "goblin",
  "hyperlight-common",
- "javm-cap",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -1522,6 +1533,15 @@ dependencies = [
 [[package]]
 name = "nub-kernel"
 version = "0.1.0"
+
+[[package]]
+name = "nub-recompiler-x86"
+version = "0.1.0"
+dependencies = [
+ "memoffset",
+ "nub-exec",
+ "proptest",
+]
 
 [[package]]
 name = "num-traits"

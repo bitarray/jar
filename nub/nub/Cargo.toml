@@ -1,0 +1,37 @@
+[package]
+name = "nub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nub: the JAR v3 microkernel substrate — uniform Nub handle over interchangeable backends, generic over the kernel personality"
+
+[lib]
+name = "nub"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable the `Nub::heap_stats` diagnostic + the guest-side
+# `nub_heap_stats` guest_function (reads talc allocation counters).
+# Off in production. Used by `javm-bench/tests/heap_drift.rs` to
+# detect per-iter leaks.
+heap-diag = []
+# Enable the `test_support` module: raw `call_raw` /
+# `call_raw_on_vcpu` RPC dispatch on the Nub handle for fn_ids not
+# exposed through the typed API. nub builds no guest blobs — blob
+# production (including the test/bench blobs) lives in the
+# personality entrypoint crate's build.rs (e.g. `javm`, behind its
+# own `test-support` feature). Off by default; enabled by downstream
+# test/bench consumers via their own feature edge (e.g. `javm`'s
+# `test-support = ["nub/test-support"]`).
+test-support = []
+
+[dependencies]
+anyhow = "1"
+# Forked KVM-only Hyperlight host (vendored + stripped from
+# `hyperlight-host` 0.15.0; see `nub/nub-host-kvm`).
+nub-host-kvm = { path = "../nub-host-kvm" }
+nub-kernel = { path = "../nub-kernel" }
+# Wire types shared between the host driver and the guest's
+# `nub_invoke` entry (D1+).
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }

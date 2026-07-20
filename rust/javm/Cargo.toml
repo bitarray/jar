@@ -1,0 +1,48 @@
+[package]
+name = "javm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAVM engine entrypoint: the javm-cap kernel personality on the nub substrate (typed publish/invoke surface + guest blob)"
+
+[features]
+default = []
+heap-diag = ["nub/heap-diag"]
+# Builds the test/bench guest blobs + exposes
+# hyperlight_tests/hyperlight_benches + nub's raw call_raw.
+# Auto-enabled for `cargo test/bench -p javm` via the self-referencing
+# dev-dep.
+test-support = ["nub/test-support"]
+
+[dependencies]
+anyhow = "1"
+javm-cap = { workspace = true }
+# `run_instance` builds the interpreter register file (nub_exec::Regs)
+# when lowering an InstanceCap onto nub_arch_local::ProgramSpec.
+nub-exec = { workspace = true }
+nub = { path = "../../nub/nub" }
+nub-arch-local = { path = "../../nub/nub-arch-local" }
+nub-arch-x86-abi = { path = "../../nub/nub-arch-x86-abi" }
+rkyv = { version = "0.8", features = ["std"] }
+
+[build-dependencies]
+nub-build = { path = "../../nub/nub-build" }
+
+[dev-dependencies]
+# Self-reference so `cargo test -p javm` and `cargo bench -p javm`
+# automatically enable the `test-support` feature, which exposes the
+# `Nub::hyperlight_tests` / `hyperlight_benches` constructors + the
+# raw call_raw RPC.
+javm = { path = ".", features = ["test-support"] }
+criterion = "0.5"
+# Host lib forms of the guest crates — test_abi fn_id constants only:
+# javm-private ids (band >= 0x100) and the generic probes (100/200).
+javm-guest-x86 = { path = "../javm-guest-x86" }
+nub-arch-x86 = { path = "../../nub/nub-arch-x86" }
+# Tests exercise the generic byte surface (nub::Nub<Javm>::put_object)
+# directly alongside the typed facade.
+nub = { path = "../../nub/nub" }
+
+[[bench]]
+name = "arc_page_alloc"
+harness = false

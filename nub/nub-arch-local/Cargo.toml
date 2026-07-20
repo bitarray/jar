@@ -1,0 +1,11 @@
+[package]
+name = "nub-arch-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nub Arch implementation: in-process. Simulates the CPU/MMU substrate with Rust data structures; runs in the host process."
+
+[dependencies]
+nub-kernel = { path = "../nub-kernel" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+nub-exec = { path = "../nub-exec" }

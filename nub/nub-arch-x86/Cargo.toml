@@ -1,0 +1,46 @@
+[package]
+name = "nub-arch-x86"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generic nub guest-kernel library for Hyperlight: personality seam, task loop, and bare-metal substrate (paging, JIT runtime, ring-3)"
+
+[lib]
+name = "nub_arch_x86"
+path = "src/lib.rs"
+
+# Hyperlight guest deps only on the bare-metal target. On the host
+# target this crate exposes only the `test_abi` constants so it can be
+# part of `cargo build --workspace` without forcing Hyperlight deps
+# onto host platforms.
+[target.'cfg(target_os = "none")'.dependencies]
+hyperlight-guest = { version = "0.15", default-features = false }
+# Vendored Hyperlight guest-bin (`nub/nub-arch-guestbin`). The
+# directory name is `nub-arch-guestbin` but the package keeps its
+# upstream name `hyperlight-guest-bin` so the `#[guest_function]`
+# proc-macro's `proc_macro_crate::crate_name("hyperlight-guest-bin")`
+# lookup resolves it (the macro keys by package name, not dep name).
+hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false }
+# Built no_std; supplies the codegen + assembler used by the
+# in-kernel JIT path (Stages C1+). Direct path deps (not workspace
+# inheritance) because cargo forbids overriding workspace
+# `default-features` from the member crate.
+nub-recompiler-x86 = { path = "../nub-recompiler-x86", default-features = false }
+nub-exec = { path = "../nub-exec", default-features = false }
+# Wire types shared between guest and host. The fn-id constants and
+# `Archive` / `Serialize` derives on `InvocationSpec` /
+# `InvocationResult` live here.
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
+nub-host-common = { path = "../nub-host-common", default-features = false }
+rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
+spin = "0.10"
+
+[features]
+default = []
+# Enable the `nub_heap_stats` diagnostic guest function (reads talc's
+# allocation counters). Flows through to `hyperlight-guest-bin`'s
+# `heap-diag` feature. Off in production.
+heap-diag = ["hyperlight-guest-bin/heap-diag"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }

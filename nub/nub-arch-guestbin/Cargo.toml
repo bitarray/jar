@@ -1,0 +1,52 @@
+# Vendored from hyperlight-guest-bin 0.15.0 (Apache-2.0).
+# Stage F.1: byte-for-byte copy, no behavior changes. Subsequent stages
+# strip aarch64/libc/logger/mem_profile, drop the CoW pagefault handler,
+# and swap the buddy heap allocator for talc.
+#
+# The directory lives at `nub/nub-arch-guestbin/` for workspace clarity,
+# but `package.name` is `hyperlight-guest-bin` so `proc_macro_crate`
+# (used by `hyperlight-guest-macro`'s `#[guest_function]`) resolves it
+# by the upstream crate name. Our workspace doesn't depend on the
+# real upstream `hyperlight-guest-bin` anywhere else, so there's no
+# duplicate-crate conflict.
+
+[package]
+name = "hyperlight-guest-bin"
+# Version kept at 0.15.0 to match the vendored `hyperlight-common` /
+# `hyperlight-guest` 0.15.0 deps. The host (`nub-host-kvm`) no longer
+# enforces a `.note.hyperlight-version` match — it reads the note for
+# diagnostics only (F4.2) — so this is no longer an ABI lock.
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Forked Hyperlight guest-bin (x86_64-only) — guest-side init + panic handler + exception entry for nub."
+
+[features]
+default = []
+# Expose `HEAP_ALLOCATOR` as `pub` (instead of `pub(crate)`) and turn
+# on talc's `counters` feature so callers can read allocation
+# statistics. Adds a small per-alloc bookkeeping cost; keep off in
+# production.
+heap-diag = ["talc/counters"]
+
+[lib]
+name = "hyperlight_guest_bin"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { version = "1", default-features = false }
+bytecheck = { version = "0.8", default-features = false }
+hyperlight-common = { version = "0.15.0", default-features = false }
+nub-host-common = { path = "../nub-host-common", default-features = false }
+nub-host-guest-macro = { path = "../nub-host-guest-macro" }
+hyperlight-guest = { version = "0.15.0", default-features = false }
+linkme = "0.3.36"
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
+spin = "0.10.0"
+spinning_top = "0.3.0"
+talc = "5.0.3"
+tracing = { version = "0.1.44", features = ["attributes"], default-features = false }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

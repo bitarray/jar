@@ -19,9 +19,9 @@
 //! register-setup code is needed.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use javm::Nub;
 use javm_cap::image::{EndpointDef, Image, ImageBuilder};
 use javm_cap::{Cap, CapHash, Key, NUM_REGS};
-use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_DERIVE_SPAWN: u32 = 18;
