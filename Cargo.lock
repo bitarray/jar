@@ -1453,10 +1453,12 @@ name = "nub-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "nub",
  "nub-arch-local",
  "nub-arch-x86-abi",
  "nub-build",
  "nub-exec",
+ "nub-flat",
  "nub-program",
  "nub-recompiler-x86",
 ]
@@ -1475,6 +1477,30 @@ name = "nub-exec"
 version = "0.1.0"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "nub-flat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nub",
+ "nub-arch-local",
+ "nub-program",
+]
+
+[[package]]
+name = "nub-flat-guest-x86"
+version = "0.1.0"
+dependencies = [
+ "hyperlight-guest-bin",
+ "nub-arch-x86",
+ "nub-arch-x86-abi",
+ "nub-exec",
+ "nub-flat",
+ "nub-program",
+ "nub-recompiler-x86",
+ "spin",
 ]
 
 [[package]]

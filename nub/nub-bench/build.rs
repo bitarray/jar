@@ -47,6 +47,34 @@ fn main() {
         println!("cargo:rustc-env={var}_BLOB={}", blob.display());
     }
 
+    // The flat personality's guest kernel: a bare-metal x86-64 ELF that
+    // boots in the KVM sandbox and drives the JIT. This is what makes
+    // the recompiler *executable* here rather than only measurable at
+    // emission time.
+    let flat_guest = nub_build::build("../nub-flat-guest-x86", "nub-flat-guest-x86", &[]);
+    println!(
+        "cargo:rustc-env=NUB_FLAT_GUEST_BLOB={}",
+        flat_guest.display()
+    );
+    // The guest blob embeds these; cargo cannot see them through the
+    // guest build's separate target dir.
+    for dir in [
+        "../nub-flat-guest-x86",
+        "../nub-flat",
+        "../nub-arch-x86",
+        "../nub-arch-x86-abi",
+        "../nub-recompiler-x86",
+        "../nub-exec",
+        "../nub-program",
+        "../nub-arch-guestbin",
+        "../nub-host-common",
+        "../nub-host-guest-macro",
+    ] {
+        println!("cargo:rerun-if-changed={dir}/src");
+        println!("cargo:rerun-if-changed={dir}/Cargo.toml");
+    }
+    println!("cargo:rerun-if-changed=../nub-flat-guest-x86/link.x");
+
     // The shared field/permutation library every STARK-shaped program
     // links; cargo cannot see it through the guest build's separate
     // target dir.

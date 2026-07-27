@@ -20,6 +20,8 @@ members = [
     "nub/nub-rt",
     "nub/nub-rt-macro",
     "nub/nub-bench",
+    "nub/nub-flat",
+    "nub/nub-flat-guest-x86",
     "nub/programs/blake2b",
     "nub/programs/ecrecover",
     "nub/programs/ed25519",

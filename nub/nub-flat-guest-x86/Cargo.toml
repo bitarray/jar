@@ -1,0 +1,42 @@
+[package]
+name = "nub-flat-guest-x86"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Guest half of the flat personality: nub's reference GuestPersonality over the bare-metal guest kernel"
+
+[lib]
+name = "nub_flat_guest_x86"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nub-flat-guest-x86"
+path = "src/main.rs"
+
+# Guest deps only on the bare-metal target (same pattern + rationale as
+# nub-arch-x86: on the host target this crate compiles to a trivial empty
+# `main` so it can be part of `cargo build --workspace`).
+[target.'cfg(target_os = "none")'.dependencies]
+# REQUIRED DIRECT + UNRENAMED: `register_guest_kernel!` expands
+# `hyperlight_guest_bin::guest_function` attrs whose proc macro resolves the
+# crate via proc_macro_crate::crate_name("hyperlight-guest-bin") AT THE
+# INVOKING CRATE. No `package =` alias.
+hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false }
+# The generic guest-kernel lib (personality/task/guest_fns/jit_run/paging/...).
+nub-arch-x86 = { path = "../nub-arch-x86", default-features = false }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
+nub-exec = { path = "../nub-exec", default-features = false }
+nub-recompiler-x86 = { path = "../nub-recompiler-x86", default-features = false }
+nub-program = { path = "../nub-program" }
+# `hash` only — the host half of nub-flat would drag in std.
+nub-flat = { path = "../nub-flat", default-features = false }
+spin = "0.10"
+
+[features]
+default = []
+# Forwards through the generic lib (whose own heap-diag gates
+# nub_heap_stats_impl and forwards to hyperlight-guest-bin/heap-diag).
+# The macro-stamped nub_heap_stats wrapper's `#[cfg(feature = "heap-diag")]`
+# resolves against THIS crate, so this feature must exist here.
+heap-diag = ["nub-arch-x86/heap-diag"]

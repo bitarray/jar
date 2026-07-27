@@ -1,0 +1,19 @@
+[package]
+name = "nub-flat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The flat personality: nub's reference Personality/GuestPersonality pair — one program, one frame, no capability graph"
+
+[features]
+default = ["std"]
+# The host half. Off for the guest build, which only needs `hash`.
+std = ["dep:nub", "dep:nub-arch-local", "dep:anyhow"]
+
+[dependencies]
+nub-program = { path = "../nub-program" }
+nub = { path = "../nub", optional = true }
+nub-arch-local = { path = "../nub-arch-local", optional = true }
+# `nub::LocalKernel` returns `anyhow::Result`, so the host half must speak it.
+anyhow = { version = "1", optional = true }

@@ -121,3 +121,27 @@ pub fn run_interpreter(name: &str, blob: &ProgramBlob) -> (u64, u64) {
     assert_eq!(result.exit_arg, 0, "[{name}] unexpected host call");
     (result.return_value, BENCH_GAS - result.gas_remaining)
 }
+
+/// Path to the flat personality's guest ELF, built by this crate's
+/// `build.rs`.
+///
+/// The blob is a bare-metal x86-64 kernel that boots inside the KVM
+/// sandbox and drives the JIT. Handing a path (rather than bytes) is
+/// what `nub::Nub::create_hyperlight` takes.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const FLAT_GUEST_BLOB_PATH: &str = env!("NUB_FLAT_GUEST_BLOB");
+
+/// A process-wide `Nub<Flat>` over the KVM sandbox.
+///
+/// There can only ever be one Hyperlight sandbox per process — the
+/// guest-VA window is a single process-wide reservation that is never
+/// released, even after drop — so every caller shares this one.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn flat_sandbox() -> &'static nub::Nub<nub_flat::Flat> {
+    use std::sync::OnceLock;
+    static SANDBOX: OnceLock<nub::Nub<nub_flat::Flat>> = OnceLock::new();
+    SANDBOX.get_or_init(|| {
+        nub::Nub::create_hyperlight(FLAT_GUEST_BLOB_PATH, nub::NubOptions::default())
+            .expect("create the flat sandbox")
+    })
+}
