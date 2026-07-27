@@ -14,6 +14,12 @@
 //! All freestanding-only symbols are gated behind `cfg(target_os =
 //! "none")` — on host this crate is empty. Services force-link it via
 //! `use subsoil as _;`.
+//!
+//! `target_os = "none"` is the freestanding-target test throughout;
+//! the guest target JSON sets it. The RISC-V-specific bits (panic
+//! handler, `_start`) additionally require `target_arch = "riscv64"`,
+//! because `x86_64-unknown-none` is also `target_os = "none"` and
+//! must never see this crate's `unimp`.
 
 #![no_std]
 
@@ -84,7 +90,14 @@ mod builtins {
 
 // -- Panic handler (freestanding targets only) --------------------------------
 
-#[cfg(target_os = "none")]
+// This crate is RISC-V-only by construction: both the panic handler
+// and `_start` below emit `unimp`. Fail loudly rather than silently
+// dropping a panic handler if it is ever built for another
+// freestanding target.
+#[cfg(all(target_os = "none", not(target_arch = "riscv64")))]
+compile_error!("subsoil supports the freestanding riscv64 (PVM2) guest target only");
+
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe {
@@ -99,7 +112,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 // enters via `endpoints[N].entry_pc` (a trampoline emitted by
 // `#[subsoil::endpoint(N)]`). This default `_start` exists only to
 // satisfy the linker and traps loudly if ever reached.
-#[cfg(target_env = "javm")]
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
 core::arch::global_asm!(
     ".section .text._start, \"ax\", @progbits",
     ".global _start",

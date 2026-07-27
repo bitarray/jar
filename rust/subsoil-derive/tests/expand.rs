@@ -1,6 +1,6 @@
 //! Compile-only smoke test for `#[subsoil::endpoint(N)]`. The
-//! descriptor static is gated behind `cfg(all(target_env = "javm",
-//! target_os = "none"))`, so on host this test just checks that
+//! descriptor static is gated behind `cfg(all(target_os = "none",
+//! target_arch = "riscv64"))`, so on host this test just checks that
 //! the macro accepts a valid signature and leaves the function body
 //! intact.
 

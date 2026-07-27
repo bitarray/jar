@@ -10,4 +10,4 @@ description = "Guest-side runtime support library for JAVM chain Images."
 subsoil-derive = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

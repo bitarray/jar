@@ -1,11 +1,11 @@
-#![cfg_attr(target_env = "javm", no_std)]
-#![cfg_attr(target_env = "javm", no_main)]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
-#[cfg(target_env = "javm")]
+#[cfg(target_os = "none")]
 #[subsoil::endpoint(0)]
 fn javm_main(_args_len: u64) -> u64 {
     bench_goldilocks_mul::goldilocks_mul_bench() as u64
 }
 
-#[cfg(not(target_env = "javm"))]
+#[cfg(not(target_os = "none"))]
 fn main() {}

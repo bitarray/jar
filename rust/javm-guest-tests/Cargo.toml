@@ -22,4 +22,4 @@ ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 javm = { path = "../javm" }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

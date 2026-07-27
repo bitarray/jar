@@ -11,4 +11,4 @@ gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" 
 subsoil = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

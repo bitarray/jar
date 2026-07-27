@@ -21,7 +21,7 @@
 //!
 //! On host targets the macro emits only the function definition;
 //! the trampoline and descriptor are gated behind
-//! `cfg(all(target_env = "javm", target_os = "none"))`.
+//! `cfg(all(target_os = "none", target_arch = "riscv64"))`.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -51,7 +51,7 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #func
 
-        #[cfg(all(target_env = "javm", target_os = "none"))]
+        #[cfg(all(target_os = "none", target_arch = "riscv64"))]
         core::arch::global_asm!(
             ".text",
             #global_directive,
@@ -64,12 +64,12 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
             user_fn = sym #fn_name,
         );
 
-        #[cfg(all(target_env = "javm", target_os = "none"))]
+        #[cfg(all(target_os = "none", target_arch = "riscv64"))]
         unsafe extern "Rust" {
             safe fn #trampoline_ident(args_len: u64) -> u64;
         }
 
-        #[cfg(all(target_env = "javm", target_os = "none"))]
+        #[cfg(all(target_os = "none", target_arch = "riscv64"))]
         #[doc(hidden)]
         #[unsafe(link_section = ".subsoil.endpoints")]
         #[used]
