@@ -1,13 +1,13 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
-use subsoil as _;
+use nub_rt as _;
 use test_sub_vm_reread_recurse as _;
 
 #[cfg(target_os = "none")]
 mod kernel_abi;
 
-/// 64 KiB pinned-slot RO blob — `RO_DATA[i] = i & 0xFF`. subsoil emits a
+/// 64 KiB pinned-slot RO blob — `RO_DATA[i] = i & 0xFF`. nub_rt emits a
 /// pinned `MemoryMapping` over this `.rodata` static; the kernel maps the
 /// backing `Cap::Data` read-only into every frame's page table.
 #[cfg(target_os = "none")]
@@ -95,7 +95,7 @@ fn rw_write(v: u8) {
 ///   * depth 0    → `RO_SUM + (depth & 0xFF)`
 ///   * depth > 0  → `2*RO_SUM + 2*(depth & 0xFF)`  (the post-resume re-reads).
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn javm_main(depth: u64) -> u64 {
     use kernel_abi::*;
 

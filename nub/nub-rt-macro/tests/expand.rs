@@ -1,10 +1,10 @@
-//! Compile-only smoke test for `#[subsoil::endpoint(N)]`. The
+//! Compile-only smoke test for `#[nub_rt::endpoint(N)]`. The
 //! descriptor static is gated behind `cfg(all(target_os = "none",
 //! target_arch = "riscv64"))`, so on host this test just checks that
 //! the macro accepts a valid signature and leaves the function body
 //! intact.
 
-use subsoil::endpoint;
+use nub_rt::endpoint;
 
 #[endpoint(0)]
 fn handler_zero(args_len: u64) -> u64 {

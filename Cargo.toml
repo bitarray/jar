@@ -17,8 +17,8 @@ members = [
     "nub/nub-kernel",
     "nub/nub-program",
     "nub/nub-linker",
-    "rust/subsoil",
-    "rust/subsoil-derive",
+    "nub/nub-rt",
+    "nub/nub-rt-macro",
     "rust/javm-guest-tests",
     "rust/javm-transpiler",
     "rust/ssz",
@@ -66,8 +66,7 @@ nub-exec = { path = "nub/nub-exec" }
 nub-recompiler-x86 = { path = "nub/nub-recompiler-x86" }
 javm-transpiler = { path = "rust/javm-transpiler" }
 javm-cap = { path = "rust/javm-cap" }
-subsoil = { path = "rust/subsoil" }
-subsoil-derive = { path = "rust/subsoil-derive" }
+nub-rt = { path = "nub/nub-rt" }
 ssz = { path = "rust/ssz", default-features = false }
 ssz-derive = { path = "rust/ssz-derive" }
 

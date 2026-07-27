@@ -9,7 +9,7 @@ description = "Example JAR chain — runnable end-to-end via the v3 jar-kernel i
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-subsoil = { workspace = true }
+nub-rt = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

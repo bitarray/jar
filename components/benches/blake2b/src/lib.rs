@@ -2,7 +2,7 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
-use subsoil as _;
+use nub_rt as _;
 
 use blake2::digest::{consts::U32, Digest};
 use blake2::Blake2b;

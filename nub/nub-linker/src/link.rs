@@ -246,7 +246,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<ProgramBlob, LinkError> {
     // target isn't already post-terminator, so entries that already
     // follow a `ret`/`j` cost nothing.
     let endpoint_entries_pre: Vec<usize> = {
-        match crate::elf::find_all_section_bytes(elf_data, ".subsoil.endpoints") {
+        match crate::elf::find_all_section_bytes(elf_data, ".nub.endpoints") {
             Ok(sections) => sections
                 .iter()
                 .flat_map(|s| s.chunks(16))
@@ -409,7 +409,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<ProgramBlob, LinkError> {
     // `entry_pc` stays a code-region byte offset; the runtime adds
     // `CODE_BASE` when it seeds the PC. Remap through `offset_map` to
     // account for any fallthrough injection.
-    let mut endpoints = read_subsoil_endpoints_rv(elf_data, base_vaddr, code.len())?;
+    let mut endpoints = read_endpoint_descriptors(elf_data, base_vaddr, code.len())?;
     for def in endpoints.values_mut() {
         let pre = def.entry_pc as usize;
         if let Some(&new) = offset_map.get(&pre) {
@@ -795,22 +795,22 @@ fn validate_pvm2(code: &[u8]) -> Result<(), LinkError> {
     Ok(())
 }
 
-/// Identify the `.subsoil.endpoints` section, parse its 16-byte
+/// Identify the `.nub.endpoints` section, parse its 16-byte
 /// descriptors, and resolve `fn_ptr` (RV vaddr) into an RV-byte-offset
 /// PC. The identity map `(rv_vaddr - base_vaddr) -> pc` works because
 /// the rewritten code keeps each instruction at its original offset.
-fn read_subsoil_endpoints_rv(
+fn read_endpoint_descriptors(
     elf_data: &[u8],
     base_vaddr: u64,
     code_len: usize,
 ) -> Result<BTreeMap<u8, Endpoint>, LinkError> {
-    let sections = crate::elf::find_all_section_bytes(elf_data, ".subsoil.endpoints")?;
+    let sections = crate::elf::find_all_section_bytes(elf_data, ".nub.endpoints")?;
     const DESCRIPTOR_SIZE: usize = 16;
     let mut endpoints: BTreeMap<u8, Endpoint> = BTreeMap::new();
     for section_bytes in &sections {
         if section_bytes.len() % DESCRIPTOR_SIZE != 0 {
             return Err(LinkError::InvalidSection(format!(
-                ".subsoil.endpoints size {} is not a multiple of {}",
+                ".nub.endpoints size {} is not a multiple of {}",
                 section_bytes.len(),
                 DESCRIPTOR_SIZE
             )));
@@ -824,7 +824,7 @@ fn read_subsoil_endpoints_rv(
             let arg_meta = chunk[10];
             if fn_ptr < base_vaddr || fn_ptr >= base_vaddr + code_len as u64 {
                 return Err(LinkError::InvalidSection(format!(
-                    "subsoil endpoint {} fn_ptr {:#x} outside code section",
+                    "nub_rt endpoint {} fn_ptr {:#x} outside code section",
                     index, fn_ptr
                 )));
             }
@@ -842,7 +842,7 @@ fn read_subsoil_endpoints_rv(
                 .is_some()
             {
                 return Err(LinkError::InvalidSection(format!(
-                    "duplicate #[subsoil::endpoint({})] declaration",
+                    "duplicate #[nub_rt::endpoint({})] declaration",
                     index
                 )));
             }
@@ -850,8 +850,8 @@ fn read_subsoil_endpoints_rv(
     }
     if endpoints.is_empty() {
         return Err(LinkError::InvalidSection(
-            ".subsoil.endpoints section is absent or empty: \
-             the guest must declare at least one #[subsoil::endpoint(N)]"
+            ".nub.endpoints section is absent or empty: \
+             the guest must declare at least one #[nub_rt::endpoint(N)]"
                 .into(),
         ));
     }

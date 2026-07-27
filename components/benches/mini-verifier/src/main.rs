@@ -2,7 +2,7 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn javm_main(_args_len: u64) -> u64 {
     bench_mini_verifier::mini_verifier_bench() as u64
 }

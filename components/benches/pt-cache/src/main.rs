@@ -2,7 +2,7 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 use bench_pt_cache as _;
-use subsoil as _;
+use nub_rt as _;
 
 #[cfg(target_os = "none")]
 mod kernel_abi;
@@ -30,7 +30,7 @@ const ECHO_ENDPOINT: u8 = 1;
 /// triggers no CoW of its own — the run measures only the per-CALL
 /// frame round-trip into the resident `B`.
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn caller(n: u64) -> u64 {
     use kernel_abi::*;
 
@@ -52,7 +52,7 @@ fn caller(n: u64) -> u64 {
 /// (`φ[7]`) unchanged. No data-region access ⇒ no CoW, no
 /// per-instance page-table delta.
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(1)]
+#[nub_rt::endpoint(1)]
 fn echo(arg: u64) -> u64 {
     arg
 }

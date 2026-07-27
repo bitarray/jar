@@ -108,7 +108,7 @@ name = "bench-blake2b"
 version = "0.1.0"
 dependencies = [
  "blake2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -116,7 +116,7 @@ name = "bench-ecrecover"
 version = "0.1.0"
 dependencies = [
  "k256",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -124,7 +124,7 @@ name = "bench-ed25519"
 version = "0.1.0"
 dependencies = [
  "ed25519-compact",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -132,7 +132,7 @@ name = "bench-fri-fold-tree"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -140,7 +140,7 @@ name = "bench-goldilocks-mul"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -151,8 +151,8 @@ version = "0.1.0"
 name = "bench-keccak"
 version = "0.1.0"
 dependencies = [
+ "nub-rt",
  "sha3",
- "subsoil",
 ]
 
 [[package]]
@@ -160,7 +160,7 @@ name = "bench-mini-verifier"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -168,7 +168,7 @@ name = "bench-poly-eval"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -176,35 +176,35 @@ name = "bench-poseidon2-perm"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
 name = "bench-prime-sieve"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
 name = "bench-pt-cache"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
 name = "bench-sub-vm-data-recurse"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
 name = "bench-sub-vm-recurse"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -1191,9 +1191,9 @@ dependencies = [
  "build-javm",
  "javm",
  "javm-cap",
+ "nub-rt",
  "sha3",
  "ssz",
- "subsoil",
 ]
 
 [[package]]
@@ -1539,6 +1539,23 @@ dependencies = [
  "memoffset",
  "nub-exec",
  "proptest",
+]
+
+[[package]]
+name = "nub-rt"
+version = "0.1.0"
+dependencies = [
+ "nub-rt-macro",
+]
+
+[[package]]
+name = "nub-rt-macro"
+version = "0.1.0"
+dependencies = [
+ "nub-rt",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2232,7 +2249,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 name = "simple-chain"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]
@@ -2318,23 +2335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
-name = "subsoil"
-version = "0.1.0"
-dependencies = [
- "subsoil-derive",
-]
-
-[[package]]
-name = "subsoil-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "subsoil",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,7 +2395,7 @@ dependencies = [
 name = "test-sub-vm-reread-recurse"
 version = "0.1.0"
 dependencies = [
- "subsoil",
+ "nub-rt",
 ]
 
 [[package]]

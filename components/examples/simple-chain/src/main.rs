@@ -1,10 +1,10 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
-use subsoil as _;
+use nub_rt as _;
 
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn simple_chain_main(_args_len: u64) -> u64 {
     simple_chain::simple_chain_sum()
 }

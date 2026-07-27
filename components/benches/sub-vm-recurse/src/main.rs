@@ -2,7 +2,7 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 use bench_sub_vm_recurse as _;
-use subsoil as _;
+use nub_rt as _;
 
 #[cfg(target_os = "none")]
 mod kernel_abi;
@@ -24,7 +24,7 @@ const SLOT_CHILD: u8 = 6;
 const CHILD_ENDPOINT: u8 = 0;
 
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn javm_main(depth: u64) -> u64 {
     use kernel_abi::*;
 

@@ -1,7 +1,7 @@
 //! Sub-VM recursive-spawn bench guest with a 64 KiB pinned RO data
 //! mapping. Every recursion level reads (sums) the mapped bytes —
 //! exercising the direct-mapping path landed by Issue #855 part A
-//! (Commit 2). The RO blob lives in `.rodata` so subsoil auto-
+//! (Commit 2). The RO blob lives in `.rodata` so nub_rt auto-
 //! generates a pinned-slot `MemoryMapping` for it.
 //!
 //! When this bench is built into the JIT/javm target it ships a
@@ -14,4 +14,4 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
-use subsoil as _;
+use nub_rt as _;

@@ -2,13 +2,13 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 use bench_sub_vm_data_recurse as _;
-use subsoil as _;
+use nub_rt as _;
 
 #[cfg(target_os = "none")]
 mod kernel_abi;
 
 /// 64 KiB pinned-slot RO blob. Compile-time `.rodata` initialisation
-/// gives the linker a stable section to map; subsoil picks it up
+/// gives the linker a stable section to map; nub_rt picks it up
 /// and emits a `MemoryMapping` pointing at a pinned `Cap::Data`.
 #[cfg(target_os = "none")]
 static RO_DATA: [u8; RO_DATA_SIZE] = make_ro_pattern();
@@ -61,7 +61,7 @@ const CHILD_ENDPOINT: u8 = 0;
 const RO_STRIDE: usize = 64;
 
 #[cfg(target_os = "none")]
-#[subsoil::endpoint(0)]
+#[nub_rt::endpoint(0)]
 fn javm_main(depth: u64) -> u64 {
     use kernel_abi::*;
 

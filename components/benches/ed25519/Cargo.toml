@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 ed25519-compact = { version = "2", default-features = false }
-subsoil = { workspace = true }
+nub-rt = { workspace = true }
 
 
 [lints.rust]

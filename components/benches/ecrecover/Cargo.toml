@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-subsoil = { workspace = true }
+nub-rt = { workspace = true }
 
 
 [lints.rust]

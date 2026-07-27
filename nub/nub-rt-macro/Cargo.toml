@@ -1,10 +1,10 @@
 [package]
-name = "subsoil-derive"
+name = "nub-rt-macro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Procedural macros for subsoil guest endpoint declaration."
+description = "Procedural macros for nub-rt guest endpoint declaration."
 
 [lib]
 proc-macro = true
@@ -15,7 +15,7 @@ quote = "1"
 proc-macro2 = "1"
 
 [dev-dependencies]
-subsoil = { workspace = true }
+nub-rt = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }
