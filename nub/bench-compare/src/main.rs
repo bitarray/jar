@@ -1,0 +1,344 @@
+//! Cross-engine benchmark comparison for nub.
+//!
+//! See `README.md` for the fairness rules this tool enforces. The short
+//! version: one compute kernel per program, compiled to every engine's
+//! artifact family; only `run()` is timed; gas is reported as a column,
+//! never normalized away.
+
+mod backend;
+mod report;
+mod utils;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use backend::{Engine, Family};
+use clap::{Parser, Subcommand};
+
+/// Programs, in report order. Must match `bench-build`.
+const PROGRAMS: &[&str] = &[
+    "prime-sieve",
+    "ed25519",
+    "keccak",
+    "blake2b",
+    "ecrecover",
+    "goldilocks-mul",
+    "poseidon2-perm",
+    "mini-verifier",
+    "poly-eval",
+    "fri-fold-tree",
+];
+
+/// Samples for a compiled engine, and for an interpreter. Interpreters
+/// are 10-100x slower; taking the same sample count would triple the
+/// suite's wall-clock for no extra statistical power.
+const SAMPLES_FAST: usize = 50;
+const SAMPLES_SLOW: usize = 10;
+
+#[derive(Parser)]
+#[command(
+    name = "bench-compare",
+    about = "Cross-engine benchmark comparison for nub"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List every available (program, engine) row.
+    List,
+    /// Run each row once and check every engine agrees on the result.
+    Validate {
+        /// Write the observed values to `expected.toml` instead of
+        /// checking against it. Review the diff before committing.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Measure. Optionally filter by a `kind/program/engine` substring.
+    Run {
+        filter: Option<String>,
+        /// Measurement kinds to run.
+        #[arg(long, value_delimiter = ',', default_value = "runtime,compilation")]
+        kinds: Vec<String>,
+    },
+    /// Render the measurements as markdown.
+    Report {
+        /// Overwrite `BENCHMARKS.md`.
+        #[arg(long)]
+        write: bool,
+    },
+}
+
+fn main() -> Result<()> {
+    // Must happen before anything allocates a mapping we care about.
+    utils::disable_aslr_and_restart();
+    refuse_debug_build()?;
+
+    let cli = Cli::parse();
+    let root = workspace_root()?;
+
+    match cli.command {
+        Command::List => list(&root),
+        Command::Validate { write } => validate(&root, write),
+        Command::Run { filter, kinds } => run(&root, filter.as_deref(), &kinds),
+        Command::Report { write } => report::render(&root, write),
+    }
+}
+
+/// An unoptimized build would make the interpreter rows meaningless and
+/// the comparison a lie. benchtool has the same guard, and the same
+/// escape hatch.
+fn refuse_debug_build() -> Result<()> {
+    if cfg!(debug_assertions) && std::env::var("TRUST_ME_BRO_I_KNOW_WHAT_I_AM_DOING").is_err() {
+        bail!(
+            "refusing to run a debug build: this suite contains interpreters, and unoptimized \
+             numbers are not comparable to anything.\n\
+             Use `cargo run --release`, or set \
+             TRUST_ME_BRO_I_KNOW_WHAT_I_AM_DOING=1 if you really mean it."
+        );
+    }
+    Ok(())
+}
+
+fn workspace_root() -> Result<PathBuf> {
+    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn artifact_path(root: &Path, program: &str, family: Family) -> PathBuf {
+    root.join("artifacts")
+        .join(family.dir())
+        .join(format!("{program}.{}", family.ext()))
+}
+
+fn list(root: &Path) -> Result<()> {
+    let engines = backend::registry();
+    println!("{} engines:", engines.len());
+    for e in &engines {
+        let c = e.caps();
+        println!(
+            "  {:32} family={:10} metered={:5} slow={:5} compiles={}",
+            e.name(),
+            e.family().dir(),
+            c.metered,
+            c.slow,
+            c.compiles
+        );
+    }
+    println!("\n{} programs:", PROGRAMS.len());
+    let mut missing = 0;
+    for p in PROGRAMS {
+        let have: Vec<_> = [
+            Family::Pvm2,
+            Family::Native,
+            Family::Wasm32,
+            Family::Polkavm64,
+        ]
+        .into_iter()
+        .filter(|f| artifact_path(root, p, *f).exists())
+        .map(|f| f.dir())
+        .collect();
+        if have.len() < 4 {
+            missing += 1;
+        }
+        println!("  {p:20} artifacts: {}", have.join(" "));
+    }
+    if missing > 0 {
+        println!(
+            "\n{missing} program(s) missing artifacts — run `cargo run -p bench-build --release`"
+        );
+    }
+    Ok(())
+}
+
+/// One `(engine, program)` execution, run once.
+fn probe(engine: &dyn Engine, path: &Path) -> Result<(u32, Option<u64>)> {
+    let compiled = engine.compile(path)?;
+    let mut instance = compiled.spawn()?;
+    let value = instance.run()?;
+    Ok((value, instance.gas_used()))
+}
+
+fn validate(root: &Path, write: bool) -> Result<()> {
+    let engines = backend::registry();
+    let mut observed: BTreeMap<String, u32> = BTreeMap::new();
+    let mut failures = Vec::new();
+
+    for program in PROGRAMS {
+        let mut values: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+        for engine in &engines {
+            let path = artifact_path(root, program, engine.family());
+            if !path.exists() {
+                continue;
+            }
+            match probe(engine.as_ref(), &path) {
+                Ok((value, gas)) => {
+                    values.entry(value).or_default().push(engine.name());
+                    let gas = gas.map(|g| format!("{g}")).unwrap_or_else(|| "-".into());
+                    println!(
+                        "  {program:20} {:32} = {value:#010x}  gas={gas}",
+                        engine.name()
+                    );
+                }
+                Err(e) => {
+                    // `nub_jit_compile` has no runtime; that is expected,
+                    // not a failure.
+                    if engine.name() == "nub_jit_compile" {
+                        continue;
+                    }
+                    failures.push(format!("{program} / {}: {e:#}", engine.name()));
+                }
+            }
+        }
+
+        match values.len() {
+            0 => {}
+            1 => {
+                let value = *values.keys().next().unwrap();
+                observed.insert((*program).to_string(), value);
+            }
+            _ => {
+                // The check that catches a silently miscompiled guest.
+                let detail: Vec<String> = values
+                    .iter()
+                    .map(|(v, who)| format!("{v:#010x} <- {}", who.join(", ")))
+                    .collect();
+                failures.push(format!(
+                    "{program}: engines disagree: {}",
+                    detail.join(" | ")
+                ));
+            }
+        }
+        println!();
+    }
+
+    let expected_path = root.join("expected.toml");
+    if write {
+        let mut out = String::from(
+            "# Golden return values, one per program.\n\
+             #\n\
+             # Cross-engine agreement (checked separately) catches a silently\n\
+             # miscompiled guest. This file catches the other direction: someone\n\
+             # changing a kernel constant, where every engine would agree on the\n\
+             # new wrong answer. Regenerate with `validate --write` and review.\n\n",
+        );
+        for (k, v) in &observed {
+            out.push_str(&format!("\"{k}\" = {v}\n"));
+        }
+        std::fs::write(&expected_path, out)?;
+        println!("wrote {}", expected_path.display());
+    } else if expected_path.exists() {
+        let text = std::fs::read_to_string(&expected_path)?;
+        let expected: BTreeMap<String, u32> =
+            toml::from_str(&text).context("parse expected.toml")?;
+        for (program, value) in &observed {
+            match expected.get(program) {
+                Some(e) if e == value => {}
+                Some(e) => failures.push(format!(
+                    "{program}: got {value:#010x}, expected.toml says {e:#010x}"
+                )),
+                None => failures.push(format!("{program}: absent from expected.toml")),
+            }
+        }
+    } else {
+        println!("no expected.toml — run `validate --write` to create one");
+    }
+
+    if failures.is_empty() {
+        println!("validate: OK ({} programs)", observed.len());
+        Ok(())
+    } else {
+        for f in &failures {
+            eprintln!("FAIL {f}");
+        }
+        bail!("{} validation failure(s)", failures.len())
+    }
+}
+
+/// Time `run()` only. `compile` and `spawn` happen outside the clock.
+fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    let compiled = engine.compile(path)?;
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let mut instance = compiled.spawn()?;
+        let start = Instant::now();
+        let value = instance.run()?;
+        out.push(start.elapsed());
+        std::hint::black_box(value);
+    }
+    Ok(out)
+}
+
+/// Time `compile()` only.
+fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let start = Instant::now();
+        let compiled = engine.compile(path)?;
+        out.push(start.elapsed());
+        std::hint::black_box(&compiled);
+    }
+    Ok(out)
+}
+
+fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
+    let engines = backend::registry();
+    let out_dir = root.join("target/results");
+    std::fs::create_dir_all(&out_dir)?;
+
+    for kind in kinds {
+        for program in PROGRAMS {
+            for engine in &engines {
+                let id = format!("{kind}/{program}/{}", engine.name());
+                if let Some(f) = filter {
+                    if !id.contains(f) {
+                        continue;
+                    }
+                }
+                let path = artifact_path(root, program, engine.family());
+                if !path.exists() {
+                    continue;
+                }
+                if kind == "compilation" && !engine.caps().compiles {
+                    continue;
+                }
+
+                let samples = if engine.caps().slow {
+                    SAMPLES_SLOW
+                } else {
+                    SAMPLES_FAST
+                };
+                let result = match kind.as_str() {
+                    "runtime" => measure_runtime(engine.as_ref(), &path, samples),
+                    "compilation" => measure_compilation(engine.as_ref(), &path, samples),
+                    other => bail!("unknown kind `{other}` (want runtime or compilation)"),
+                };
+
+                match result {
+                    Ok(samples) => {
+                        let record = report::Record::from_samples(
+                            kind,
+                            program,
+                            engine.name(),
+                            engine.caps().metered,
+                            &samples,
+                        );
+                        println!("{id:60} {:>12}", report::format_duration(record.median_ns));
+                        let file = out_dir.join(format!("{}.json", id.replace('/', "__")));
+                        std::fs::write(&file, serde_json::to_string_pretty(&record)?)?;
+                    }
+                    Err(e) => {
+                        if engine.name() == "nub_jit_compile" && kind == "runtime" {
+                            continue;
+                        }
+                        eprintln!("{id:60} SKIP: {e:#}");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

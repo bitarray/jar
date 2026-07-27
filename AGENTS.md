@@ -15,7 +15,8 @@ All commands run from `~/jar`.
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo bench -p javm-bench                           # javm interp/recomp vs polkavm
+cargo bench -p nub-bench                            # nub interpreter + JIT emission
+cargo bench -p javm-bench                           # capability system (sub-VM, pt-cache)
 ```
 
 Useful single-crate runs:

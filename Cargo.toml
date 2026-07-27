@@ -53,6 +53,12 @@ exclude = [
     # the workspace prevents `cargo build --workspace` (host target)
     # from trying to link a no_std panic_impl into a std world.
     "nub/nub-arch-guestbin",
+    # Multi-engine benchmark comparison. Its own workspace + Cargo.lock so
+    # polkavm/wasmtime/wasmer (hundreds of crates) never enter this
+    # lockfile, `cargo audit`, or the SBOM. It ships nothing; it only
+    # measures. Build it with
+    # `--manifest-path nub/bench-compare/Cargo.toml`.
+    "nub/bench-compare",
 ]
 
 [workspace.package]

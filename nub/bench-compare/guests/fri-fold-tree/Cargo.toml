@@ -1,0 +1,23 @@
+[package]
+name = "guest-fri-fold-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# cdylib for the native (dlopen) and wasm families; the polkavm target
+# JSON sets `only-cdylib`, so it uses the same artifact.
+[lib]
+name = "guest_fri_fold_tree"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+kernel = { package = "bench-fri-fold-tree", path = "../../../programs/fri-fold-tree" }
+
+# Per-target, so polkavm-derive never enters nub's root lockfile.
+[target.'cfg(target_env = "polkavm")'.dependencies]
+polkavm-derive = "0.36"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("polkavm"))', 'cfg(target_os, values("none"))'] }
