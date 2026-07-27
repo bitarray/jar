@@ -288,6 +288,7 @@ version = "0.1.0"
 dependencies = [
  "build-crate",
  "javm-transpiler",
+ "nub-build",
  "ssz",
 ]
 
@@ -1451,6 +1452,8 @@ name = "nub-build"
 version = "0.1.0"
 dependencies = [
  "build-crate",
+ "nub-linker",
+ "nub-program",
 ]
 
 [[package]]

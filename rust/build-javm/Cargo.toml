@@ -3,9 +3,10 @@ name = "build-javm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "build.rs helper: compile a Rust crate to a SCALE-encoded JAVM Cap::Image blob"
+description = "build.rs helper: cross-compile a guest crate and emit an SSZ-encoded JAVM Cap::Image blob"
 
 [dependencies]
 build-crate = { path = "../build-crate" }
+nub-build = { path = "../../nub/nub-build" }
 javm-transpiler = { path = "../javm-transpiler" }
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
