@@ -4,7 +4,7 @@
 //! returns a `LinkedElf` with the data the linker needs to lay out
 //! code/data and resolve relocations.
 
-use crate::TranspileError;
+use crate::LinkError;
 use std::collections::HashMap;
 
 /// RISC-V relocation types we care about.
@@ -89,12 +89,12 @@ pub(crate) struct LinkedElf {
 pub(crate) fn find_all_section_bytes<'a>(
     elf_data: &'a [u8],
     section_name: &str,
-) -> Result<Vec<&'a [u8]>, TranspileError> {
+) -> Result<Vec<&'a [u8]>, LinkError> {
     if elf_data.len() < 64 || elf_data[0..4] != [0x7F, b'E', b'L', b'F'] {
-        return Err(TranspileError::ElfParse("not an ELF file".into()));
+        return Err(LinkError::ElfParse("not an ELF file".into()));
     }
     if elf_data[4] != 2 {
-        return Err(TranspileError::ElfParse("only 64-bit ELF supported".into()));
+        return Err(LinkError::ElfParse("only 64-bit ELF supported".into()));
     }
     let e_shoff = u64::from_le_bytes(elf_data[40..48].try_into().unwrap()) as usize;
     let e_shentsize = u16::from_le_bytes(elf_data[58..60].try_into().unwrap()) as usize;
@@ -133,19 +133,19 @@ pub(crate) fn find_all_section_bytes<'a>(
 }
 
 /// Parse ELF with full relocation info.
-pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
+pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, LinkError> {
     if data.len() < 64 || data[0..4] != [0x7F, b'E', b'L', b'F'] {
-        return Err(TranspileError::ElfParse("not an ELF file".into()));
+        return Err(LinkError::ElfParse("not an ELF file".into()));
     }
 
     match data[4] {
         2 => {}
         1 => {
-            return Err(TranspileError::ElfParse(
+            return Err(LinkError::ElfParse(
                 "linker requires 64-bit ELF (rv64em)".into(),
             ));
         }
-        _ => return Err(TranspileError::ElfParse("unsupported ELF class".into())),
+        _ => return Err(LinkError::ElfParse("unsupported ELF class".into())),
     }
 
     // ELF64 header fields

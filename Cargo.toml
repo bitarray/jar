@@ -16,6 +16,7 @@ members = [
     "nub/nub-arch-local",
     "nub/nub-kernel",
     "nub/nub-program",
+    "nub/nub-linker",
     "rust/subsoil",
     "rust/subsoil-derive",
     "rust/javm-guest-tests",
