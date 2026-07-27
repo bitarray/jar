@@ -120,10 +120,23 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
     for (kind, programs) in &by_kind {
         out.push_str(&format!("\n## {kind}\n"));
         out.push_str(match kind.as_str() {
-            "runtime" => "\nExecution only — compile and instantiate are excluded.\n",
+            "runtime" => {
+                "\nSteady-state execution: one instance, invoked repeatedly. How fast \
+                 the engine *executes*, with instantiation excluded.\n\n\
+                 Rows are absent where a program cannot be re-run in one instance \
+                 (the three guests with a never-freeing bump arena).\n"
+            }
+            "oneshot" => {
+                "\nCold invocation: a fresh instance every sample. This is nub's real \
+                 production model — every invocation builds a new address space — and \
+                 it is where an engine's instantiation strategy shows up. Compare \
+                 against `runtime` for the same row to see what a cold start costs \
+                 that engine.\n"
+            }
             "compilation" => {
-                "\nTurning the program into executable form. `native` is absent: the \
-                 OS loader already did it.\n"
+                "\nTurning the program into executable form. Engine construction is \
+                 excluded (a once-per-process cost). `native` is absent: the OS \
+                 loader already did it.\n"
             }
             _ => "\n",
         });

@@ -24,7 +24,7 @@ use anyhow::{bail, Context, Result};
 use nub_arch_local::{PreparedProgram, ProgramInstance};
 use nub_program::ProgramBlob;
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler as BcCompiler, Engine, Family, Instance};
 
 /// Gas ceiling. `i64::MAX`, not `u64::MAX`: the JIT's counter is an
 /// `i64` and detects exhaustion by sign, so `u64::MAX` would present as
@@ -61,8 +61,21 @@ impl Engine for NubInterp {
         Family::Pvm2
     }
     fn caps(&self) -> Caps {
-        Caps::new().metered().slow()
+        // `compiles: false` — an interpreter has no compilation step.
+        // `compile()` here only reads and decodes the blob, and predecode
+        // belongs to instantiation (it is per-address-space, and it is
+        // what `spawn` builds). Reporting a decode time in a table headed
+        // "compilation" next to Cranelift's would be a category error.
+        // nub's real compile-side number is `nub_jit_compile`.
+        Caps::new().metered().slow().preloaded()
     }
+    /// No engine object: the interpreter is a function.
+    fn create(&self) -> Result<Box<dyn BcCompiler>> {
+        Ok(Box::new(NubInterp))
+    }
+}
+
+impl BcCompiler for NubInterp {
     fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
         Ok(Box::new(InterpModule {
             blob: Arc::new(load(path)?),
@@ -157,6 +170,12 @@ mod jit {
         fn caps(&self) -> Caps {
             Caps::new().metered()
         }
+        fn create(&self) -> Result<Box<dyn BcCompiler>> {
+            Ok(Box::new(NubJitCompile))
+        }
+    }
+
+    impl BcCompiler for NubJitCompile {
         fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
             let blob = super::load(path)?;
             // Same load/store gas tier the interpreter derives, so the

@@ -62,7 +62,11 @@ enum Command {
     Run {
         filter: Option<String>,
         /// Measurement kinds to run.
-        #[arg(long, value_delimiter = ',', default_value = "runtime,compilation")]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "runtime,oneshot,compilation"
+        )]
         kinds: Vec<String>,
     },
     /// Render the measurements as markdown.
@@ -156,7 +160,7 @@ fn list(root: &Path) -> Result<()> {
 
 /// One `(engine, program)` execution, run once.
 fn probe(engine: &dyn Engine, path: &Path) -> Result<(u32, Option<u64>)> {
-    let compiled = engine.compile(path)?;
+    let compiled = engine.create()?.compile(path)?;
     let mut instance = compiled.spawn()?;
     let value = instance.run()?;
     Ok((value, instance.gas_used()))
@@ -258,9 +262,43 @@ fn validate(root: &Path, write: bool) -> Result<()> {
     }
 }
 
-/// Time `run()` only. `compile` and `spawn` happen outside the clock.
+/// Steady-state execution: one instance, invoked repeatedly.
+///
+/// This is throughput once everything is warm — the number that says how
+/// fast an engine *executes*. It deliberately excludes instantiation,
+/// because the cold cost differs enormously by engine implementation
+/// (nub allocates and copies a flat address space; Wasmtime maps a
+/// copy-on-write image) and folding the two together would report a
+/// difference in memory strategy as a difference in execution speed.
+/// [`measure_oneshot`] reports that other half.
+///
+/// Requires the program to be re-runnable in one instance. The three
+/// guests with a never-freeing bump arena are not, and surface as a
+/// skip rather than a wrong number.
 fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let compiled = engine.compile(path)?;
+    let compiled = engine.create()?.compile(path)?;
+    let mut instance = compiled.spawn()?;
+    // One untimed warm-up so the first sample is not the odd one out.
+    instance.run()?;
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let start = Instant::now();
+        let value = instance.run()?;
+        out.push(start.elapsed());
+        std::hint::black_box(value);
+    }
+    Ok(out)
+}
+
+/// Cold invocation: a fresh instance every sample, timed through `run`.
+///
+/// This is nub's real production model — every invocation builds a new
+/// address space — and it is where an engine's instantiation strategy
+/// shows up. Measured for all engines identically, so the comparison
+/// is like-for-like even though the absolute penalty is very different
+/// per engine (for nub's interpreter it is roughly 2x its warm cost).
+fn measure_oneshot(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    let compiled = engine.create()?.compile(path)?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
         let mut instance = compiled.spawn()?;
@@ -274,10 +312,13 @@ fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<V
 
 /// Time `compile()` only.
 fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    // Engine creation is outside the loop: it is a once-per-process cost
+    // in real use, and nub has no engine object to pay it at all.
+    let compiler = engine.create()?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = Instant::now();
-        let compiled = engine.compile(path)?;
+        let compiled = compiler.compile(path)?;
         out.push(start.elapsed());
         std::hint::black_box(&compiled);
     }
@@ -313,8 +354,9 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
                 };
                 let result = match kind.as_str() {
                     "runtime" => measure_runtime(engine.as_ref(), &path, samples),
+                    "oneshot" => measure_oneshot(engine.as_ref(), &path, samples),
                     "compilation" => measure_compilation(engine.as_ref(), &path, samples),
-                    other => bail!("unknown kind `{other}` (want runtime or compilation)"),
+                    other => bail!("unknown kind `{other}` (want runtime, oneshot or compilation)"),
                 };
 
                 match result {

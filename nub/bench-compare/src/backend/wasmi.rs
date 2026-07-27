@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use wasmi::{Engine as WiEngine, Instance as WiInstance, Linker, Module, Store, TypedFunc};
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
 
 pub fn engines() -> Vec<Box<dyn Engine>> {
     vec![Box::new(Wasmi)]
@@ -35,12 +35,26 @@ impl Engine for Wasmi {
         Caps::new().slow()
     }
 
+    fn create(&self) -> Result<Box<dyn Compiler>> {
+        Ok(Box::new(WasmiCompiler {
+            engine: WiEngine::default(),
+        }))
+    }
+}
+
+struct WasmiCompiler {
+    engine: WiEngine,
+}
+
+impl Compiler for WasmiCompiler {
     fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let engine = WiEngine::default();
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let module =
-            Module::new(&engine, &bytes[..]).map_err(|e| anyhow::anyhow!("wasmi compile: {e}"))?;
-        Ok(Box::new(WasmiModule { engine, module }))
+        let module = Module::new(&self.engine, &bytes[..])
+            .map_err(|e| anyhow::anyhow!("wasmi compile: {e}"))?;
+        Ok(Box::new(WasmiModule {
+            engine: self.engine.clone(),
+            module,
+        }))
     }
 }
 

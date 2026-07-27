@@ -3,18 +3,27 @@
 //! # The lifecycle, and why it has these seams
 //!
 //! ```text
-//!   compile(path) -> Compiled        # once per (engine, program)
-//!       spawn()   -> Instance        # once per sample   — UNTIMED
-//!           run() -> u32             # the measured unit — TIMED
+//!   create()          -> Compiler    # once per engine   — UNTIMED
+//!       compile(path) -> Compiled    # timed by `compilation`
+//!           spawn()   -> Instance    # once per sample   — UNTIMED
+//!               run() -> u32         # timed by `runtime`
 //! ```
 //!
-//! The `spawn`/`run` seam is the load-bearing one. Every engine here
-//! does *some* per-invocation setup — wasmtime instantiates a store and
-//! zeroes linear memory, nub builds its flat address space and
-//! predecodes. If that work landed inside `run` for one engine and
-//! inside `spawn` for another, the comparison would be measuring
-//! different things. So: `spawn` is everything up to "ready to execute",
-//! `run` is execution only, and only `run` is timed.
+//! Two of these seams exist purely so the comparison measures the same
+//! thing for everyone, and both were bugs before they were seams.
+//!
+//! `create`/`compile`: constructing an engine reserves guard regions,
+//! builds a code allocator and may spawn worker threads. That is a
+//! once-per-process cost in real use, but nub has no engine object at
+//! all — so folding it into `compile` would have flattered nub by
+//! roughly a millisecond against Wasmtime and PolkaVM.
+//!
+//! `spawn`/`run`: every engine does per-invocation setup — Wasmtime
+//! instantiates a store and zeroes linear memory, nub builds its flat
+//! address space and predecodes. Putting that inside `run` for one
+//! engine and inside `spawn` for another would compare different work.
+//! So `spawn` is everything up to "ready to execute", and only `run` is
+//! timed.
 //!
 //! # Dispatch
 //!
@@ -121,7 +130,14 @@ pub trait Engine {
 
     fn caps(&self) -> Caps;
 
-    /// Load and compile a program. Timed by the `compilation` kind.
+    /// Build the engine: guard regions, code allocator, worker threads.
+    /// Untimed — a once-per-process cost in real use.
+    fn create(&self) -> Result<Box<dyn Compiler>>;
+}
+
+/// A live engine, ready to compile programs.
+pub trait Compiler {
+    /// Load and compile one program. This is the `compilation` measurement.
     fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>>;
 }
 

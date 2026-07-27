@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use wasmtime::{Config, Engine as WtEngine, Instance as WtInstance, Module, Store, TypedFunc};
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Strategy {
@@ -79,14 +79,28 @@ impl Engine for Wasmtime {
         }
     }
 
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
+    fn create(&self) -> Result<Box<dyn Compiler>> {
         let engine =
             WtEngine::new(&self.config()).map_err(|e| anyhow::anyhow!("wasmtime engine: {e}"))?;
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let module =
-            Module::new(&engine, &bytes).map_err(|e| anyhow::anyhow!("wasmtime compile: {e}"))?;
-        Ok(Box::new(WasmtimeModule {
+        Ok(Box::new(WasmtimeCompiler {
             engine: Arc::new(engine),
+            fuel: self.fuel,
+        }))
+    }
+}
+
+struct WasmtimeCompiler {
+    engine: Arc<WtEngine>,
+    fuel: bool,
+}
+
+impl Compiler for WasmtimeCompiler {
+    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let module = Module::new(&self.engine, &bytes)
+            .map_err(|e| anyhow::anyhow!("wasmtime compile: {e}"))?;
+        Ok(Box::new(WasmtimeModule {
+            engine: Arc::clone(&self.engine),
             module,
             fuel: self.fuel,
         }))

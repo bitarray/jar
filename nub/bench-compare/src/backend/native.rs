@@ -16,7 +16,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
 
 #[derive(Clone, Copy)]
 pub struct Native;
@@ -35,6 +35,13 @@ impl Engine for Native {
         Caps::new().preloaded()
     }
 
+    /// Nothing to build: the dynamic loader is the engine.
+    fn create(&self) -> Result<Box<dyn Compiler>> {
+        Ok(Box::new(Native))
+    }
+}
+
+impl Compiler for Native {
     fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
         let library = unsafe { libloading::Library::new(path) }
             .with_context(|| format!("dlopen {}", path.display()))?;

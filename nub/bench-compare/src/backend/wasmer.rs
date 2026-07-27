@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use wasmer::{imports, sys::EngineBuilder, Instance as WrInstance, Module, Store, TypedFunction};
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
 
 pub fn engines() -> Vec<Box<dyn Engine>> {
     vec![Box::new(WasmerSinglepass)]
@@ -36,14 +36,21 @@ impl Engine for WasmerSinglepass {
         Caps::new()
     }
 
+    /// Wasmer ties a Store to the engine that made it, and a Module to
+    /// its Store, so there is no long-lived engine object to build here.
+    /// The Singlepass compiler is constructed per compile, which is
+    /// cheap — it holds no code cache.
+    fn create(&self) -> Result<Box<dyn Compiler>> {
+        Ok(Box::new(WasmerSinglepass))
+    }
+}
+
+impl Compiler for WasmerSinglepass {
     fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let compiler = wasmer_compiler_singlepass::Singlepass::new();
-        let mut store = Store::new(EngineBuilder::new(compiler));
+        let store = Store::new(EngineBuilder::new(compiler));
         let module = Module::new(&store, &bytes).context("wasmer compile")?;
-        // Compilation is what this call is timed for; drop the store so
-        // each spawn gets a fresh one.
-        let _ = &mut store;
         Ok(Box::new(WasmerModule { bytes, module }))
     }
 }

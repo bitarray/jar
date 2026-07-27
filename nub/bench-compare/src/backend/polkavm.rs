@@ -5,50 +5,92 @@
 //! pair. If nub is slower than polkavm at the same job, that is the
 //! number that matters.
 //!
-//! Four rows, and the split is deliberate: `no_gas` / `sync_gas` /
-//! `async_gas` on the recompiler is the reference measurement of *what
-//! metering costs a JIT*. nub cannot produce that pair itself (it has
-//! no unmetered mode), so this triple is how the report brackets nub's
-//! always-on metering.
+//! The row split is deliberate: `no_gas` / `sync_gas` / `async_gas` on
+//! the recompiler is the reference measurement of *what metering costs
+//! a JIT*. nub cannot produce that pair itself (it has no unmetered
+//! mode), so this triple is how the report brackets nub's always-on
+//! metering.
+//!
+//! ## Cost models
+//!
+//! PolkaVM's default is `CostModelKind::Simple` — a flat cost per
+//! instruction. It is cheap to evaluate, and metering against it is
+//! *not* comparable to nub, whose gas is a per-basic-block pipeline
+//! simulation with memory tiers. Comparing nub's metered rows only
+//! against Simple would understate what nub pays for its model.
+//!
+//! So the cost model is part of a row's identity too. `CacheModel::L2Hit`
+//! charges `memory_access_cost: 25` — which is exactly nub's
+//! `gas_const::MEM_CYCLES_BASE`, so `polkavm64_recompiler_sync_gas_full`
+//! is the row that is genuinely like-for-like with `nub_interp`'s
+//! metering, and the Simple rows show what a cheaper model would buy.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use polkavm::{
-    ArcBytes, Config, Engine as PvmEngine, Gas, GasMeteringKind, Instance as PvmInstance, Linker,
-    Module, ModuleConfig, ProgramBlob, ProgramCounter,
+    ArcBytes, CacheModel, Config, CostModel, CostModelKind, Engine as PvmEngine, Gas,
+    GasMeteringKind, Instance as PvmInstance, Linker, Module, ModuleConfig, ProgramBlob,
+    ProgramCounter,
 };
 
 /// `polkavm::Gas` is `i64`, so the maximum budget is `i64::MAX`, not
 /// `u64::MAX` — same reason nub uses `i64::MAX`.
 const GAS_MAX: Gas = Gas::MAX;
 
-use crate::backend::{Caps, Compiled, Engine, Family, Instance};
+use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+
+/// Which cost model a metered row charges against.
+#[derive(Clone, Copy, PartialEq)]
+enum Cost {
+    /// PolkaVM's default: a flat per-instruction cost.
+    Simple,
+    /// Pipeline simulation with a cache model. `L2Hit` matches nub's
+    /// `MEM_CYCLES_BASE` of 25.
+    Full,
+}
 
 pub fn engines() -> Vec<Box<dyn Engine>> {
     let mut v: Vec<Box<dyn Engine>> = vec![Box::new(PolkaVm {
         name: "polkavm64_interpreter",
         backend: polkavm::BackendKind::Interpreter,
         gas: None,
+        cost: Cost::Simple,
     })];
 
     // The recompiler is x86-64/aarch64 only, and needs a usable sandbox.
     if polkavm::BackendKind::Compiler.is_supported() {
-        v.push(Box::new(PolkaVm {
-            name: "polkavm64_recompiler_no_gas",
-            backend: polkavm::BackendKind::Compiler,
-            gas: None,
-        }));
-        v.push(Box::new(PolkaVm {
-            name: "polkavm64_recompiler_sync_gas",
-            backend: polkavm::BackendKind::Compiler,
-            gas: Some(GasMeteringKind::Sync),
-        }));
-        v.push(Box::new(PolkaVm {
-            name: "polkavm64_recompiler_async_gas",
-            backend: polkavm::BackendKind::Compiler,
-            gas: Some(GasMeteringKind::Async),
-        }));
+        for (name, gas, cost) in [
+            ("polkavm64_recompiler_no_gas", None, Cost::Simple),
+            (
+                "polkavm64_recompiler_sync_gas",
+                Some(GasMeteringKind::Sync),
+                Cost::Simple,
+            ),
+            (
+                "polkavm64_recompiler_async_gas",
+                Some(GasMeteringKind::Async),
+                Cost::Simple,
+            ),
+            // The like-for-like row against nub's metering.
+            (
+                "polkavm64_recompiler_sync_gas_full",
+                Some(GasMeteringKind::Sync),
+                Cost::Full,
+            ),
+            (
+                "polkavm64_recompiler_async_gas_full",
+                Some(GasMeteringKind::Async),
+                Cost::Full,
+            ),
+        ] {
+            v.push(Box::new(PolkaVm {
+                name,
+                backend: polkavm::BackendKind::Compiler,
+                gas,
+                cost,
+            }));
+        }
     }
     v
 }
@@ -58,6 +100,7 @@ pub struct PolkaVm {
     name: &'static str,
     backend: polkavm::BackendKind,
     gas: Option<GasMeteringKind>,
+    cost: Cost,
 }
 
 impl Engine for PolkaVm {
@@ -81,12 +124,27 @@ impl Engine for PolkaVm {
         }
     }
 
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
+    fn create(&self) -> Result<Box<dyn Compiler>> {
         let mut config = Config::from_env().unwrap_or_default();
         config.set_backend(Some(self.backend));
         config.set_allow_experimental(true);
         let engine = PvmEngine::new(&config).context("polkavm engine")?;
+        Ok(Box::new(PolkaVmCompiler {
+            engine,
+            gas: self.gas,
+            cost: self.cost,
+        }))
+    }
+}
 
+struct PolkaVmCompiler {
+    engine: PvmEngine,
+    gas: Option<GasMeteringKind>,
+    cost: Cost,
+}
+
+impl Compiler for PolkaVmCompiler {
+    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
         let bytes: ArcBytes = std::fs::read(path)
             .with_context(|| format!("read {}", path.display()))?
             .into();
@@ -94,7 +152,11 @@ impl Engine for PolkaVm {
 
         let mut module_config = ModuleConfig::default();
         module_config.set_gas_metering(self.gas);
-        let module = Module::from_blob(&engine, &module_config, blob)
+        module_config.set_cost_model(Some(match self.cost {
+            Cost::Simple => CostModelKind::Simple(CostModel::naive_ref()),
+            Cost::Full => CostModelKind::Full(CacheModel::L2Hit),
+        }));
+        let module = Module::from_blob(&self.engine, &module_config, blob)
             .map_err(|e| anyhow::anyhow!("compile: {e}"))?;
 
         let run = module

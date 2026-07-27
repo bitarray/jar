@@ -71,22 +71,58 @@ it, so nub is measured with the flags it actually ships.
 These are the rules the tool enforces. They exist so the numbers mean
 something; changing one changes what is being claimed.
 
-**1. Only the measured call is timed.** `compile` and `spawn` happen
-before the clock starts, for every engine alike. This seam is
-load-bearing: every engine does per-invocation setup (Wasmtime
-instantiates a store, nub builds its flat address space and
-predecodes), and folding that into `run` for one engine but not another
-would compare different things. It is also why `nub_arch_local`
-exposes `ProgramInstance` — nub's `run_program` used to do setup and
-execution in one call, which would have understated it here.
+**1. Only the measured call is timed.** Each seam in the
+`create -> compile -> spawn -> run` lifecycle exists because putting
+work on the wrong side of it silently favours one engine:
+
+- *engine creation is untimed.* Building an engine reserves guard
+  regions, builds a code allocator and may spawn worker threads — a
+  once-per-process cost in real use. nub has no engine object at all,
+  so charging it inside `compile` flattered nub by ~1 ms.
+- *instantiation is untimed in `runtime`.* Every engine does
+  per-invocation setup; folding it into `run` for one and not another
+  compares different work. This is why `nub_arch_local` exposes
+  `ProgramInstance` at all — `run_program` used to do setup and
+  execution in one call.
+
+**1b. Three measurement kinds, because one number would hide things.**
+
+| kind | what it measures |
+|---|---|
+| `runtime` | steady-state execution: one instance, invoked repeatedly |
+| `oneshot` | cold invocation: a fresh instance every sample |
+| `compilation` | turning a program into executable form |
+
+`runtime` and `oneshot` differ by roughly 2x for nub's interpreter,
+because a fresh instance allocates and copies a flat address space
+while Wasmtime maps a copy-on-write image. Reporting only one would
+present a difference in *memory strategy* as a difference in
+*execution speed*. `oneshot` is nub's real production model; `runtime`
+is what the engine can do once warm. Read both.
+
+Some `runtime` rows are absent: three guests carry a never-freeing bump
+arena and cannot be re-run in one instance, so they are skipped with a
+logged reason rather than reported wrongly.
 
 **2. Gas is an axis, never a normalizer.** No number is ever
 gas-adjusted, scaled, or divided by a cost model. Metered and unmetered
 rows sit in the same table with an explicit `metered` column, and the
 report never claims a metered engine "lost" to an unmetered one.
 
-**3. Metering mode is part of a row's identity**, not a flag. Hence
-four separate PolkaVM rows and two separate Cranelift rows.
+**3. Metering mode *and cost model* are part of a row's identity**, not
+flags.
+
+PolkaVM's default is `CostModel::Simple` — a flat cost per instruction,
+cheap to evaluate. nub's gas is a per-basic-block pipeline simulation
+with memory tiers, which is strictly more work. Comparing nub's metered
+rows only against Simple would understate what nub pays for its model,
+so the `*_full` rows use `CostModelKind::Full(CacheModel::L2Hit)`.
+L2Hit is the right choice specifically: it charges
+`memory_access_cost: 25`, which is exactly nub's
+`gas_const::MEM_CYCLES_BASE`. So `polkavm64_recompiler_sync_gas_full`
+is the genuinely like-for-like row, and the Simple rows show what a
+cheaper model would buy. The gap is real — on keccak, Simple charges
+63k gas and Full charges 249k for the same program.
 
 **4. Counters are set to maximum** so instrumentation runs but never
 fires — we measure the cost of counting, not the cost of running out.
@@ -100,7 +136,8 @@ loop for a path nothing in production exercises. Instead:
 
 | pair | isolates |
 |---|---|
-| `polkavm64_recompiler_no_gas` ↔ `_sync_gas` ↔ `_async_gas` | what metering costs a JIT |
+| `polkavm64_recompiler_no_gas` ↔ `_sync_gas` | what a *cheap* cost model costs a JIT |
+| `polkavm64_recompiler_no_gas` ↔ `_sync_gas_full` | what a *nub-comparable* cost model costs a JIT |
 | `wasmtime_cranelift` ↔ `wasmtime_cranelift_fuel` | the same, for an optimizing JIT |
 
 Together these bracket what nub's always-on gas costs it.
@@ -122,7 +159,7 @@ running the computation with no engine at all.
 | `nub_interp` | nub's bytecode interpreter, metered |
 | `nub_jit_compile` | nub's JIT *emission* only (see below) |
 | `polkavm64_interpreter` | the closest interpreter comparison: same ISA family, same problem |
-| `polkavm64_recompiler_*` | the closest JIT comparison, at three metering levels |
+| `polkavm64_recompiler_*` | the closest JIT comparison, across metering levels and cost models |
 | `wasmtime_cranelift` | the optimizing-JIT ceiling: how much code quality a single-pass design gives up |
 | `wasmtime_cranelift_fuel` | the same, metered |
 | `wasmtime_winch` | a second single-pass data point, free (same crate) |

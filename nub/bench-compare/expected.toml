@@ -1,0 +1,17 @@
+# Golden return values, one per program.
+#
+# Cross-engine agreement (checked separately) catches a silently
+# miscompiled guest. This file catches the other direction: someone
+# changing a kernel constant, where every engine would agree on the
+# new wrong answer. Regenerate with `validate --write` and review.
+
+"blake2b" = 3995031025
+"ecrecover" = 1
+"ed25519" = 1
+"fri-fold-tree" = 937850612
+"goldilocks-mul" = 754400855
+"keccak" = 971309657
+"mini-verifier" = 4186948779
+"poly-eval" = 31077602
+"poseidon2-perm" = 1021522262
+"prime-sieve" = 9592
