@@ -9,6 +9,5 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 nub-rt = { path = "../../nub-rt" }
 
-
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

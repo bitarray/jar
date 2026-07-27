@@ -7,9 +7,15 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-sha3 = { version = "0.10", default-features = false }
+# Pinned exactly. The `(return_value, gas)` vectors in nub-bench and
+# javm-guest-tests are a function of the emitted instruction stream,
+# so they depend on this crate's exact version as much as on rustc's
+# (pinned in rust-toolchain.toml). A caret range let the standalone
+# nub repo resolve a newer patch release and silently shift ed25519's
+# gas by 3.3x. Bumping is fine — but it is a deliberate act that
+# re-pins the vectors in the same commit.
+sha3 = { version = "=0.10.8", default-features = false }
 nub-rt = { path = "../../nub-rt" }
-
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }
