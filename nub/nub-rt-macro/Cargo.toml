@@ -15,7 +15,10 @@ quote = "1"
 proc-macro2 = "1"
 
 [dev-dependencies]
-nub-rt = { workspace = true }
+# Path dep, not `workspace = true`: this manifest lives inside the mirror
+# boundary and must resolve identically in the standalone nub repo, whose
+# root has no `nub-rt` entry. (Dev-dep cycle with nub-rt is fine.)
+nub-rt = { path = "../nub-rt" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }
