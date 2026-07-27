@@ -21,6 +21,10 @@ pub struct Record {
     pub program: String,
     pub engine: String,
     pub metered: bool,
+    /// See `Caps::rebuilds_per_run`. Marks a row whose `runtime` figure
+    /// still contains per-invocation setup.
+    #[serde(default)]
+    pub rebuilds_per_run: bool,
     pub samples: usize,
     /// Median, in nanoseconds. The median rather than the mean: a
     /// stray scheduler preemption adds a long tail but never a short
@@ -39,6 +43,7 @@ impl Record {
         program: &str,
         engine: &str,
         metered: bool,
+        rebuilds_per_run: bool,
         samples: &[Duration],
     ) -> Self {
         let mut ns: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1e9).collect();
@@ -48,6 +53,7 @@ impl Record {
             program: program.into(),
             engine: engine.into(),
             metered,
+            rebuilds_per_run,
             samples: ns.len(),
             median_ns: ns[ns.len() / 2],
             min_ns: *ns.first().unwrap_or(&0.0),
@@ -138,7 +144,13 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                 "\nSteady-state execution: one instance, invoked repeatedly. How fast \
                  the engine *executes*, with instantiation excluded.\n\n\
                  Rows are absent where a program cannot be re-run in one instance \
-                 (the three guests with a never-freeing bump arena).\n"
+                 (the three guests with a never-freeing bump arena).\n\n\
+                 **\u{2020} — this row still contains per-invocation setup.** nub's \
+                 invocation model builds a fresh frame and address space on every \
+                 call by design, so there is no warm state to hoist out. Its figure \
+                 is therefore *not* comparable to a row that reuses one warm \
+                 instance; compare it against those rows' `invoke` figures instead, \
+                 which also pay instantiation.\n"
             }
             "compilation" => {
                 "\nTurning the program into executable form. Engine construction is \
@@ -166,8 +178,13 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                     Some(n) if n > 0.0 => format!("{:.1}x", r.median_ns / n),
                     _ => "-".into(),
                 };
+                let caveat = if r.rebuilds_per_run && kind == "runtime" {
+                    " \u{2020}"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
-                    "| `{}` | {} | {} | {:.2}x | {} |\n",
+                    "| `{}`{caveat} | {} | {} | {:.2}x | {} |\n",
                     r.engine,
                     if r.metered { "yes" } else { "no" },
                     format_duration(r.median_ns),
@@ -271,12 +288,17 @@ fn headline(records: &[Record]) -> String {
     }
     out.push_str("\nBold = fastest for that program; the multiple is versus it.\n\n");
 
-    // The same rows, warm. Splitting these apart is what separates
-    // "our generated code is slower" from "our cold start is more
-    // expensive" — two very different problems that one combined number
-    // would blur together.
+    // The same rows minus compilation. `invoke`, not `runtime`: every
+    // engine pays instantiation in `invoke`, whereas `runtime` hoists it
+    // out for engines that can — and nub cannot, since it builds a fresh
+    // frame per call. Using `runtime` here would compare nub's
+    // setup-inclusive figure against everyone else's warm one.
+    //
+    // Splitting this out is what separates "our generated code is
+    // slower" from "our compile is more expensive" — different problems
+    // with different fixes, which one combined number would blur.
     let mut warm: BTreeMap<(&str, &str), f64> = BTreeMap::new();
-    for r in records.iter().filter(|r| r.kind == "runtime") {
+    for r in records.iter().filter(|r| r.kind == "invoke") {
         if HEADLINE_ROWS.contains(&r.engine.as_str()) {
             warm.insert((&r.program, &r.engine), r.median_ns);
         }
@@ -284,9 +306,12 @@ fn headline(records: &[Record]) -> String {
     if !warm.is_empty() {
         out.push_str(
             "### Where that time goes\n\n\
-             Steady-state execution for the same rows, with compilation and \
-             instantiation excluded. The difference against the table above is \
-             each engine's cold-start cost.\n\n",
+             The same rows with **compilation excluded** — a fresh instance per \
+             sample, then execute. Every engine pays instantiation here, so this \
+             is like-for-like even for nub, which rebuilds its frame on every \
+             call and therefore has no warm state to hoist out.\n\n\
+             The bracketed figure is the difference against the table above: what \
+             compilation costs that engine.\n\n",
         );
         out.push_str("| Program |");
         for e in HEADLINE_ROWS {
@@ -302,7 +327,7 @@ fn headline(records: &[Record]) -> String {
             for e in HEADLINE_ROWS {
                 match (warm.get(&(p, *e)), cell.get(&(p, *e))) {
                     (Some(w), Some(total)) => out.push_str(&format!(
-                        " {} (+{} cold) |",
+                        " {} (+{} compile) |",
                         format_duration(*w),
                         format_duration((total - w).max(0.0))
                     )),

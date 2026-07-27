@@ -258,8 +258,10 @@ mod sandbox {
         fn caps(&self) -> Caps {
             // Compiling happens lazily inside the guest on first entry,
             // so there is no host-side compile step to time here —
-            // `nub_jit_compile` is that measurement.
-            Caps::new().metered().preloaded()
+            // `nub_jit_compile` is that measurement. And every invoke
+            // builds a fresh frame, so `spawn` cannot hoist setup out
+            // of the timed region the way it can for other engines.
+            Caps::new().metered().preloaded().rebuilds_per_run()
         }
         fn create(&self) -> Result<Box<dyn BcCompiler>> {
             nub()?;

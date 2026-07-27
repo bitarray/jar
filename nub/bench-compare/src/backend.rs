@@ -90,6 +90,16 @@ pub struct Caps {
     /// Interpreter-class: orders of magnitude slower, so the harness
     /// takes fewer samples rather than making everyone wait.
     pub slow: bool,
+    /// This engine rebuilds its execution context on every `run`, so
+    /// `spawn` cannot hoist that work out of the timed region.
+    ///
+    /// True for `nub_jit`: nub's invocation model builds a fresh frame
+    /// and address space per call, by design. That makes its `runtime`
+    /// row **not** comparable to an engine whose `runtime` reuses one
+    /// warm instance — nub pays full setup on every sample and the
+    /// others do not. The report flags it rather than quietly printing
+    /// two different measurements in one column.
+    pub rebuilds_per_run: bool,
 }
 
 impl Caps {
@@ -98,6 +108,7 @@ impl Caps {
             compiles: true,
             metered: false,
             slow: false,
+            rebuilds_per_run: false,
         }
     }
     pub const fn metered(mut self) -> Self {
@@ -110,6 +121,11 @@ impl Caps {
     }
     pub const fn preloaded(mut self) -> Self {
         self.compiles = false;
+        self
+    }
+    /// See [`Caps::rebuilds_per_run`].
+    pub const fn rebuilds_per_run(mut self) -> Self {
+        self.rebuilds_per_run = true;
         self
     }
 }

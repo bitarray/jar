@@ -113,6 +113,14 @@ while Wasmtime maps a copy-on-write image. Reporting only one would
 present a difference in *memory strategy* as a difference in
 *execution speed*.
 
+**`nub_jit` has no meaningful `runtime` row.** nub's invocation model
+builds a fresh frame and address space on every call by design, so
+there is no warm state for `spawn` to hoist out — its `runtime` figure
+still contains per-invocation setup, and comparing it against an engine
+that reuses one warm instance would understate nub. The report marks
+that row with a dagger, and the headline decomposition uses `invoke`
+instead, where every engine pays instantiation.
+
 Some `runtime` rows are absent: three guests carry a never-freeing bump
 arena and cannot be re-run in one instance, so they are skipped with a
 logged reason rather than reported wrongly.

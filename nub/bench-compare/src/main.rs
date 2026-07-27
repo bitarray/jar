@@ -394,6 +394,7 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
                             program,
                             engine.name(),
                             engine.caps().metered,
+                            engine.caps().rebuilds_per_run,
                             &samples,
                         );
                         println!("{id:60} {:>12}", report::format_duration(record.median_ns));
