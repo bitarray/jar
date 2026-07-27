@@ -1535,6 +1535,10 @@ name = "nub-kernel"
 version = "0.1.0"
 
 [[package]]
+name = "nub-program"
+version = "0.1.0"
+
+[[package]]
 name = "nub-recompiler-x86"
 version = "0.1.0"
 dependencies = [

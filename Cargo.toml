@@ -15,6 +15,7 @@ members = [
     "nub/nub-host-guest-macro",
     "nub/nub-arch-local",
     "nub/nub-kernel",
+    "nub/nub-program",
     "rust/subsoil",
     "rust/subsoil-derive",
     "rust/javm-guest-tests",

@@ -1,0 +1,9 @@
+[package]
+name = "nub-program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PVM2 program blob: flat code + region geometry + entry points, plus the PVM2 address-space ABI constants. Personality-free, zero dependencies."
+
+[dependencies]
