@@ -22,41 +22,6 @@ use nub_rt as _;
 extern crate alloc;
 
 #[cfg(target_os = "none")]
-mod bump_alloc {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::cell::UnsafeCell;
-
-    const HEAP_SIZE: usize = 256 * 1024;
-
-    pub struct BumpAlloc {
-        heap: UnsafeCell<[u8; HEAP_SIZE]>,
-        pos: UnsafeCell<usize>,
-    }
-
-    unsafe impl Sync for BumpAlloc {}
-
-    unsafe impl GlobalAlloc for BumpAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let pos = unsafe { &mut *self.pos.get() };
-            let aligned = (*pos + layout.align() - 1) & !(layout.align() - 1);
-            let next = aligned + layout.size();
-            if next > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            *pos = next;
-            unsafe { (*self.heap.get()).as_mut_ptr().add(aligned) }
-        }
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-    }
-
-    #[global_allocator]
-    static ALLOC: BumpAlloc = BumpAlloc {
-        heap: UnsafeCell::new([0; HEAP_SIZE]),
-        pos: UnsafeCell::new(0),
-    };
-}
-
-#[cfg(target_os = "none")]
 use alloc::vec::Vec;
 
 use gp::{add, canonical, mul, permute, sub, ONE, ZERO};

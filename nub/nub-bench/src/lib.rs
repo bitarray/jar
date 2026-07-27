@@ -71,7 +71,7 @@ pub const PROGRAMS: &[Program] = &[
         name: "ecrecover",
         blob: include_bytes!(env!("ECRECOVER_BLOB")),
         expected_value: 0x1,
-        expected_gas: 6_811_560,
+        expected_gas: 6_811_627,
     },
     Program {
         name: "goldilocks_mul",
@@ -95,13 +95,13 @@ pub const PROGRAMS: &[Program] = &[
         name: "poly_eval",
         blob: include_bytes!(env!("POLY_EVAL_BLOB")),
         expected_value: 0x01da_34e2,
-        expected_gas: 9_005_925,
+        expected_gas: 9_005_991,
     },
     Program {
         name: "fri_fold_tree",
         blob: include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
         expected_value: 0x37e6_76f4,
-        expected_gas: 6_194_372,
+        expected_gas: 6_194_439,
     },
 ];
 

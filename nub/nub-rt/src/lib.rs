@@ -4,6 +4,10 @@
 //! handler, and a default trap `_start` (so guests link without
 //! defining one themselves).
 //!
+//! Programs that need `alloc` get it from
+//! [`bump_allocator!`](crate::bump_allocator), which installs a
+//! resettable bump arena.
+//!
 //! Personality-free: a program built against this crate is a plain
 //! PVM2 program. Whether the engine running it has a capability system
 //! is not its concern.
@@ -26,6 +30,8 @@
 //! must never see this crate's `unimp`.
 
 #![no_std]
+
+pub mod alloc;
 
 pub use nub_rt_macro::endpoint;
 
