@@ -9,7 +9,13 @@
 //! [`InvocationResult`]. This is the in-process counterpart to
 //! nub-arch-x86's JIT-driven `enter_frame` / `build_frame_runtime`.
 //! The personality lowers its own object types into a `ProgramSpec`
-//! (JAVM: `javm::JavmLocal`'s `run_instance`).
+//! (JAVM: `javm::JavmLocal`'s `run_instance`). For a program with no
+//! personality at all, [`program::PreparedProgram`] lowers a
+//! `nub_program::ProgramBlob` directly.
+
+pub mod program;
+
+pub use program::{PrepareError, PreparedProgram, run_blob};
 
 use nub_arch_x86_abi::{InvocationResult, SCRATCHPAD_HEAD_LEN};
 use nub_exec::{

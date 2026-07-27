@@ -1,5 +1,5 @@
 [package]
-name = "bench-ecrecover"
+name = "bench-ed25519"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-nub-rt = { workspace = true }
+ed25519-compact = { version = "2", default-features = false }
+nub-rt = { path = "../../nub-rt" }
 
 
 [lints.rust]

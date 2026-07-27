@@ -1,5 +1,5 @@
 [package]
-name = "bench-prime-sieve"
+name = "bench-keccak"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +7,8 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-nub-rt = { workspace = true }
+sha3 = { version = "0.10", default-features = false }
+nub-rt = { path = "../../nub-rt" }
 
 
 [lints.rust]

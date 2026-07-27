@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" }
-nub-rt = { workspace = true }
+nub-rt = { path = "../../nub-rt" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

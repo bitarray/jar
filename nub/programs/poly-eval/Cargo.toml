@@ -1,5 +1,5 @@
 [package]
-name = "bench-poseidon2-perm"
+name = "bench-poly-eval"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" }
-nub-rt = { workspace = true }
+nub-rt = { path = "../../nub-rt" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

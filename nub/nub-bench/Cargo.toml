@@ -1,0 +1,30 @@
+[package]
+name = "nub-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "nub benchmarks and end-to-end coverage: the PVM2 programs in nub/programs, run through the interpreter and the JIT"
+
+[dependencies]
+nub-arch-local = { path = "../nub-arch-local" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+nub-exec = { path = "../nub-exec" }
+nub-program = { path = "../nub-program" }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+nub-recompiler-x86 = { path = "../nub-recompiler-x86" }
+
+[build-dependencies]
+nub-build = { path = "../nub-build" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "interp"
+harness = false
+
+[[bench]]
+name = "compile"
+harness = false

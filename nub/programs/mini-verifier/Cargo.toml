@@ -1,5 +1,5 @@
 [package]
-name = "bench-blake2b"
+name = "bench-mini-verifier"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,9 +7,8 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-blake2 = { version = "0.10", default-features = false }
-nub-rt = { workspace = true }
-
+gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" }
+nub-rt = { path = "../../nub-rt" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

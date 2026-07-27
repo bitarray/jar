@@ -1423,6 +1423,7 @@ dependencies = [
  "nub-arch-x86-abi",
  "nub-exec",
  "nub-kernel",
+ "nub-program",
 ]
 
 [[package]]
@@ -1445,6 +1446,19 @@ version = "0.1.0"
 dependencies = [
  "bytecheck",
  "rkyv",
+]
+
+[[package]]
+name = "nub-bench"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "nub-arch-local",
+ "nub-arch-x86-abi",
+ "nub-build",
+ "nub-exec",
+ "nub-program",
+ "nub-recompiler-x86",
 ]
 
 [[package]]
