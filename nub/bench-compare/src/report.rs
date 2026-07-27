@@ -90,6 +90,7 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
 
     let mut out = String::new();
     out.push_str("# nub benchmark comparison\n\n");
+    out.push_str(&headline(&records));
     out.push_str(&provenance(root)?);
     out.push_str(
         "\n## How to read this\n\n\
@@ -120,18 +121,24 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
     for (kind, programs) in &by_kind {
         out.push_str(&format!("\n## {kind}\n"));
         out.push_str(match kind.as_str() {
+            "oneshot" => {
+                "\nCompile **and** execute, from cold, every sample. The metric that \
+                 matches how a metered VM is actually used: work arrives as a blob \
+                 that must be compiled and then run, and each iteration pays both. \
+                 Engines that cache compilation internally are evicted first, so no \
+                 row skips the compile half.\n"
+            }
+            "invoke" => {
+                "\nCold invocation with compilation excluded: a fresh instance every \
+                 sample. Where an engine's *instantiation* strategy shows up. \
+                 Compare against `runtime` for the same row to see what a cold start \
+                 costs it.\n"
+            }
             "runtime" => {
                 "\nSteady-state execution: one instance, invoked repeatedly. How fast \
                  the engine *executes*, with instantiation excluded.\n\n\
                  Rows are absent where a program cannot be re-run in one instance \
                  (the three guests with a never-freeing bump arena).\n"
-            }
-            "oneshot" => {
-                "\nCold invocation: a fresh instance every sample. This is nub's real \
-                 production model — every invocation builds a new address space — and \
-                 it is where an engine's instantiation strategy shows up. Compare \
-                 against `runtime` for the same row to see what a cold start costs \
-                 that engine.\n"
             }
             "compilation" => {
                 "\nTurning the program into executable form. Engine construction is \
@@ -179,6 +186,135 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
         print!("{out}");
     }
     Ok(())
+}
+
+/// The rows the headline table covers: metered JIT/recompiler engines.
+///
+/// Metered because that is the configuration a blockchain VM actually
+/// ships; JIT because that is nub's bench target. `polkavm`'s Simple
+/// cost model is excluded here on purpose — only the `*_full` rows use a
+/// pipeline+cache model comparable to nub's, so those are the ones it is
+/// fair to line up against `nub_jit`.
+const HEADLINE_ROWS: &[&str] = &[
+    "nub_jit",
+    "polkavm64_recompiler_sync_gas_full",
+    "polkavm64_recompiler_async_gas_full",
+    "wasmtime_cranelift_fuel",
+];
+
+/// A program-by-engine matrix of compile+execute time, at the top of the
+/// report, because it is the number the engine is being built to win.
+fn headline(records: &[Record]) -> String {
+    let mut cell: BTreeMap<(&str, &str), f64> = BTreeMap::new();
+    let mut programs: Vec<&str> = Vec::new();
+    for r in records.iter().filter(|r| r.kind == "oneshot") {
+        if !HEADLINE_ROWS.contains(&r.engine.as_str()) {
+            continue;
+        }
+        if !programs.contains(&r.program.as_str()) {
+            programs.push(&r.program);
+        }
+        cell.insert((&r.program, &r.engine), r.median_ns);
+    }
+    if cell.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "## Compile + execute, metered JIT engines\n\n\
+         The bench target: each sample compiles the program and runs it, \
+         from cold, with metering on. That is how a metered VM is used when \
+         work arrives as a blob — the compile is not amortized away.\n\n\
+         Only cost models comparable to nub's appear here. PolkaVM's default \
+         `Simple` model is a flat per-instruction cost and is much cheaper to \
+         evaluate than nub's pipeline simulation, so the `*_full` rows \
+         (`CacheModel::L2Hit`, whose `memory_access_cost: 25` is exactly nub's \
+         `MEM_CYCLES_BASE`) are the like-for-like comparison. Full tables for \
+         every engine and every measurement kind follow below.\n\n",
+    );
+
+    out.push_str("| Program |");
+    for e in HEADLINE_ROWS {
+        out.push_str(&format!(" `{e}` |"));
+    }
+    out.push_str("\n|---|");
+    for _ in HEADLINE_ROWS {
+        out.push_str("--:|");
+    }
+    out.push('\n');
+
+    for p in &programs {
+        out.push_str(&format!("| {p} |"));
+        let best = HEADLINE_ROWS
+            .iter()
+            .filter_map(|e| cell.get(&(p, *e)))
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        for e in HEADLINE_ROWS {
+            match cell.get(&(p, *e)) {
+                Some(v) => {
+                    let mark = if (*v - best).abs() < f64::EPSILON {
+                        "**"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!(
+                        " {mark}{}{mark} ({:.2}x) |",
+                        format_duration(*v),
+                        v / best
+                    ));
+                }
+                None => out.push_str(" - |"),
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("\nBold = fastest for that program; the multiple is versus it.\n\n");
+
+    // The same rows, warm. Splitting these apart is what separates
+    // "our generated code is slower" from "our cold start is more
+    // expensive" — two very different problems that one combined number
+    // would blur together.
+    let mut warm: BTreeMap<(&str, &str), f64> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.kind == "runtime") {
+        if HEADLINE_ROWS.contains(&r.engine.as_str()) {
+            warm.insert((&r.program, &r.engine), r.median_ns);
+        }
+    }
+    if !warm.is_empty() {
+        out.push_str(
+            "### Where that time goes\n\n\
+             Steady-state execution for the same rows, with compilation and \
+             instantiation excluded. The difference against the table above is \
+             each engine's cold-start cost.\n\n",
+        );
+        out.push_str("| Program |");
+        for e in HEADLINE_ROWS {
+            out.push_str(&format!(" `{e}` |"));
+        }
+        out.push_str("\n|---|");
+        for _ in HEADLINE_ROWS {
+            out.push_str("--:|");
+        }
+        out.push('\n');
+        for p in &programs {
+            out.push_str(&format!("| {p} |"));
+            for e in HEADLINE_ROWS {
+                match (warm.get(&(p, *e)), cell.get(&(p, *e))) {
+                    (Some(w), Some(total)) => out.push_str(&format!(
+                        " {} (+{} cold) |",
+                        format_duration(*w),
+                        format_duration((total - w).max(0.0))
+                    )),
+                    (Some(w), None) => out.push_str(&format!(" {} |", format_duration(*w))),
+                    _ => out.push_str(" - |"),
+                }
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn provenance(root: &Path) -> Result<String> {

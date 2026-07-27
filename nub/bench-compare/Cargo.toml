@@ -51,6 +51,12 @@ wasmi = { version = "1.1", optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 nub-recompiler-x86 = { path = "../nub-recompiler-x86" }
+# The sandbox path for the `nub_jit` row.
+nub = { path = "../nub" }
+nub-flat = { path = "../nub-flat" }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.build-dependencies]
+nub-build = { path = "../nub-build" }
 
 # Interpreters are part of the comparison, so the harness itself must be
 # optimized or the numbers are meaningless. `main` refuses to run a debug

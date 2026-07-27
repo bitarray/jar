@@ -145,6 +145,18 @@ pub trait Compiler {
 pub trait Compiled {
     /// Build a fresh instance. Untimed — see the module docs.
     fn spawn(&self) -> Result<Box<dyn Instance>>;
+
+    /// Discard any cached compilation, so the next run recompiles.
+    ///
+    /// Only `nub_jit` needs this: it compiles lazily *inside the guest*
+    /// on first entry and caches the result per program, so without an
+    /// evict its second sample would measure execution alone while
+    /// every other engine's `oneshot` sample really does recompile.
+    /// Default is a no-op, which is correct for engines that compile
+    /// eagerly in [`Compiler::compile`].
+    fn reset_compilation(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// An instance, ready to execute.

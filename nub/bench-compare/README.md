@@ -90,15 +90,28 @@ work on the wrong side of it silently favours one engine:
 | kind | what it measures |
 |---|---|
 | `runtime` | steady-state execution: one instance, invoked repeatedly |
-| `oneshot` | cold invocation: a fresh instance every sample |
+| `invoke` | cold invocation: a fresh instance every sample, compilation excluded |
+| `oneshot` | **compile and execute**, from cold, every sample |
 | `compilation` | turning a program into executable form |
 
-`runtime` and `oneshot` differ by roughly 2x for nub's interpreter,
+`oneshot` is the headline: it is how a metered VM is actually used when
+work arrives as a blob that must be compiled and then run, so the
+compile is not amortized away. Engines that cache compilation
+internally are evicted first — `nub_jit` compiles lazily *inside the
+guest* and caches per program, so without `Compiled::reset_compilation`
+its second sample would measure execution alone while every other row
+really did recompile.
+
+Read `oneshot` together with `runtime`. Their difference is cold-start
+cost, and conflating the two would blur "our generated code is slower"
+together with "our cold start is more expensive" — different problems
+with different fixes.
+
+`runtime` and `invoke` differ by roughly 2x for nub's interpreter,
 because a fresh instance allocates and copies a flat address space
 while Wasmtime maps a copy-on-write image. Reporting only one would
 present a difference in *memory strategy* as a difference in
-*execution speed*. `oneshot` is nub's real production model; `runtime`
-is what the engine can do once warm. Read both.
+*execution speed*.
 
 Some `runtime` rows are absent: three guests carry a never-freeing bump
 arena and cannot be re-run in one instance, so they are skipped with a
@@ -157,7 +170,8 @@ running the computation with no engine at all.
 |---|---|
 | `native` | the floor — this computation with no engine |
 | `nub_interp` | nub's bytecode interpreter, metered |
-| `nub_jit_compile` | nub's JIT *emission* only (see below) |
+| `nub_jit` | nub's x86-64 JIT executing in the KVM sandbox, metered |
+| `nub_jit_compile` | nub's JIT *emission* alone, with no sandbox |
 | `polkavm64_interpreter` | the closest interpreter comparison: same ISA family, same problem |
 | `polkavm64_recompiler_*` | the closest JIT comparison, across metering levels and cost models |
 | `wasmtime_cranelift` | the optimizing-JIT ceiling: how much code quality a single-pass design gives up |
@@ -165,12 +179,17 @@ running the computation with no engine at all.
 | `wasmtime_winch` | a second single-pass data point, free (same crate) |
 | `wasmer_singlepass` | the design analogue — is nub's codegen competitive with a mature single-pass compiler? |
 
-There is deliberately **no `nub_jit` runtime row yet.**
-`nub-recompiler-x86` is a pure bytes producer, so its *compile* time is
-measurable with no sandbox; executing its output needs the ring-0
-substrate in `nub-arch-x86`, which needs a `GuestPersonality`. Until
-nub ships its reference personality, `nub_jit_compile` reports emission
-only, and says so rather than silently measuring something else.
+`nub_jit` runs under the **flat personality** (`nub-flat`), nub's
+reference `Personality`/`GuestPersonality` pair. Executing recompiled
+code needs the ring-0 substrate in `nub-arch-x86`, which needs a
+personality — flat is the smallest one that exists, so the row measures
+nub's engine rather than any particular kernel's semantics. It needs
+`/dev/kvm`; without it the row drops out of the registry rather than
+failing every measurement.
+
+`nub_jit_compile` remains alongside it, measuring emission alone with
+no sandbox. The two answer different questions: how fast the
+recompiler *emits*, versus what a full cold invocation costs.
 
 ## Engines deliberately excluded
 

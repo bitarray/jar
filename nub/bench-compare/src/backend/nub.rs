@@ -1,15 +1,20 @@
 //! The subject: nub's PVM2 interpreter, and its JIT's compile path.
 //!
-//! Two rows today:
+//! Three rows:
 //!
 //! - `nub_interp` — the byte-code interpreter, end to end.
-//! - `nub_jit_compile` — x86-64 JIT *emission* only. The recompiler is
-//!   a pure bytes producer, so its compile time is measurable with no
-//!   sandbox and no guest kernel. Executing that output needs the ring-0
-//!   substrate in `nub-arch-x86`, which needs a `GuestPersonality`;
-//!   until nub ships its reference personality there is no
-//!   `nub_jit` runtime row, and `spawn` here reports that honestly
-//!   rather than silently measuring something else.
+//! - `nub_jit_compile` — x86-64 JIT *emission* only, measured directly
+//!   against the recompiler (a pure bytes producer), with no sandbox.
+//! - `nub_jit` — the JIT actually executing, inside the KVM sandbox,
+//!   under the flat reference personality. This is the row the whole
+//!   `nub-flat` crate exists to make possible: running recompiled code
+//!   needs the ring-0 substrate in `nub-arch-x86`, which needs a
+//!   `GuestPersonality`.
+//!
+//! The sandbox is a process-wide singleton — the guest-VA window is a
+//! single reservation that is never released, even after drop — so
+//! every `nub_jit` measurement shares one, and the harness runs one row
+//! per process anyway.
 //!
 //! Both rows are metered. nub has no way to turn gas off, and adding
 //! one would fork the interpreter's hottest loop for a path nothing in
@@ -39,7 +44,14 @@ const EXIT_HOST_CALL: u32 = 4;
 pub fn engines() -> Vec<Box<dyn Engine>> {
     let mut v: Vec<Box<dyn Engine>> = vec![Box::new(NubInterp)];
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    v.push(Box::new(jit::NubJitCompile));
+    {
+        v.push(Box::new(jit::NubJitCompile));
+        // Needs /dev/kvm. Absent it, the row drops out rather than
+        // failing every measurement.
+        if std::path::Path::new("/dev/kvm").exists() {
+            v.push(Box::new(sandbox::NubJit));
+        }
+    }
     v
 }
 
@@ -203,10 +215,120 @@ mod jit {
 
     impl Compiled for JitModule {
         fn spawn(&self) -> Result<Box<dyn Instance>> {
-            bail!(
-                "nub_jit_compile measures emission only; executing JIT output needs the \
-                 ring-0 substrate in nub-arch-x86, i.e. a GuestPersonality"
-            )
+            bail!("nub_jit_compile measures emission only; the executing row is `nub_jit`")
+        }
+    }
+}
+
+// ---- JIT (executing, in the KVM sandbox) ------------------------------
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod sandbox {
+    use super::*;
+    use std::sync::OnceLock;
+
+    /// Path to the flat personality's guest kernel, built by `build.rs`.
+    const GUEST_BLOB: &str = env!("NUB_FLAT_GUEST_BLOB");
+
+    /// One sandbox per process, forever. `create_hyperlight` reserves a
+    /// process-wide guest-VA window that is never released, so a second
+    /// construction fails even after the first is dropped.
+    fn nub() -> Result<&'static nub::Nub<nub_flat::Flat>> {
+        static SANDBOX: OnceLock<std::result::Result<nub::Nub<nub_flat::Flat>, String>> =
+            OnceLock::new();
+        SANDBOX
+            .get_or_init(|| {
+                nub::Nub::create_hyperlight(GUEST_BLOB, nub::NubOptions::default())
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("create the flat sandbox: {e}"))
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct NubJit;
+
+    impl Engine for NubJit {
+        fn name(&self) -> &'static str {
+            "nub_jit"
+        }
+        fn family(&self) -> Family {
+            Family::Pvm2
+        }
+        fn caps(&self) -> Caps {
+            // Compiling happens lazily inside the guest on first entry,
+            // so there is no host-side compile step to time here —
+            // `nub_jit_compile` is that measurement.
+            Caps::new().metered().preloaded()
+        }
+        fn create(&self) -> Result<Box<dyn BcCompiler>> {
+            nub()?;
+            Ok(Box::new(NubJit))
+        }
+    }
+
+    impl BcCompiler for NubJit {
+        fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            // Publishing is idempotent and content-addressed, so
+            // re-publishing the same program across samples is a
+            // hash-table hit in the guest.
+            let hash = nub()?
+                .put_object(&bytes)
+                .map_err(|e| anyhow::anyhow!("publish: {e}"))?;
+            Ok(Box::new(JitSandboxModule { hash }))
+        }
+    }
+
+    struct JitSandboxModule {
+        hash: nub::ObjHash,
+    }
+
+    impl Compiled for JitSandboxModule {
+        fn spawn(&self) -> Result<Box<dyn Instance>> {
+            // The guest builds its frame per invocation, so there is
+            // nothing to instantiate ahead of time. That makes
+            // `nub_jit`'s `runtime` and `oneshot` rows identical by
+            // construction — the honest reflection of a design where
+            // every invocation gets a fresh address space.
+            Ok(Box::new(JitSandboxInstance {
+                hash: self.hash,
+                gas_used: 0,
+            }))
+        }
+
+        /// Drop every compiled image in the guest, so the next entry
+        /// pays a full recompile.
+        fn reset_compilation(&self) -> Result<()> {
+            nub()?
+                .evict_jit_all()
+                .map_err(|e| anyhow::anyhow!("evict jit: {e}"))
+        }
+    }
+
+    struct JitSandboxInstance {
+        hash: nub::ObjHash,
+        gas_used: u64,
+    }
+
+    impl Instance for JitSandboxInstance {
+        fn run(&mut self) -> Result<u32> {
+            let result = nub()?
+                .invoke_cached(self.hash, 0, [0; 4], GAS)
+                .map_err(|e| anyhow::anyhow!("invoke: {e}"))?;
+            if result.exit_reason != EXIT_HOST_CALL || result.exit_arg != 0 {
+                bail!(
+                    "did not halt cleanly: exit_reason={} exit_arg={}",
+                    result.exit_reason,
+                    result.exit_arg
+                );
+            }
+            self.gas_used = GAS - result.gas_remaining;
+            Ok(result.return_value as u32)
+        }
+
+        fn gas_used(&self) -> Option<u64> {
+            Some(self.gas_used)
         }
     }
 }

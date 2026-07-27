@@ -65,7 +65,7 @@ enum Command {
         #[arg(
             long,
             value_delimiter = ',',
-            default_value = "runtime,oneshot,compilation"
+            default_value = "runtime,invoke,oneshot,compilation"
         )]
         kinds: Vec<String>,
     },
@@ -292,12 +292,15 @@ fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<V
 
 /// Cold invocation: a fresh instance every sample, timed through `run`.
 ///
+/// Named `invoke` rather than `oneshot` because it excludes compilation;
+/// [`measure_oneshot`] is the one that includes it.
+///
 /// This is nub's real production model — every invocation builds a new
 /// address space — and it is where an engine's instantiation strategy
 /// shows up. Measured for all engines identically, so the comparison
 /// is like-for-like even though the absolute penalty is very different
 /// per engine (for nub's interpreter it is roughly 2x its warm cost).
-fn measure_oneshot(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+fn measure_invoke(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
     let compiled = engine.create()?.compile(path)?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
@@ -321,6 +324,30 @@ fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Resu
         let compiled = compiler.compile(path)?;
         out.push(start.elapsed());
         std::hint::black_box(&compiled);
+    }
+    Ok(out)
+}
+
+/// Compile **and** execute, from cold, every sample.
+///
+/// This is the metric that matches how a metered VM is actually used
+/// when work arrives as a blob that must be compiled and then run —
+/// each iteration pays both. Engines that cache their compilation
+/// internally are reset first (see [`Compiled::reset_compilation`]), so
+/// no row gets to skip the compile half.
+fn measure_oneshot(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    let compiler = engine.create()?;
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        // Untimed: put the engine back in its cold state.
+        engine.create()?.compile(path)?.reset_compilation()?;
+
+        let start = Instant::now();
+        let compiled = compiler.compile(path)?;
+        let mut instance = compiled.spawn()?;
+        let value = instance.run()?;
+        out.push(start.elapsed());
+        std::hint::black_box(value);
     }
     Ok(out)
 }
@@ -354,6 +381,7 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
                 };
                 let result = match kind.as_str() {
                     "runtime" => measure_runtime(engine.as_ref(), &path, samples),
+                    "invoke" => measure_invoke(engine.as_ref(), &path, samples),
                     "oneshot" => measure_oneshot(engine.as_ref(), &path, samples),
                     "compilation" => measure_compilation(engine.as_ref(), &path, samples),
                     other => bail!("unknown kind `{other}` (want runtime, oneshot or compilation)"),
