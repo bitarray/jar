@@ -60,8 +60,8 @@ impl FlatFrame {
             regs[7 + i] = *v;
         }
 
-        let mem = FlatMem::new(&program.blob.memory_image());
         let pc = ep.entry_pc;
+        let mem = FlatMem::new(Arc::clone(&program));
         Ok(FlatFrame {
             pc,
             regs,

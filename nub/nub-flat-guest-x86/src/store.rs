@@ -8,6 +8,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use nub_arch_x86::jit_cache::{CompiledImage, JitSlot};
 use nub_arch_x86::page_alloc::PageBuf;
@@ -17,6 +18,8 @@ use nub_flat::hash::content_hash;
 use nub_program::ProgramBlob;
 use spin::Mutex as SpinMutex;
 
+use crate::mem::Page;
+
 /// Diagnostic error codes. The RPC wrapper discards them and ships the
 /// all-`0xFF` sentinel, so they exist only for debugging.
 pub const ERR_DECODE: u32 = 1;
@@ -25,6 +28,10 @@ pub const ERR_DECODE: u32 = 1;
 /// code, and its compiled-JIT slot.
 pub struct PublishedProgram {
     pub blob: ProgramBlob,
+    /// The program's initial data image, page-aligned, built once here
+    /// and shared read-only by every frame. Per-frame isolation is the
+    /// CoW overlay's job — see [`crate::mem::FlatMem`].
+    data: Vec<Box<Page>>,
     /// Page-aligned, page-rounded copy of `blob.code`.
     ///
     /// The frame's page table maps the code region directly at its
@@ -51,11 +58,18 @@ impl PublishedProgram {
     fn new(blob: ProgramBlob) -> Option<Self> {
         let mut code = PageBuf::new(blob.code.len().max(1))?;
         code.as_mut_slice()[..blob.code.len()].copy_from_slice(&blob.code);
+        let data = Page::split(&blob.memory_image());
         Some(PublishedProgram {
             blob,
+            data,
             code,
             jit: SpinMutex::new(None),
         })
+    }
+
+    /// The shared, immutable initial data image.
+    pub fn data_pages(&self) -> &[Box<Page>] {
+        &self.data
     }
 
     /// The page-aligned code region and its physical address.
