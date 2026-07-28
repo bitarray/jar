@@ -77,6 +77,8 @@ pub enum Family {
     Wasm32,
     /// A polkavm program blob (RV64EMAC).
     Polkavm64,
+    /// A Solana sBPF (SBPFv3) ELF.
+    Sbf,
 }
 
 impl Family {
@@ -86,6 +88,7 @@ impl Family {
             Family::Native => "native",
             Family::Wasm32 => "wasm32",
             Family::Polkavm64 => "polkavm64",
+            Family::Sbf => "sbpf",
         }
     }
 
@@ -95,6 +98,7 @@ impl Family {
             Family::Native => "so",
             Family::Wasm32 => "wasm",
             Family::Polkavm64 => "polkavm",
+            Family::Sbf => "sbpf",
         }
     }
 
@@ -283,6 +287,9 @@ pub fn registry() -> Vec<Box<dyn Engine>> {
     #[cfg(feature = "wasmi-engine")]
     engines.extend(crate::backend::wasmi::engines());
 
+    #[cfg(feature = "sbpf-engine")]
+    engines.extend(crate::backend::sbpf::engines());
+
     engines
 }
 
@@ -291,6 +298,8 @@ pub mod nub;
 
 #[cfg(feature = "polkavm-engine")]
 pub mod polkavm;
+#[cfg(feature = "sbpf-engine")]
+pub mod sbpf;
 #[cfg(feature = "wasmer-engine")]
 pub mod wasmer;
 #[cfg(feature = "wasmi-engine")]

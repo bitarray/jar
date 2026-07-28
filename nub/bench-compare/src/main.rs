@@ -180,12 +180,13 @@ fn list(root: &Path) -> Result<()> {
             Family::Native,
             Family::Wasm32,
             Family::Polkavm64,
+            Family::Sbf,
         ]
         .into_iter()
         .filter(|f| f.artifact_path(root, p).exists())
         .map(|f| f.dir())
         .collect();
-        if have.len() < 4 {
+        if have.len() < 5 {
             missing += 1;
         }
         println!("  {p:20} artifacts: {}", have.join(" "));

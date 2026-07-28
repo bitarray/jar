@@ -10,18 +10,20 @@ Only cost models comparable to nub's appear here. PolkaVM's default `Simple` mod
 
 A cell carries a `±` only when its confidence interval is wider than 2% of the median. Where that happens the cell is a range, not a number, and two engines inside each other's interval are not separable by this measurement.
 
-| Program | `nub_jit` | `polkavm64_recompiler_sync_gas_full` | `polkavm64_recompiler_async_gas_full` | `wasmtime_cranelift_fuel` |
-|---|--:|--:|--:|--:|
-| fri-fold-tree | **532.82 µs** (1.00x) | 628.51 µs (1.18x) | 612.55 µs (1.15x) | 12.24 ms (22.97x) |
-| ecrecover | **1.19 ms** (1.00x) | 1.85 ms (1.55x) | 1.83 ms (1.54x) | 44.56 ms (37.39x) |
-| ed25519 | **500.20 µs** (1.00x) | 650.68 µs (1.30x) | 650.67 µs (1.30x) | 30.01 ms (59.99x) |
-| blake2b | **64.79 µs** (1.00x) | 115.93 µs (1.79x) | 116.60 µs (1.80x) | 3.49 ms (53.91x) |
-| prime-sieve | 228.91 µs (1.03x) | 234.41 µs (1.05x) | **222.35 µs** (1.00x) | 1.02 ms (4.59x) |
-| mini-verifier | **542.58 µs** (1.00x) | 653.22 µs (1.20x) | 652.81 µs (1.20x) | 3.85 ms (7.09x) |
-| poly-eval | **1.13 ms** (1.00x) | 1.26 ms (1.12x) | 1.31 ms (1.16x) | 9.97 ms (8.83x) |
-| poseidon2-perm | **1.18 ms** (1.00x) | 1.43 ms (1.21x) | 1.43 ms (1.21x) | 4.40 ms (3.73x) |
-| keccak | **43.22 µs** (1.00x) | 58.55 µs (1.35x) | 58.94 µs (1.36x) | 2.90 ms (66.99x) |
-| goldilocks-mul | **353.01 µs** (1.00x) | 389.67 µs (1.10x) | 389.41 µs ±3% (1.10x) | 1.02 ms (2.88x) |
+**`sbpf_jit` is not like-for-like on every row.** It is missing three kernels the sBPF platform cannot express, and on the five `gp`-backed ones it runs a different multiply, because LLVM's BPF backend has no widening multiply. Those cells measure a different program, not only a different VM — see *Reading the `sbpf_*` rows* below before drawing a conclusion from them.
+
+| Program | `nub_jit` | `polkavm64_recompiler_sync_gas_full` | `polkavm64_recompiler_async_gas_full` | `wasmtime_cranelift_fuel` | `sbpf_jit` |
+|---|--:|--:|--:|--:|--:|
+| ecrecover | **1.19 ms** (1.00x) | 1.85 ms (1.55x) | 1.83 ms (1.53x) | 44.66 ms (37.42x) | - |
+| mini-verifier | **544.68 µs** (1.00x) | 623.64 µs (1.14x) | 653.72 µs (1.20x) | 3.83 ms (7.04x) | 6.42 ms (11.79x) |
+| poseidon2-perm | **1.18 ms** (1.00x) | 1.45 ms (1.23x) | 1.47 ms (1.25x) | 4.43 ms (3.76x) | 16.02 ms (13.60x) |
+| keccak | **42.72 µs** (1.00x) | 59.35 µs (1.39x) | 58.51 µs (1.37x) | 2.91 ms (68.15x) | 234.89 µs (5.50x) |
+| blake2b | **65.04 µs** (1.00x) | 117.69 µs (1.81x) | 118.27 µs (1.82x) | 3.48 ms (53.49x) | 183.84 µs (2.83x) |
+| goldilocks-mul | **351.43 µs** (1.00x) | 359.42 µs (1.02x) | 378.53 µs (1.08x) | 1.02 ms (2.90x) | 677.80 µs (1.93x) |
+| prime-sieve | **226.42 µs** (1.00x) | 231.43 µs (1.02x) | 228.66 µs (1.01x) | 1.04 ms (4.59x) | - |
+| fri-fold-tree | **537.82 µs** (1.00x) | 634.55 µs (1.18x) | 631.34 µs (1.17x) | 12.25 ms (22.77x) | 5.99 ms (11.13x) |
+| poly-eval | **1.14 ms** (1.00x) | 1.20 ms (1.05x) | 1.30 ms (1.14x) | 9.97 ms (8.72x) | 4.83 ms (4.22x) |
+| ed25519 | **495.11 µs** (1.00x) | 658.03 µs (1.33x) | 647.25 µs (1.31x) | 29.88 ms (60.36x) | - |
 
 Bold = fastest for that program; the multiple is versus it.
 
@@ -31,18 +33,18 @@ The same rows with **compilation excluded** — a fresh instance per sample, the
 
 The bracketed figure is the difference against the table above: what the recompile costs that engine.
 
-| Program | `nub_jit` | `polkavm64_recompiler_sync_gas_full` | `polkavm64_recompiler_async_gas_full` | `wasmtime_cranelift_fuel` |
-|---|--:|--:|--:|--:|
-| fri-fold-tree | 452.27 µs (+80.55 µs recompile) | 500.71 µs (+127.80 µs recompile) | 498.88 µs (+113.68 µs recompile) | 773.91 µs (+11.47 ms recompile) |
-| ecrecover | 370.80 µs (+820.84 µs recompile) | 333.74 µs (+1.52 ms recompile) | 334.04 µs (+1.50 ms recompile) | 270.38 µs (+44.29 ms recompile) |
-| ed25519 | 91.63 µs (+408.57 µs recompile) | 82.77 µs (+567.91 µs recompile) | 81.99 µs (+568.68 µs recompile) | 242.71 µs (+29.77 ms recompile) |
-| blake2b | 4.65 µs (+60.14 µs recompile) | 8.91 µs (+107.03 µs recompile) | 9.69 µs (+106.90 µs recompile) | 5.57 µs (+3.49 ms recompile) |
-| prime-sieve | 180.14 µs (+48.77 µs recompile) | 216.61 µs (+17.80 µs recompile) | 199.67 µs (+22.68 µs recompile) | 166.04 µs (+854.32 µs recompile) |
-| mini-verifier | 475.52 µs (+67.06 µs recompile) | 513.60 µs (+139.62 µs recompile) | 512.98 µs (+139.83 µs recompile) | 785.81 µs (+3.06 ms recompile) |
-| poly-eval | 1.10 ms (+27.69 µs recompile) | 1.21 ms (+47.98 µs recompile) | 1.20 ms (+109.16 µs recompile) | 1.48 ms (+8.49 ms recompile) |
-| poseidon2-perm | 1.15 ms (+27.83 µs recompile) | 1.25 ms (+173.39 µs recompile) | 1.25 ms (+180.76 µs recompile) | 1.94 ms (+2.46 ms recompile) |
-| keccak | 6.50 µs (+36.72 µs recompile) | 12.08 µs (+46.47 µs recompile) | 12.64 µs (+46.31 µs recompile) | 7.81 µs (+2.89 ms recompile) |
-| goldilocks-mul | 309.79 µs (+43.22 µs recompile) | 349.68 µs (+39.99 µs recompile) | 366.12 µs (+23.29 µs recompile) | 505.44 µs (+511.61 µs recompile) |
+| Program | `nub_jit` | `polkavm64_recompiler_sync_gas_full` | `polkavm64_recompiler_async_gas_full` | `wasmtime_cranelift_fuel` | `sbpf_jit` |
+|---|--:|--:|--:|--:|--:|
+| ecrecover | 371.21 µs (+822.35 µs recompile) | 334.94 µs (+1.52 ms recompile) | 443.00 µs (+1.39 ms recompile) | 273.14 µs (+44.39 ms recompile) | - |
+| mini-verifier | 471.39 µs (+73.29 µs recompile) | 518.11 µs (+105.53 µs recompile) | 517.21 µs (+136.51 µs recompile) | 797.98 µs (+3.04 ms recompile) | 6.42 ms (+897.6 ns recompile) |
+| poseidon2-perm | 1.17 ms (+9.29 µs recompile) | 1.25 ms (+198.70 µs recompile) | 1.25 ms (+219.29 µs recompile) | 1.95 ms (+2.48 ms recompile) | 16.03 ms (cold < invoke — unstable) |
+| keccak | 6.56 µs (+36.16 µs recompile) | 12.89 µs (+46.46 µs recompile) | 12.86 µs (+45.65 µs recompile) | 7.73 µs (+2.90 ms recompile) | 176.60 µs (+58.29 µs recompile) |
+| blake2b | 4.65 µs (+60.39 µs recompile) | 9.53 µs (+108.17 µs recompile) | 9.84 µs (+108.44 µs recompile) | 5.68 µs (+3.47 ms recompile) | 69.25 µs (+114.59 µs recompile) |
+| goldilocks-mul | 307.39 µs (+44.04 µs recompile) | 349.92 µs (+9.50 µs recompile) | 365.30 µs (+13.23 µs recompile) | 511.79 µs (+509.12 µs recompile) | 632.05 µs (+45.76 µs recompile) |
+| prime-sieve | 180.39 µs (+46.02 µs recompile) | 201.05 µs (+30.38 µs recompile) | 200.39 µs (+28.27 µs recompile) | 165.01 µs (+875.27 µs recompile) | - |
+| fri-fold-tree | 458.05 µs (+79.77 µs recompile) | 500.19 µs (+134.37 µs recompile) | 500.81 µs (+130.53 µs recompile) | 775.47 µs (+11.47 ms recompile) | 5.81 ms (+181.87 µs recompile) |
+| poly-eval | 1.11 ms (+35.63 µs recompile) | 1.14 ms (+59.35 µs recompile) | 1.21 ms (+95.71 µs recompile) | 1.49 ms (+8.47 ms recompile) | 4.70 ms (+122.57 µs recompile) |
+| ed25519 | 93.31 µs (+401.79 µs recompile) | 82.78 µs (+575.25 µs recompile) | 99.53 µs (+547.72 µs recompile) | 244.43 µs (+29.64 ms recompile) | - |
 
 
 ## Artifact size
@@ -156,6 +158,14 @@ Every row runs the *same Rust compute kernel*, compiled to that engine's target.
 
 `vs native` is the multiple of bare-metal cost. It is the number that says what an engine charges you.
 
+### Reading the `sbpf_*` rows
+
+**Seven of ten kernels.** `prime-sieve` needs a writable global, which the sBPF container cannot express; `ecrecover` needs ~3.8 KB of k256 lookup tables in one frame against a 4 KiB limit (which is why Solana ships `secp256k1_recover` as a syscall); `ed25519-compact`'s field arithmetic is 76 `u128` sites. All three are platform properties — Solana's own toolchain hits the same walls — not artifacts of how these were built.
+
+**Five of the seven run a different multiply.** LLVM's BPF backend cannot lower a 64x64 widening multiply, so `gp::mul` has a `cfg(target_arch = "bpf")` arm reassembling the product from four 32x32 partials. It is proven bit-identical, so every engine agrees on the same value — but `goldilocks-mul`, `poseidon2-perm`, `mini-verifier`, `poly-eval` and `fri-fold-tree` are measuring a *different program* here, not just a different VM. Do not read those five as like-for-like.
+
+Heap sizing (256 KiB, against Solana's on-chain 32 KiB default) is a harness choice so the workloads fit, in the same spirit as setting gas counters to maximum. Stack and frame limits are solana-sbpf's own defaults, because those are the ISA.
+
 
 ## cold
 
@@ -167,181 +177,195 @@ Storage is excluded. An eager engine compiles inside the clock; nub compiles laz
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 15.05 µs | ±0.5% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 39.44 µs | ±0.8% | 2.62x | 2.6x |
-| `polkavm64_recompiler_async_gas` | yes | 40.42 µs | ±0.6% | 2.69x | 2.7x |
-| `polkavm64_recompiler_sync_gas` | yes | 40.57 µs | ±0.7% | 2.70x | 2.7x |
-| `nub_jit` | yes | 64.79 µs | ±0.4% | 4.31x | 4.3x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 115.93 µs | ±0.5% | 7.70x | 7.7x |
-| `polkavm64_recompiler_async_gas_full` | yes | 116.60 µs | ±0.5% | 7.75x | 7.7x |
-| `polkavm64_interpreter` | no | 122.79 µs | ±0.7% | 8.16x | 8.2x |
-| `nub_interp` | yes | 234.50 µs | ±0.9% | 15.58x | 15.6x |
-| `wasmtime_winch` | no | 434.04 µs | ±0.5% | 28.84x | 28.8x |
-| `wasmer_singlepass` | no | 1.97 ms | ±1.5% | 130.98x | 131.0x |
-| `wasmtime_cranelift` | no | 3.32 ms | ±0.4% | 220.36x | 220.4x |
-| `wasmtime_cranelift_fuel` | yes | 3.49 ms | ±0.4% | 232.15x | 232.1x |
+| `native` | no | 15.24 µs | ±0.7% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 39.94 µs | ±0.8% | 2.62x | 2.6x |
+| `polkavm64_recompiler_async_gas` | yes | 40.73 µs | ±1.0% | 2.67x | 2.7x |
+| `polkavm64_recompiler_sync_gas` | yes | 40.87 µs | ±0.3% | 2.68x | 2.7x |
+| `nub_jit` | yes | 65.04 µs | ±0.6% | 4.27x | 4.3x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 117.69 µs | ±0.6% | 7.72x | 7.7x |
+| `polkavm64_recompiler_async_gas_full` | yes | 118.27 µs | ±0.6% | 7.76x | 7.8x |
+| `polkavm64_interpreter` | no | 127.69 µs | ±0.5% | 8.38x | 8.4x |
+| `sbpf_interpreter` | yes | 178.65 µs | ±0.7% | 11.72x | 11.7x |
+| `sbpf_jit` | yes | 183.84 µs | ±0.5% | 12.06x | 12.1x |
+| `nub_interp` | yes | 237.09 µs | ±1.1% | 15.55x | 15.6x |
+| `wasmtime_winch` | no | 440.23 µs | ±0.5% | 28.88x | 28.9x |
+| `wasmer_singlepass` | no | 1.94 ms | ±2.2% | 127.02x | 127.0x |
+| `wasmtime_cranelift` | no | 3.29 ms | ±0.7% | 215.94x | 215.9x |
+| `wasmtime_cranelift_fuel` | yes | 3.48 ms | ±0.3% | 228.22x | 228.2x |
 
 ### ecrecover
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 110.09 µs | ±0.3% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 674.37 µs | ±0.5% | 6.13x | 6.1x |
-| `polkavm64_recompiler_async_gas` | yes | 709.74 µs | ±0.4% | 6.45x | 6.4x |
-| `polkavm64_recompiler_sync_gas` | yes | 720.27 µs | ±0.5% | 6.54x | 6.5x |
-| `nub_jit` | yes | 1.19 ms | ±0.5% | 10.82x | 10.8x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.83 ms | ±0.3% | 16.63x | 16.6x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.85 ms | ±0.3% | 16.80x | 16.8x |
-| `wasmtime_winch` | no | 5.35 ms | ±0.2% | 48.56x | 48.6x |
-| `wasmer_singlepass` | no | 7.38 ms | ±2.0% | 67.00x | 67.0x |
-| `polkavm64_interpreter` | no | 12.46 ms | ±0.5% | 113.21x | 113.2x |
-| `nub_interp` | yes | 27.34 ms | ±0.5% | 248.37x | 248.4x |
-| `wasmtime_cranelift` | no | 35.29 ms | ±0.3% | 320.54x | 320.5x |
-| `wasmtime_cranelift_fuel` | yes | 44.56 ms | ±0.6% | 404.73x | 404.7x |
+| `native` | no | 112.23 µs | ±0.4% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 684.12 µs | ±0.1% | 6.10x | 6.1x |
+| `polkavm64_recompiler_async_gas` | yes | 717.89 µs | ±0.3% | 6.40x | 6.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 738.48 µs | ±0.5% | 6.58x | 6.6x |
+| `nub_jit` | yes | 1.19 ms | ±0.7% | 10.64x | 10.6x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.83 ms | ±0.2% | 16.31x | 16.3x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.85 ms | ±0.2% | 16.50x | 16.5x |
+| `wasmtime_winch` | no | 5.35 ms | ±0.4% | 47.71x | 47.7x |
+| `wasmer_singlepass` | no | 7.40 ms | ±1.2% | 65.95x | 66.0x |
+| `polkavm64_interpreter` | no | 13.05 ms | ±0.7% | 116.24x | 116.2x |
+| `nub_interp` | yes | 27.76 ms | ±0.7% | 247.32x | 247.3x |
+| `wasmtime_cranelift` | no | 36.30 ms | ±0.4% | 323.49x | 323.5x |
+| `wasmtime_cranelift_fuel` | yes | 44.66 ms | ±0.4% | 397.93x | 397.9x |
 
 ### ed25519
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 46.08 µs | ±0.4% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 210.92 µs | ±0.2% | 4.58x | 4.6x |
-| `polkavm64_recompiler_sync_gas` | yes | 221.62 µs | ±0.7% | 4.81x | 4.8x |
-| `polkavm64_recompiler_async_gas` | yes | 223.77 µs | ±0.3% | 4.86x | 4.9x |
-| `nub_jit` | yes | 500.20 µs | ±0.3% | 10.86x | 10.9x |
-| `polkavm64_recompiler_async_gas_full` | yes | 650.67 µs | ±1.1% | 14.12x | 14.1x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 650.68 µs | ±0.7% | 14.12x | 14.1x |
-| `polkavm64_interpreter` | no | 1.83 ms | ±0.7% | 39.66x | 39.7x |
-| `wasmtime_winch` | no | 3.15 ms | ±0.6% | 68.46x | 68.5x |
-| `nub_interp` | yes | 5.35 ms | ±0.2% | 116.08x | 116.1x |
-| `wasmer_singlepass` | no | 7.74 ms | ±1.6% | 167.94x | 167.9x |
-| `wasmtime_cranelift` | no | 23.88 ms | ±0.6% | 518.29x | 518.3x |
-| `wasmtime_cranelift_fuel` | yes | 30.01 ms | ±0.4% | 651.28x | 651.3x |
+| `native` | no | 45.95 µs | ±0.4% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 211.55 µs | ±0.2% | 4.60x | 4.6x |
+| `polkavm64_recompiler_async_gas` | yes | 222.48 µs | ±0.6% | 4.84x | 4.8x |
+| `polkavm64_recompiler_sync_gas` | yes | 224.81 µs | ±0.6% | 4.89x | 4.9x |
+| `nub_jit` | yes | 495.11 µs | ±0.6% | 10.77x | 10.8x |
+| `polkavm64_recompiler_async_gas_full` | yes | 647.25 µs | ±0.8% | 14.09x | 14.1x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 658.03 µs | ±0.4% | 14.32x | 14.3x |
+| `polkavm64_interpreter` | no | 2.06 ms | ±0.6% | 44.72x | 44.7x |
+| `wasmtime_winch` | no | 3.17 ms | ±0.4% | 68.95x | 69.0x |
+| `nub_interp` | yes | 5.30 ms | ±0.7% | 115.40x | 115.4x |
+| `wasmer_singlepass` | no | 7.71 ms | ±1.3% | 167.84x | 167.8x |
+| `wasmtime_cranelift` | no | 23.58 ms | ±0.6% | 513.23x | 513.2x |
+| `wasmtime_cranelift_fuel` | yes | 29.88 ms | ±0.4% | 650.37x | 650.4x |
 
 ### fri-fold-tree
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 234.60 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` | yes | 532.82 µs | ±0.3% | 2.27x | 2.3x |
-| `polkavm64_recompiler_sync_gas` | yes | 592.62 µs | ±0.4% | 2.53x | 2.5x |
-| `polkavm64_recompiler_async_gas` | yes | 597.00 µs | ±0.4% | 2.54x | 2.5x |
-| `polkavm64_recompiler_no_gas` | no | 598.61 µs | ±0.0% | 2.55x | 2.6x |
-| `polkavm64_recompiler_async_gas_full` | yes | 612.55 µs | ±0.2% | 2.61x | 2.6x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 628.51 µs | ±1.4% | 2.68x | 2.7x |
-| `wasmtime_winch` | no | 2.90 ms | ±0.4% | 12.38x | 12.4x |
-| `wasmer_singlepass` | no | 7.46 ms | ±1.5% | 31.82x | 31.8x |
-| `wasmtime_cranelift` | no | 8.73 ms | ±0.5% | 37.19x | 37.2x |
-| `polkavm64_interpreter` | no | 9.07 ms | ±0.6% | 38.67x | 38.7x |
-| `wasmtime_cranelift_fuel` | yes | 12.24 ms | ±0.6% | 52.17x | 52.2x |
-| `nub_interp` | yes | 13.12 ms | ±0.6% | 55.95x | 55.9x |
+| `native` | no | 234.93 µs | ±0.4% | 1.00x | 1.0x |
+| `nub_jit` | yes | 537.82 µs | ±0.5% | 2.29x | 2.3x |
+| `polkavm64_recompiler_async_gas` | yes | 589.79 µs | ±0.5% | 2.51x | 2.5x |
+| `polkavm64_recompiler_no_gas` | no | 598.09 µs | ±0.2% | 2.55x | 2.5x |
+| `polkavm64_recompiler_sync_gas` | yes | 601.38 µs | ±0.1% | 2.56x | 2.6x |
+| `polkavm64_recompiler_async_gas_full` | yes | 631.34 µs | ±0.4% | 2.69x | 2.7x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 634.55 µs | ±0.6% | 2.70x | 2.7x |
+| `wasmtime_winch` | no | 2.93 ms | ±0.4% | 12.47x | 12.5x |
+| `sbpf_jit` | yes | 5.99 ms | ±0.4% | 25.49x | 25.5x |
+| `wasmer_singlepass` | no | 7.57 ms | ±1.3% | 32.23x | 32.2x |
+| `wasmtime_cranelift` | no | 8.79 ms | ±1.0% | 37.42x | 37.4x |
+| `polkavm64_interpreter` | no | 9.82 ms | ±0.6% | 41.79x | 41.8x |
+| `wasmtime_cranelift_fuel` | yes | 12.25 ms | ±0.7% | 52.14x | 52.1x |
+| `nub_interp` | yes | 13.93 ms | ±0.8% | 59.31x | 59.3x |
+| `sbpf_interpreter` | yes | 28.26 ms | ±0.8% | 120.28x | 120.3x |
 
 ### goldilocks-mul
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 214.47 µs | ±0.4% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 340.10 µs | ±0.2% | 1.59x | 1.6x |
-| `nub_jit` | yes | 353.01 µs | ±0.3% | 1.65x | 1.6x |
-| `polkavm64_recompiler_async_gas` | yes | 370.92 µs | ±0.1% | 1.73x | 1.7x |
-| `polkavm64_recompiler_sync_gas` | yes | 384.91 µs | ±1.0% | 1.79x | 1.8x |
-| `polkavm64_recompiler_async_gas_full` | yes | 389.41 µs | ±2.7% | 1.82x | 1.8x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 389.67 µs | ±0.5% | 1.82x | 1.8x |
-| `wasmtime_winch` | no | 770.10 µs | ±0.9% | 3.59x | 3.6x |
-| `wasmtime_cranelift` | no | 897.49 µs | ±0.6% | 4.18x | 4.2x |
-| `wasmtime_cranelift_fuel` | yes | 1.02 ms | ±0.5% | 4.74x | 4.7x |
-| `polkavm64_interpreter` | no | 2.07 ms | ±0.7% | 9.65x | 9.7x |
-| `wasmer_singlepass` | no | 2.90 ms | ±1.4% | 13.53x | 13.5x |
-| `nub_interp` | yes | 3.92 ms | ±0.6% | 18.26x | 18.3x |
+| `native` | no | 214.76 µs | ±0.6% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 341.77 µs | ±0.2% | 1.59x | 1.6x |
+| `nub_jit` | yes | 351.43 µs | ±0.6% | 1.64x | 1.6x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 359.42 µs | ±0.1% | 1.67x | 1.7x |
+| `polkavm64_recompiler_async_gas` | yes | 372.15 µs | ±0.1% | 1.73x | 1.7x |
+| `polkavm64_recompiler_async_gas_full` | yes | 378.53 µs | ±0.4% | 1.76x | 1.8x |
+| `polkavm64_recompiler_sync_gas` | yes | 394.66 µs | ±0.0% | 1.84x | 1.8x |
+| `sbpf_jit` | yes | 677.80 µs | ±0.5% | 3.16x | 3.2x |
+| `wasmtime_winch` | no | 766.67 µs | ±0.6% | 3.57x | 3.6x |
+| `wasmtime_cranelift` | no | 911.86 µs | ±0.7% | 4.25x | 4.2x |
+| `wasmtime_cranelift_fuel` | yes | 1.02 ms | ±0.5% | 4.75x | 4.8x |
+| `polkavm64_interpreter` | no | 2.42 ms | ±0.6% | 11.26x | 11.3x |
+| `wasmer_singlepass` | no | 2.96 ms | ±2.4% | 13.79x | 13.8x |
+| `nub_interp` | yes | 4.05 ms | ±1.1% | 18.88x | 18.9x |
+| `sbpf_interpreter` | yes | 10.17 ms | ±0.9% | 47.34x | 47.3x |
 
 ### keccak
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 16.31 µs | ±0.7% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 32.97 µs | ±1.1% | 2.02x | 2.0x |
-| `polkavm64_recompiler_async_gas` | yes | 34.03 µs | ±1.2% | 2.09x | 2.1x |
-| `polkavm64_recompiler_sync_gas` | yes | 34.32 µs | ±0.8% | 2.10x | 2.1x |
-| `nub_jit` | yes | 43.22 µs | ±0.5% | 2.65x | 2.7x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 58.55 µs | ±0.9% | 3.59x | 3.6x |
-| `polkavm64_recompiler_async_gas_full` | yes | 58.94 µs | ±1.1% | 3.61x | 3.6x |
-| `polkavm64_interpreter` | no | 100.07 µs | ±1.0% | 6.14x | 6.1x |
-| `nub_interp` | yes | 277.97 µs | ±0.6% | 17.04x | 17.0x |
-| `wasmtime_winch` | no | 814.13 µs | ±0.5% | 49.92x | 49.9x |
-| `wasmer_singlepass` | no | 1.65 ms | ±1.0% | 100.92x | 100.9x |
-| `wasmtime_cranelift` | no | 2.19 ms | ±0.5% | 134.54x | 134.5x |
-| `wasmtime_cranelift_fuel` | yes | 2.90 ms | ±0.5% | 177.52x | 177.5x |
+| `native` | no | 16.54 µs | ±0.3% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 32.72 µs | ±1.1% | 1.98x | 2.0x |
+| `polkavm64_recompiler_async_gas` | yes | 33.80 µs | ±1.1% | 2.04x | 2.0x |
+| `polkavm64_recompiler_sync_gas` | yes | 34.01 µs | ±0.5% | 2.06x | 2.1x |
+| `nub_jit` | yes | 42.72 µs | ±0.4% | 2.58x | 2.6x |
+| `polkavm64_recompiler_async_gas_full` | yes | 58.51 µs | ±0.6% | 3.54x | 3.5x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 59.35 µs | ±0.5% | 3.59x | 3.6x |
+| `polkavm64_interpreter` | no | 109.01 µs | ±0.8% | 6.59x | 6.6x |
+| `sbpf_jit` | yes | 234.89 µs | ±0.4% | 14.21x | 14.2x |
+| `nub_interp` | yes | 278.27 µs | ±0.9% | 16.83x | 16.8x |
+| `sbpf_interpreter` | yes | 331.01 µs | ±0.7% | 20.02x | 20.0x |
+| `wasmtime_winch` | no | 812.71 µs | ±0.5% | 49.15x | 49.2x |
+| `wasmer_singlepass` | no | 1.66 ms | ±1.3% | 100.37x | 100.4x |
+| `wasmtime_cranelift` | no | 2.18 ms | ±0.6% | 131.56x | 131.6x |
+| `wasmtime_cranelift_fuel` | yes | 2.91 ms | ±0.5% | 176.06x | 176.1x |
 
 ### mini-verifier
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 244.06 µs | ±0.5% | 1.00x | 1.0x |
-| `nub_jit` | yes | 542.58 µs | ±0.6% | 2.22x | 2.2x |
-| `polkavm64_recompiler_no_gas` | no | 603.23 µs | ±0.1% | 2.47x | 2.5x |
-| `polkavm64_recompiler_sync_gas` | yes | 606.33 µs | ±1.0% | 2.48x | 2.5x |
-| `polkavm64_recompiler_async_gas` | yes | 612.13 µs | ±0.0% | 2.51x | 2.5x |
-| `polkavm64_recompiler_async_gas_full` | yes | 652.81 µs | ±0.1% | 2.67x | 2.7x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 653.22 µs | ±0.0% | 2.68x | 2.7x |
-| `wasmtime_winch` | no | 1.86 ms | ±0.6% | 7.60x | 7.6x |
-| `wasmtime_cranelift` | no | 3.27 ms | ±0.6% | 13.39x | 13.4x |
-| `wasmtime_cranelift_fuel` | yes | 3.85 ms | ±0.4% | 15.77x | 15.8x |
-| `wasmer_singlepass` | no | 6.26 ms | ±0.9% | 25.66x | 25.7x |
-| `polkavm64_interpreter` | no | 9.64 ms | ±0.8% | 39.49x | 39.5x |
-| `nub_interp` | yes | 13.61 ms | ±1.1% | 55.78x | 55.8x |
+| `native` | no | 247.95 µs | ±0.3% | 1.00x | 1.0x |
+| `nub_jit` | yes | 544.68 µs | ±0.7% | 2.20x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 601.69 µs | ±1.5% | 2.43x | 2.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 601.70 µs | ±0.2% | 2.43x | 2.4x |
+| `polkavm64_recompiler_async_gas` | yes | 612.65 µs | ±0.1% | 2.47x | 2.5x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 623.64 µs | ±0.3% | 2.52x | 2.5x |
+| `polkavm64_recompiler_async_gas_full` | yes | 653.72 µs | ±0.0% | 2.64x | 2.6x |
+| `wasmtime_winch` | no | 1.84 ms | ±0.4% | 7.41x | 7.4x |
+| `wasmtime_cranelift` | no | 3.26 ms | ±0.3% | 13.17x | 13.2x |
+| `wasmtime_cranelift_fuel` | yes | 3.83 ms | ±0.4% | 15.47x | 15.5x |
+| `wasmer_singlepass` | no | 6.26 ms | ±1.3% | 25.24x | 25.2x |
+| `sbpf_jit` | yes | 6.42 ms | ±0.3% | 25.89x | 25.9x |
+| `polkavm64_interpreter` | no | 10.52 ms | ±1.0% | 42.42x | 42.4x |
+| `nub_interp` | yes | 14.53 ms | ±0.9% | 58.62x | 58.6x |
+| `sbpf_interpreter` | yes | 30.10 ms | ±0.4% | 121.40x | 121.4x |
 
 ### poly-eval
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 679.29 µs | ±0.5% | 1.00x | 1.0x |
-| `nub_jit` | yes | 1.13 ms | ±0.4% | 1.66x | 1.7x |
-| `polkavm64_recompiler_async_gas` | yes | 1.21 ms | ±0.4% | 1.78x | 1.8x |
-| `polkavm64_recompiler_sync_gas` | yes | 1.22 ms | ±0.7% | 1.80x | 1.8x |
-| `polkavm64_recompiler_no_gas` | no | 1.23 ms | ±0.2% | 1.81x | 1.8x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.26 ms | ±0.0% | 1.85x | 1.9x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.31 ms | ±0.0% | 1.92x | 1.9x |
-| `wasmtime_winch` | no | 3.02 ms | ±0.5% | 4.45x | 4.5x |
-| `wasmtime_cranelift` | no | 7.03 ms | ±0.5% | 10.35x | 10.4x |
-| `polkavm64_interpreter` | no | 8.13 ms | ±0.7% | 11.96x | 12.0x |
-| `wasmer_singlepass` | no | 8.64 ms | ±1.5% | 12.71x | 12.7x |
-| `wasmtime_cranelift_fuel` | yes | 9.97 ms | ±0.5% | 14.68x | 14.7x |
-| `nub_interp` | yes | 17.35 ms | ±0.6% | 25.55x | 25.5x |
+| `native` | no | 691.82 µs | ±0.3% | 1.00x | 1.0x |
+| `nub_jit` | yes | 1.14 ms | ±0.4% | 1.65x | 1.7x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.20 ms | ±1.6% | 1.74x | 1.7x |
+| `polkavm64_recompiler_no_gas` | no | 1.23 ms | ±0.2% | 1.77x | 1.8x |
+| `polkavm64_recompiler_sync_gas` | yes | 1.25 ms | ±1.0% | 1.80x | 1.8x |
+| `polkavm64_recompiler_async_gas` | yes | 1.29 ms | ±0.0% | 1.87x | 1.9x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.30 ms | ±0.8% | 1.89x | 1.9x |
+| `wasmtime_winch` | no | 3.05 ms | ±0.5% | 4.41x | 4.4x |
+| `sbpf_jit` | yes | 4.83 ms | ±0.5% | 6.98x | 7.0x |
+| `wasmtime_cranelift` | no | 7.01 ms | ±0.4% | 10.13x | 10.1x |
+| `wasmer_singlepass` | no | 8.73 ms | ±1.6% | 12.62x | 12.6x |
+| `polkavm64_interpreter` | no | 9.07 ms | ±1.2% | 13.11x | 13.1x |
+| `wasmtime_cranelift_fuel` | yes | 9.97 ms | ±0.5% | 14.40x | 14.4x |
+| `nub_interp` | yes | 17.73 ms | ±0.8% | 25.63x | 25.6x |
+| `sbpf_interpreter` | yes | 33.13 ms | ±0.4% | 47.88x | 47.9x |
 
 ### poseidon2-perm
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 574.05 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` | yes | 1.18 ms | ±0.3% | 2.06x | 2.1x |
-| `polkavm64_recompiler_no_gas` | no | 1.40 ms | ±0.5% | 2.44x | 2.4x |
-| `polkavm64_recompiler_async_gas` | yes | 1.40 ms | ±0.6% | 2.44x | 2.4x |
-| `polkavm64_recompiler_sync_gas` | yes | 1.40 ms | ±0.7% | 2.44x | 2.4x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.43 ms | ±0.4% | 2.48x | 2.5x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.43 ms | ±0.4% | 2.48x | 2.5x |
-| `wasmtime_winch` | no | 3.59 ms | ±0.2% | 6.25x | 6.2x |
-| `wasmtime_cranelift` | no | 3.93 ms | ±0.4% | 6.85x | 6.9x |
-| `wasmtime_cranelift_fuel` | yes | 4.40 ms | ±0.5% | 7.67x | 7.7x |
-| `wasmer_singlepass` | no | 12.44 ms | ±0.4% | 21.67x | 21.7x |
-| `polkavm64_interpreter` | no | 22.28 ms | ±1.3% | 38.82x | 38.8x |
-| `nub_interp` | yes | 35.07 ms | ±0.9% | 61.10x | 61.1x |
+| `native` | no | 579.74 µs | ±0.5% | 1.00x | 1.0x |
+| `nub_jit` | yes | 1.18 ms | ±0.4% | 2.03x | 2.0x |
+| `polkavm64_recompiler_no_gas` | no | 1.41 ms | ±0.4% | 2.43x | 2.4x |
+| `polkavm64_recompiler_async_gas` | yes | 1.41 ms | ±0.4% | 2.44x | 2.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 1.42 ms | ±0.8% | 2.45x | 2.4x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.45 ms | ±0.5% | 2.51x | 2.5x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.47 ms | ±0.0% | 2.53x | 2.5x |
+| `wasmtime_winch` | no | 3.63 ms | ±0.4% | 6.27x | 6.3x |
+| `wasmtime_cranelift` | no | 3.93 ms | ±0.5% | 6.78x | 6.8x |
+| `wasmtime_cranelift_fuel` | yes | 4.43 ms | ±0.4% | 7.64x | 7.6x |
+| `wasmer_singlepass` | no | 12.56 ms | ±1.5% | 21.66x | 21.7x |
+| `sbpf_jit` | yes | 16.02 ms | ±0.3% | 27.64x | 27.6x |
+| `polkavm64_interpreter` | no | 24.49 ms | ±0.4% | 42.25x | 42.2x |
+| `nub_interp` | yes | 36.42 ms | ±0.5% | 62.81x | 62.8x |
+| `sbpf_interpreter` | yes | 75.81 ms | ±0.6% | 130.77x | 130.8x |
 
 ### prime-sieve
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 90.05 µs | ±0.3% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 126.49 µs | ±0.1% | 1.40x | 1.4x |
-| `polkavm64_recompiler_async_gas` | yes | 222.23 µs | ±0.5% | 2.47x | 2.5x |
-| `polkavm64_recompiler_async_gas_full` | yes | 222.35 µs | ±0.8% | 2.47x | 2.5x |
-| `nub_jit` | yes | 228.91 µs | ±0.7% | 2.54x | 2.5x |
-| `polkavm64_recompiler_sync_gas` | yes | 228.98 µs | ±0.1% | 2.54x | 2.5x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 234.41 µs | ±0.1% | 2.60x | 2.6x |
-| `wasmtime_winch` | no | 550.11 µs | ±0.6% | 6.11x | 6.1x |
-| `wasmtime_cranelift` | no | 641.84 µs | ±0.3% | 7.13x | 7.1x |
-| `wasmtime_cranelift_fuel` | yes | 1.02 ms | ±0.4% | 11.33x | 11.3x |
-| `wasmer_singlepass` | no | 1.55 ms | ±2.0% | 17.24x | 17.2x |
-| `polkavm64_interpreter` | no | 2.12 ms | ±0.4% | 23.59x | 23.6x |
-| `nub_interp` | yes | 8.17 ms | ±0.7% | 90.75x | 90.7x |
+| `native` | no | 90.12 µs | ±0.4% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 126.82 µs | ±0.2% | 1.41x | 1.4x |
+| `polkavm64_recompiler_async_gas` | yes | 220.49 µs | ±0.4% | 2.45x | 2.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 221.56 µs | ±0.6% | 2.46x | 2.5x |
+| `nub_jit` | yes | 226.42 µs | ±0.6% | 2.51x | 2.5x |
+| `polkavm64_recompiler_async_gas_full` | yes | 228.66 µs | ±0.8% | 2.54x | 2.5x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 231.43 µs | ±0.3% | 2.57x | 2.6x |
+| `wasmtime_winch` | no | 559.56 µs | ±0.5% | 6.21x | 6.2x |
+| `wasmtime_cranelift` | no | 650.97 µs | ±0.7% | 7.22x | 7.2x |
+| `wasmtime_cranelift_fuel` | yes | 1.04 ms | ±0.4% | 11.54x | 11.5x |
+| `wasmer_singlepass` | no | 1.55 ms | ±1.1% | 17.21x | 17.2x |
+| `polkavm64_interpreter` | no | 2.11 ms | ±0.6% | 23.44x | 23.4x |
+| `nub_interp` | yes | 8.24 ms | ±0.3% | 91.41x | 91.4x |
 
 ## compilation
 
@@ -353,171 +377,185 @@ Turning the program into executable form. Engine construction and file loading a
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 17.91 µs | ±0.6% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 18.99 µs | ±0.7% | 1.06x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 19.03 µs | ±0.6% | 1.06x | - |
-| `polkavm64_recompiler_async_gas` | yes | 19.08 µs | ±0.7% | 1.07x | - |
-| `nub_jit_compile` | yes | 45.45 µs | ±0.4% | 2.54x | - |
-| `nub_jit` | yes | 64.76 µs | ±0.4% | 3.62x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 98.13 µs | ±0.5% | 5.48x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 98.61 µs | ±0.4% | 5.51x | - |
-| `wasmtime_winch` | no | 424.11 µs | ±0.4% | 23.68x | - |
-| `wasmer_singlepass` | no | 917.18 µs | ±1.8% | 51.21x | - |
-| `wasmtime_cranelift` | no | 3.24 ms | ±0.5% | 180.86x | - |
-| `wasmtime_cranelift_fuel` | yes | 3.46 ms | ±0.4% | 193.29x | - |
+| `sbpf_interpreter` | yes | 10.60 µs | ±0.5% | 1.00x | - |
+| `polkavm64_interpreter` | no | 17.91 µs | ±0.6% | 1.69x | - |
+| `polkavm64_recompiler_no_gas` | no | 19.28 µs | ±0.4% | 1.82x | - |
+| `polkavm64_recompiler_async_gas` | yes | 19.34 µs | ±0.4% | 1.82x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 19.34 µs | ±0.3% | 1.83x | - |
+| `nub_jit_compile` | yes | 46.09 µs | ±0.3% | 4.35x | - |
+| `sbpf_jit` | yes | 55.19 µs | ±0.2% | 5.21x | - |
+| `nub_jit` | yes | 65.86 µs | ±0.3% | 6.22x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 99.36 µs | ±0.6% | 9.38x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 99.55 µs | ±0.5% | 9.39x | - |
+| `wasmtime_winch` | no | 421.56 µs | ±0.3% | 39.79x | - |
+| `wasmer_singlepass` | no | 935.60 µs | ±3.0% | 88.30x | - |
+| `wasmtime_cranelift` | no | 3.30 ms | ±0.4% | 311.10x | - |
+| `wasmtime_cranelift_fuel` | yes | 3.50 ms | ±0.2% | 330.06x | - |
 
 ### ecrecover
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 194.97 µs | ±0.6% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 251.82 µs | ±0.4% | 1.29x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 259.04 µs | ±0.6% | 1.33x | - |
-| `polkavm64_recompiler_async_gas` | yes | 262.52 µs | ±0.4% | 1.35x | - |
-| `nub_jit` | yes | 615.64 µs | ±0.5% | 3.16x | - |
-| `nub_jit_compile` | yes | 778.72 µs | ±0.6% | 3.99x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.35 ms | ±0.4% | 6.93x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.36 ms | ±0.5% | 6.99x | - |
-| `wasmer_singlepass` | no | 3.16 ms | ±1.2% | 16.23x | - |
-| `wasmtime_winch` | no | 4.86 ms | ±0.6% | 24.91x | - |
-| `wasmtime_cranelift` | no | 35.73 ms | ±0.4% | 183.25x | - |
-| `wasmtime_cranelift_fuel` | yes | 44.19 ms | ±0.3% | 226.65x | - |
+| `polkavm64_interpreter` | no | 196.56 µs | ±0.8% | 1.00x | - |
+| `polkavm64_recompiler_no_gas` | no | 260.17 µs | ±0.4% | 1.32x | - |
+| `polkavm64_recompiler_async_gas` | yes | 260.22 µs | ±0.6% | 1.32x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 262.68 µs | ±0.5% | 1.34x | - |
+| `nub_jit` | yes | 618.32 µs | ±0.5% | 3.15x | - |
+| `nub_jit_compile` | yes | 788.47 µs | ±0.6% | 4.01x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.33 ms | ±0.8% | 6.75x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.34 ms | ±0.7% | 6.83x | - |
+| `wasmer_singlepass` | no | 3.16 ms | ±1.4% | 16.08x | - |
+| `wasmtime_winch` | no | 4.91 ms | ±0.7% | 24.98x | - |
+| `wasmtime_cranelift` | no | 36.49 ms | ±0.3% | 185.65x | - |
+| `wasmtime_cranelift_fuel` | yes | 45.35 ms | ±0.3% | 230.72x | - |
 
 ### ed25519
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 82.71 µs | ±0.7% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 112.82 µs | ±0.4% | 1.36x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 113.74 µs | ±0.4% | 1.38x | - |
-| `polkavm64_recompiler_async_gas` | yes | 115.01 µs | ±0.3% | 1.39x | - |
-| `nub_jit` | yes | 286.36 µs | ±0.8% | 3.46x | - |
-| `nub_jit_compile` | yes | 361.35 µs | ±0.6% | 4.37x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 523.97 µs | ±0.5% | 6.34x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 529.98 µs | ±0.7% | 6.41x | - |
-| `wasmtime_winch` | no | 2.73 ms | ±0.8% | 32.99x | - |
-| `wasmer_singlepass` | no | 3.29 ms | ±1.0% | 39.73x | - |
-| `wasmtime_cranelift` | no | 23.98 ms | ±0.5% | 289.89x | - |
-| `wasmtime_cranelift_fuel` | yes | 29.50 ms | ±0.4% | 356.68x | - |
+| `polkavm64_interpreter` | no | 84.39 µs | ±1.0% | 1.00x | - |
+| `polkavm64_recompiler_no_gas` | no | 111.64 µs | ±0.4% | 1.32x | - |
+| `polkavm64_recompiler_async_gas` | yes | 113.42 µs | ±0.4% | 1.34x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 113.49 µs | ±0.4% | 1.34x | - |
+| `nub_jit` | yes | 288.25 µs | ±0.4% | 3.42x | - |
+| `nub_jit_compile` | yes | 367.63 µs | ±0.6% | 4.36x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 525.16 µs | ±0.5% | 6.22x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 530.00 µs | ±0.6% | 6.28x | - |
+| `wasmtime_winch` | no | 2.75 ms | ±0.5% | 32.62x | - |
+| `wasmer_singlepass` | no | 3.41 ms | ±0.5% | 40.38x | - |
+| `wasmtime_cranelift` | no | 24.25 ms | ±0.8% | 287.36x | - |
+| `wasmtime_cranelift_fuel` | yes | 30.00 ms | ±0.4% | 355.54x | - |
 
 ### fri-fold-tree
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 9.73 µs | ±0.8% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 10.65 µs | ±0.5% | 1.09x | - |
-| `polkavm64_recompiler_async_gas` | yes | 10.73 µs | ±0.6% | 1.10x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 10.77 µs | ±0.6% | 1.11x | - |
-| `nub_jit_compile` | yes | 26.49 µs | ±0.9% | 2.72x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 53.84 µs | ±0.3% | 5.53x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 53.94 µs | ±0.2% | 5.54x | - |
-| `nub_jit` | yes | 72.89 µs | ±0.6% | 7.49x | - |
-| `wasmer_singlepass` | no | 1.40 ms | ±0.9% | 144.34x | - |
-| `wasmtime_winch` | no | 1.62 ms | ±0.7% | 166.89x | - |
-| `wasmtime_cranelift` | no | 8.13 ms | ±0.2% | 835.21x | - |
-| `wasmtime_cranelift_fuel` | yes | 11.57 ms | ±0.5% | 1189.17x | - |
+| `sbpf_interpreter` | yes | 5.90 µs | ±0.8% | 1.00x | - |
+| `polkavm64_interpreter` | no | 9.78 µs | ±0.6% | 1.66x | - |
+| `polkavm64_recompiler_no_gas` | no | 11.10 µs | ±0.5% | 1.88x | - |
+| `polkavm64_recompiler_async_gas` | yes | 11.16 µs | ±0.5% | 1.89x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 11.31 µs | ±0.3% | 1.92x | - |
+| `nub_jit_compile` | yes | 27.94 µs | ±0.6% | 4.73x | - |
+| `sbpf_jit` | yes | 42.09 µs | ±0.7% | 7.13x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 53.67 µs | ±0.6% | 9.09x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 53.96 µs | ±0.7% | 9.14x | - |
+| `nub_jit` | yes | 73.68 µs | ±0.4% | 12.48x | - |
+| `wasmer_singlepass` | no | 1.43 ms | ±0.7% | 241.53x | - |
+| `wasmtime_winch` | no | 1.63 ms | ±0.6% | 276.89x | - |
+| `wasmtime_cranelift` | no | 8.15 ms | ±0.6% | 1380.91x | - |
+| `wasmtime_cranelift_fuel` | yes | 11.67 ms | ±0.5% | 1976.80x | - |
 
 ### goldilocks-mul
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 354.3 ns | ±0.5% | 1.00x | - |
-| `nub_jit_compile` | yes | 1.28 µs | ±0.5% | 3.61x | - |
-| `polkavm64_recompiler_no_gas` | no | 1.54 µs | ±0.6% | 4.35x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 1.57 µs | ±0.4% | 4.44x | - |
-| `polkavm64_recompiler_async_gas` | yes | 1.58 µs | ±0.5% | 4.47x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 3.18 µs | ±0.4% | 8.98x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 3.20 µs | ±0.4% | 9.02x | - |
-| `nub_jit` | yes | 24.44 µs | ±0.5% | 68.99x | - |
-| `wasmtime_winch` | no | 207.67 µs | ±0.2% | 586.18x | - |
-| `wasmtime_cranelift` | no | 369.10 µs | ±0.6% | 1041.83x | - |
-| `wasmtime_cranelift_fuel` | yes | 496.00 µs | ±0.4% | 1400.03x | - |
-| `wasmer_singlepass` | no | 642.29 µs | ±1.5% | 1812.96x | - |
+| `sbpf_interpreter` | yes | 243.7 ns | ±0.7% | 1.00x | - |
+| `polkavm64_interpreter` | no | 357.4 ns | ±0.5% | 1.47x | - |
+| `nub_jit_compile` | yes | 1.29 µs | ±0.5% | 5.30x | - |
+| `polkavm64_recompiler_no_gas` | no | 1.60 µs | ±0.4% | 6.55x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 1.62 µs | ±0.4% | 6.64x | - |
+| `polkavm64_recompiler_async_gas` | yes | 1.64 µs | ±0.7% | 6.74x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 3.17 µs | ±0.5% | 12.99x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 3.22 µs | ±0.7% | 13.22x | - |
+| `sbpf_jit` | yes | 4.20 µs | ±0.8% | 17.25x | - |
+| `nub_jit` | yes | 24.81 µs | ±0.4% | 101.78x | - |
+| `wasmtime_winch` | no | 207.89 µs | ±0.2% | 852.95x | - |
+| `wasmtime_cranelift` | no | 370.20 µs | ±0.4% | 1518.85x | - |
+| `wasmtime_cranelift_fuel` | yes | 498.96 µs | ±0.3% | 2047.15x | - |
+| `wasmer_singlepass` | no | 647.58 µs | ±1.8% | 2656.92x | - |
 
 ### keccak
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 6.76 µs | ±0.3% | 1.00x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 7.61 µs | ±0.5% | 1.13x | - |
-| `polkavm64_recompiler_no_gas` | no | 7.69 µs | ±0.6% | 1.14x | - |
-| `polkavm64_recompiler_async_gas` | yes | 7.75 µs | ±0.3% | 1.15x | - |
-| `nub_jit_compile` | yes | 9.52 µs | ±0.4% | 1.41x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 33.48 µs | ±0.6% | 4.95x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 34.11 µs | ±0.5% | 5.05x | - |
-| `nub_jit` | yes | 35.84 µs | ±0.5% | 5.30x | - |
-| `wasmtime_winch` | no | 760.40 µs | ±0.4% | 112.50x | - |
-| `wasmer_singlepass` | no | 804.30 µs | ±1.4% | 118.99x | - |
-| `wasmtime_cranelift` | no | 2.15 ms | ±0.2% | 318.76x | - |
-| `wasmtime_cranelift_fuel` | yes | 2.86 ms | ±0.6% | 423.04x | - |
+| `sbpf_interpreter` | yes | 2.44 µs | ±0.7% | 1.00x | - |
+| `polkavm64_interpreter` | no | 6.81 µs | ±0.4% | 2.79x | - |
+| `polkavm64_recompiler_no_gas` | no | 7.62 µs | ±0.5% | 3.12x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 7.63 µs | ±0.3% | 3.12x | - |
+| `polkavm64_recompiler_async_gas` | yes | 7.64 µs | ±0.4% | 3.13x | - |
+| `nub_jit_compile` | yes | 9.50 µs | ±0.4% | 3.88x | - |
+| `sbpf_jit` | yes | 17.25 µs | ±0.3% | 7.06x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 34.36 µs | ±0.4% | 14.06x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 34.52 µs | ±0.4% | 14.12x | - |
+| `nub_jit` | yes | 36.05 µs | ±0.5% | 14.75x | - |
+| `wasmtime_winch` | no | 765.84 µs | ±0.4% | 313.30x | - |
+| `wasmer_singlepass` | no | 795.50 µs | ±1.7% | 325.43x | - |
+| `wasmtime_cranelift` | no | 2.15 ms | ±0.4% | 879.07x | - |
+| `wasmtime_cranelift_fuel` | yes | 2.89 ms | ±0.5% | 1183.11x | - |
 
 ### mini-verifier
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 9.56 µs | ±0.6% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 9.75 µs | ±0.4% | 1.02x | - |
-| `polkavm64_recompiler_async_gas` | yes | 9.81 µs | ±0.5% | 1.03x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 10.51 µs | ±0.8% | 1.10x | - |
-| `nub_jit_compile` | yes | 26.72 µs | ±0.6% | 2.79x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 51.25 µs | ±0.4% | 5.36x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 51.34 µs | ±0.4% | 5.37x | - |
-| `nub_jit` | yes | 54.76 µs | ±0.6% | 5.73x | - |
-| `wasmtime_winch` | no | 563.08 µs | ±0.4% | 58.88x | - |
-| `wasmer_singlepass` | no | 899.45 µs | ±1.5% | 94.06x | - |
-| `wasmtime_cranelift` | no | 2.48 ms | ±0.5% | 259.79x | - |
-| `wasmtime_cranelift_fuel` | yes | 3.02 ms | ±0.3% | 315.56x | - |
+| `sbpf_interpreter` | yes | 5.70 µs | ±0.8% | 1.00x | - |
+| `polkavm64_interpreter` | no | 9.61 µs | ±0.4% | 1.69x | - |
+| `polkavm64_recompiler_no_gas` | no | 9.76 µs | ±0.3% | 1.71x | - |
+| `polkavm64_recompiler_async_gas` | yes | 9.81 µs | ±0.5% | 1.72x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 10.36 µs | ±0.5% | 1.82x | - |
+| `nub_jit_compile` | yes | 27.47 µs | ±0.2% | 4.82x | - |
+| `sbpf_jit` | yes | 40.58 µs | ±0.6% | 7.12x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 51.71 µs | ±0.4% | 9.08x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 51.95 µs | ±0.6% | 9.12x | - |
+| `nub_jit` | yes | 55.13 µs | ±0.5% | 9.68x | - |
+| `wasmtime_winch` | no | 558.15 µs | ±0.6% | 98.00x | - |
+| `wasmer_singlepass` | no | 930.13 µs | ±1.5% | 163.31x | - |
+| `wasmtime_cranelift` | no | 2.50 ms | ±0.3% | 438.42x | - |
+| `wasmtime_cranelift_fuel` | yes | 2.98 ms | ±0.5% | 523.53x | - |
 
 ### poly-eval
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 1.72 µs | ±0.6% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 3.06 µs | ±0.5% | 1.78x | - |
-| `polkavm64_recompiler_async_gas` | yes | 3.17 µs | ±0.5% | 1.85x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 3.23 µs | ±0.7% | 1.88x | - |
-| `nub_jit_compile` | yes | 9.53 µs | ±0.3% | 5.55x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 11.18 µs | ±0.8% | 6.51x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 11.28 µs | ±0.3% | 6.57x | - |
-| `nub_jit` | yes | 32.73 µs | ±0.8% | 19.07x | - |
-| `wasmtime_winch` | no | 1.30 ms | ±0.2% | 758.40x | - |
-| `wasmer_singlepass` | no | 1.33 ms | ±0.8% | 777.80x | - |
-| `wasmtime_cranelift` | no | 5.47 ms | ±0.4% | 3189.79x | - |
-| `wasmtime_cranelift_fuel` | yes | 8.54 ms | ±0.2% | 4976.08x | - |
+| `sbpf_interpreter` | yes | 762.8 ns | ±1.6% | 1.00x | - |
+| `polkavm64_interpreter` | no | 1.72 µs | ±0.5% | 2.26x | - |
+| `polkavm64_recompiler_no_gas` | no | 3.02 µs | ±0.5% | 3.96x | - |
+| `polkavm64_recompiler_async_gas` | yes | 3.15 µs | ±0.2% | 4.13x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 3.22 µs | ±0.6% | 4.23x | - |
+| `sbpf_jit` | yes | 8.25 µs | ±0.5% | 10.81x | - |
+| `nub_jit_compile` | yes | 9.52 µs | ±0.3% | 12.49x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 11.06 µs | ±0.4% | 14.50x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 11.23 µs | ±0.5% | 14.72x | - |
+| `nub_jit` | yes | 32.90 µs | ±0.3% | 43.14x | - |
+| `wasmtime_winch` | no | 1.30 ms | ±0.5% | 1706.90x | - |
+| `wasmer_singlepass` | no | 1.35 ms | ±0.8% | 1768.29x | - |
+| `wasmtime_cranelift` | no | 5.47 ms | ±0.5% | 7169.07x | - |
+| `wasmtime_cranelift_fuel` | yes | 8.48 ms | ±0.5% | 11117.93x | - |
 
 ### poseidon2-perm
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `polkavm64_interpreter` | no | 7.56 µs | ±0.3% | 1.00x | - |
-| `polkavm64_recompiler_no_gas` | no | 7.77 µs | ±0.5% | 1.03x | - |
-| `polkavm64_recompiler_async_gas` | yes | 7.79 µs | ±0.3% | 1.03x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 7.91 µs | ±0.5% | 1.05x | - |
-| `nub_jit_compile` | yes | 22.91 µs | ±0.3% | 3.03x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 37.41 µs | ±0.5% | 4.95x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 37.49 µs | ±0.4% | 4.96x | - |
-| `nub_jit` | yes | 47.68 µs | ±0.8% | 6.30x | - |
-| `wasmtime_winch` | no | 469.90 µs | ±0.9% | 62.12x | - |
-| `wasmer_singlepass` | no | 869.38 µs | ±1.1% | 114.94x | - |
-| `wasmtime_cranelift` | no | 2.00 ms | ±0.4% | 264.56x | - |
-| `wasmtime_cranelift_fuel` | yes | 2.43 ms | ±0.5% | 321.61x | - |
+| `sbpf_interpreter` | yes | 4.75 µs | ±0.9% | 1.00x | - |
+| `polkavm64_interpreter` | no | 7.57 µs | ±0.7% | 1.59x | - |
+| `polkavm64_recompiler_no_gas` | no | 7.87 µs | ±0.4% | 1.66x | - |
+| `polkavm64_recompiler_async_gas` | yes | 7.91 µs | ±0.4% | 1.66x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 7.94 µs | ±0.4% | 1.67x | - |
+| `nub_jit_compile` | yes | 23.17 µs | ±0.4% | 4.87x | - |
+| `sbpf_jit` | yes | 35.37 µs | ±0.4% | 7.44x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 37.29 µs | ±0.4% | 7.84x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 37.83 µs | ±0.5% | 7.96x | - |
+| `nub_jit` | yes | 47.99 µs | ±0.6% | 10.09x | - |
+| `wasmtime_winch` | no | 468.37 µs | ±0.2% | 98.51x | - |
+| `wasmer_singlepass` | no | 893.39 µs | ±2.6% | 187.91x | - |
+| `wasmtime_cranelift` | no | 2.00 ms | ±0.3% | 419.92x | - |
+| `wasmtime_cranelift_fuel` | yes | 2.46 ms | ±0.4% | 516.50x | - |
 
 ### prime-sieve
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
 | `polkavm64_interpreter` | no | 1.84 µs | ±0.4% | 1.00x | - |
-| `nub_jit_compile` | yes | 3.70 µs | ±0.6% | 2.02x | - |
-| `polkavm64_recompiler_no_gas` | no | 4.69 µs | ±0.3% | 2.56x | - |
-| `polkavm64_recompiler_sync_gas` | yes | 4.79 µs | ±0.4% | 2.61x | - |
-| `polkavm64_recompiler_async_gas` | yes | 4.80 µs | ±0.4% | 2.61x | - |
-| `polkavm64_recompiler_async_gas_full` | yes | 6.94 µs | ±0.6% | 3.78x | - |
-| `polkavm64_recompiler_sync_gas_full` | yes | 7.07 µs | ±0.6% | 3.85x | - |
-| `wasmtime_winch` | no | 327.84 µs | ±0.6% | 178.58x | - |
-| `nub_jit` | yes | 489.48 µs | ±0.7% | 266.63x | - |
-| `wasmtime_cranelift` | no | 489.57 µs | ±0.4% | 266.68x | - |
-| `wasmer_singlepass` | no | 697.57 µs | ±1.6% | 379.99x | - |
-| `wasmtime_cranelift_fuel` | yes | 818.07 µs | ±0.5% | 445.63x | - |
+| `nub_jit_compile` | yes | 3.63 µs | ±0.6% | 1.97x | - |
+| `polkavm64_recompiler_sync_gas` | yes | 4.83 µs | ±0.6% | 2.62x | - |
+| `polkavm64_recompiler_no_gas` | no | 4.84 µs | ±0.5% | 2.63x | - |
+| `polkavm64_recompiler_async_gas` | yes | 4.85 µs | ±0.6% | 2.63x | - |
+| `polkavm64_recompiler_sync_gas_full` | yes | 7.06 µs | ±0.6% | 3.83x | - |
+| `polkavm64_recompiler_async_gas_full` | yes | 7.13 µs | ±0.7% | 3.86x | - |
+| `wasmtime_winch` | no | 334.14 µs | ±0.5% | 181.15x | - |
+| `wasmtime_cranelift` | no | 485.11 µs | ±0.4% | 262.99x | - |
+| `nub_jit` | yes | 493.98 µs | ±0.8% | 267.80x | - |
+| `wasmer_singlepass` | no | 742.09 µs | ±2.3% | 402.30x | - |
+| `wasmtime_cranelift_fuel` | yes | 821.91 µs | ±0.2% | 445.58x | - |
 
 ## invoke
 
@@ -527,181 +565,195 @@ Cold invocation with compilation excluded: a fresh instance every sample. Where 
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 640.2 ns | ±0.3% | 1.00x | 1.0x |
-| `nub_jit` | yes | 4.65 µs | ±0.4% | 7.26x | 7.3x |
-| `wasmtime_cranelift_fuel` | yes | 5.57 µs | ±1.0% | 8.71x | 8.7x |
-| `wasmtime_cranelift` | no | 5.62 µs | ±1.0% | 8.77x | 8.8x |
-| `wasmtime_winch` | no | 6.17 µs | ±0.8% | 9.65x | 9.6x |
-| `polkavm64_recompiler_sync_gas` | yes | 8.63 µs | ±1.7% | 13.49x | 13.5x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 8.91 µs | ±1.2% | 13.91x | 13.9x |
-| `polkavm64_recompiler_no_gas` | no | 8.95 µs | ±1.0% | 13.98x | 14.0x |
-| `polkavm64_recompiler_async_gas` | yes | 9.65 µs | ±1.1% | 15.07x | 15.1x |
-| `polkavm64_recompiler_async_gas_full` | yes | 9.69 µs | ±1.5% | 15.14x | 15.1x |
-| `wasmer_singlepass` | no | 45.42 µs | ±3.6% | 70.95x | 70.9x |
-| `polkavm64_interpreter` | no | 98.42 µs | ±0.7% | 153.75x | 153.7x |
-| `nub_interp` | yes | 152.54 µs | ±1.1% | 238.28x | 238.3x |
+| `native` | no | 632.9 ns | ±0.5% | 1.00x | 1.0x |
+| `nub_jit` | yes | 4.65 µs | ±0.5% | 7.35x | 7.4x |
+| `wasmtime_cranelift` | no | 5.52 µs | ±1.2% | 8.71x | 8.7x |
+| `wasmtime_cranelift_fuel` | yes | 5.68 µs | ±1.1% | 8.97x | 9.0x |
+| `wasmtime_winch` | no | 6.13 µs | ±0.9% | 9.69x | 9.7x |
+| `polkavm64_recompiler_no_gas` | no | 8.39 µs | ±6.5% | 13.26x | 13.3x |
+| `polkavm64_recompiler_sync_gas` | yes | 8.53 µs | ±1.1% | 13.47x | 13.5x |
+| `polkavm64_recompiler_async_gas` | yes | 8.64 µs | ±1.6% | 13.66x | 13.7x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 9.53 µs | ±3.2% | 15.05x | 15.0x |
+| `polkavm64_recompiler_async_gas_full` | yes | 9.84 µs | ±1.2% | 15.54x | 15.5x |
+| `wasmer_singlepass` | no | 46.46 µs | ±5.4% | 73.41x | 73.4x |
+| `sbpf_jit` | yes | 69.25 µs | ±0.5% | 109.41x | 109.4x |
+| `polkavm64_interpreter` | no | 103.96 µs | ±0.3% | 164.24x | 164.2x |
+| `sbpf_interpreter` | yes | 132.97 µs | ±0.7% | 210.08x | 210.1x |
+| `nub_interp` | yes | 156.62 µs | ±0.6% | 247.45x | 247.5x |
 
 ### ecrecover
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 92.65 µs | ±0.7% | 1.00x | 1.0x |
-| `wasmtime_cranelift` | no | 260.07 µs | ±0.3% | 2.81x | 2.8x |
-| `wasmtime_cranelift_fuel` | yes | 270.38 µs | ±0.5% | 2.92x | 2.9x |
-| `polkavm64_recompiler_no_gas` | no | 319.48 µs | ±0.1% | 3.45x | 3.4x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 333.74 µs | ±0.1% | 3.60x | 3.6x |
-| `polkavm64_recompiler_async_gas_full` | yes | 334.04 µs | ±0.2% | 3.61x | 3.6x |
-| `polkavm64_recompiler_sync_gas` | yes | 334.41 µs | ±0.2% | 3.61x | 3.6x |
-| `nub_jit` | yes | 370.80 µs | ±0.4% | 4.00x | 4.0x |
-| `wasmtime_winch` | no | 416.98 µs | ±0.4% | 4.50x | 4.5x |
-| `polkavm64_recompiler_async_gas` | yes | 451.73 µs | ±0.1% | 4.88x | 4.9x |
-| `wasmer_singlepass` | no | 1.18 ms | ±3.2% | 12.74x | 12.7x |
-| `polkavm64_interpreter` | no | 12.18 ms | ±0.3% | 131.41x | 131.4x |
-| `nub_interp` | yes | 26.59 ms | ±0.5% | 287.00x | 287.0x |
+| `native` | no | 94.25 µs | ±0.6% | 1.00x | 1.0x |
+| `wasmtime_cranelift` | no | 261.53 µs | ±0.5% | 2.77x | 2.8x |
+| `wasmtime_cranelift_fuel` | yes | 273.14 µs | ±0.6% | 2.90x | 2.9x |
+| `polkavm64_recompiler_sync_gas` | yes | 334.45 µs | ±0.2% | 3.55x | 3.5x |
+| `polkavm64_recompiler_async_gas` | yes | 334.47 µs | ±0.2% | 3.55x | 3.5x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 334.94 µs | ±0.2% | 3.55x | 3.6x |
+| `nub_jit` | yes | 371.21 µs | ±0.5% | 3.94x | 3.9x |
+| `polkavm64_recompiler_no_gas` | no | 411.76 µs | ±0.0% | 4.37x | 4.4x |
+| `wasmtime_winch` | no | 414.59 µs | ±0.5% | 4.40x | 4.4x |
+| `polkavm64_recompiler_async_gas_full` | yes | 443.00 µs | ±0.4% | 4.70x | 4.7x |
+| `wasmer_singlepass` | no | 1.17 ms | ±2.2% | 12.39x | 12.4x |
+| `polkavm64_interpreter` | no | 12.87 ms | ±0.5% | 136.55x | 136.6x |
+| `nub_interp` | yes | 26.96 ms | ±0.7% | 286.04x | 286.0x |
 
 ### ed25519
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 29.54 µs | ±0.6% | 1.00x | 1.0x |
-| `polkavm64_recompiler_async_gas_full` | yes | 81.99 µs | ±0.3% | 2.78x | 2.8x |
-| `polkavm64_recompiler_async_gas` | yes | 82.05 µs | ±0.2% | 2.78x | 2.8x |
-| `polkavm64_recompiler_sync_gas` | yes | 82.38 µs | ±0.3% | 2.79x | 2.8x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 82.77 µs | ±0.3% | 2.80x | 2.8x |
-| `polkavm64_recompiler_no_gas` | no | 90.54 µs | ±8.9% | 3.06x | 3.1x |
-| `nub_jit` | yes | 91.63 µs | ±0.7% | 3.10x | 3.1x |
-| `wasmtime_cranelift` | no | 199.08 µs | ±0.5% | 6.74x | 6.7x |
-| `wasmtime_cranelift_fuel` | yes | 242.71 µs | ±0.3% | 8.22x | 8.2x |
-| `wasmtime_winch` | no | 351.42 µs | ±0.9% | 11.90x | 11.9x |
-| `wasmer_singlepass` | no | 1.29 ms | ±1.7% | 43.57x | 43.6x |
-| `polkavm64_interpreter` | no | 1.77 ms | ±0.8% | 59.86x | 59.9x |
-| `nub_interp` | yes | 4.87 ms | ±0.3% | 164.86x | 164.9x |
+| `native` | no | 29.45 µs | ±0.4% | 1.00x | 1.0x |
+| `polkavm64_recompiler_async_gas` | yes | 82.21 µs | ±0.4% | 2.79x | 2.8x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 82.78 µs | ±0.3% | 2.81x | 2.8x |
+| `polkavm64_recompiler_no_gas` | no | 90.32 µs | ±0.4% | 3.07x | 3.1x |
+| `nub_jit` | yes | 93.31 µs | ±0.4% | 3.17x | 3.2x |
+| `polkavm64_recompiler_async_gas_full` | yes | 99.53 µs | ±0.8% | 3.38x | 3.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 99.87 µs | ±0.4% | 3.39x | 3.4x |
+| `wasmtime_cranelift` | no | 198.79 µs | ±0.7% | 6.75x | 6.8x |
+| `wasmtime_cranelift_fuel` | yes | 244.43 µs | ±0.4% | 8.30x | 8.3x |
+| `wasmtime_winch` | no | 350.10 µs | ±0.4% | 11.89x | 11.9x |
+| `wasmer_singlepass` | no | 1.28 ms | ±2.0% | 43.38x | 43.4x |
+| `polkavm64_interpreter` | no | 1.90 ms | ±0.7% | 64.54x | 64.5x |
+| `nub_interp` | yes | 4.92 ms | ±0.6% | 167.09x | 167.1x |
 
 ### fri-fold-tree
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 221.62 µs | ±0.5% | 1.00x | 1.0x |
-| `nub_jit` | yes | 452.27 µs | ±0.5% | 2.04x | 2.0x |
-| `polkavm64_recompiler_no_gas` | no | 498.08 µs | ±0.1% | 2.25x | 2.2x |
-| `polkavm64_recompiler_async_gas` | yes | 498.30 µs | ±0.1% | 2.25x | 2.2x |
-| `polkavm64_recompiler_sync_gas` | yes | 498.78 µs | ±0.1% | 2.25x | 2.3x |
-| `polkavm64_recompiler_async_gas_full` | yes | 498.88 µs | ±0.1% | 2.25x | 2.3x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 500.71 µs | ±0.2% | 2.26x | 2.3x |
-| `wasmtime_cranelift` | no | 736.81 µs | ±0.8% | 3.32x | 3.3x |
-| `wasmtime_cranelift_fuel` | yes | 773.91 µs | ±0.5% | 3.49x | 3.5x |
-| `wasmtime_winch` | no | 1.26 ms | ±0.5% | 5.67x | 5.7x |
-| `wasmer_singlepass` | no | 4.63 ms | ±1.8% | 20.88x | 20.9x |
-| `polkavm64_interpreter` | no | 8.88 ms | ±0.6% | 40.05x | 40.1x |
-| `nub_interp` | yes | 13.02 ms | ±0.6% | 58.76x | 58.8x |
+| `native` | no | 222.18 µs | ±0.6% | 1.00x | 1.0x |
+| `nub_jit` | yes | 458.05 µs | ±0.4% | 2.06x | 2.1x |
+| `polkavm64_recompiler_sync_gas` | yes | 499.11 µs | ±0.1% | 2.25x | 2.2x |
+| `polkavm64_recompiler_async_gas` | yes | 499.66 µs | ±0.2% | 2.25x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 500.01 µs | ±0.2% | 2.25x | 2.3x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 500.19 µs | ±0.1% | 2.25x | 2.3x |
+| `polkavm64_recompiler_async_gas_full` | yes | 500.81 µs | ±0.2% | 2.25x | 2.3x |
+| `wasmtime_cranelift` | no | 749.05 µs | ±0.5% | 3.37x | 3.4x |
+| `wasmtime_cranelift_fuel` | yes | 775.47 µs | ±0.4% | 3.49x | 3.5x |
+| `wasmtime_winch` | no | 1.27 ms | ±0.4% | 5.72x | 5.7x |
+| `wasmer_singlepass` | no | 4.50 ms | ±2.0% | 20.28x | 20.3x |
+| `sbpf_jit` | yes | 5.81 ms | ±0.5% | 26.13x | 26.1x |
+| `polkavm64_interpreter` | no | 9.83 ms | ±0.8% | 44.26x | 44.3x |
+| `nub_interp` | yes | 13.75 ms | ±0.4% | 61.87x | 61.9x |
+| `sbpf_interpreter` | yes | 28.08 ms | ±0.7% | 126.38x | 126.4x |
 
 ### goldilocks-mul
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 194.13 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` | yes | 309.79 µs | ±0.3% | 1.60x | 1.6x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 349.68 µs | ±0.2% | 1.80x | 1.8x |
-| `polkavm64_recompiler_no_gas` | no | 350.66 µs | ±0.0% | 1.81x | 1.8x |
-| `polkavm64_recompiler_async_gas` | yes | 365.41 µs | ±0.1% | 1.88x | 1.9x |
-| `polkavm64_recompiler_async_gas_full` | yes | 366.12 µs | ±0.2% | 1.89x | 1.9x |
-| `polkavm64_recompiler_sync_gas` | yes | 373.54 µs | ±0.8% | 1.92x | 1.9x |
-| `wasmtime_cranelift_fuel` | yes | 505.44 µs | ±0.6% | 2.60x | 2.6x |
-| `wasmtime_cranelift` | no | 522.30 µs | ±0.5% | 2.69x | 2.7x |
-| `wasmtime_winch` | no | 538.98 µs | ±0.7% | 2.78x | 2.8x |
-| `wasmer_singlepass` | no | 1.62 ms | ±1.1% | 8.35x | 8.4x |
-| `polkavm64_interpreter` | no | 2.09 ms | ±0.6% | 10.75x | 10.7x |
-| `nub_interp` | yes | 3.95 ms | ±0.6% | 20.36x | 20.4x |
+| `native` | no | 194.06 µs | ±0.4% | 1.00x | 1.0x |
+| `nub_jit` | yes | 307.39 µs | ±0.9% | 1.58x | 1.6x |
+| `polkavm64_recompiler_no_gas` | no | 332.07 µs | ±0.1% | 1.71x | 1.7x |
+| `polkavm64_recompiler_sync_gas` | yes | 349.37 µs | ±0.2% | 1.80x | 1.8x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 349.92 µs | ±0.3% | 1.80x | 1.8x |
+| `polkavm64_recompiler_async_gas` | yes | 365.23 µs | ±0.1% | 1.88x | 1.9x |
+| `polkavm64_recompiler_async_gas_full` | yes | 365.30 µs | ±0.1% | 1.88x | 1.9x |
+| `wasmtime_cranelift_fuel` | yes | 511.79 µs | ±0.5% | 2.64x | 2.6x |
+| `wasmtime_cranelift` | no | 521.36 µs | ±0.9% | 2.69x | 2.7x |
+| `wasmtime_winch` | no | 545.60 µs | ±0.6% | 2.81x | 2.8x |
+| `sbpf_jit` | yes | 632.05 µs | ±0.8% | 3.26x | 3.3x |
+| `wasmer_singlepass` | no | 1.64 ms | ±1.4% | 8.45x | 8.4x |
+| `polkavm64_interpreter` | no | 2.37 ms | ±0.7% | 12.21x | 12.2x |
+| `nub_interp` | yes | 3.97 ms | ±0.3% | 20.45x | 20.4x |
+| `sbpf_interpreter` | yes | 10.18 ms | ±0.4% | 52.47x | 52.5x |
 
 ### keccak
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 1.63 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` | yes | 6.50 µs | ±0.4% | 3.99x | 4.0x |
-| `wasmtime_cranelift` | no | 7.60 µs | ±1.2% | 4.67x | 4.7x |
-| `wasmtime_cranelift_fuel` | yes | 7.81 µs | ±0.7% | 4.80x | 4.8x |
-| `wasmtime_winch` | no | 8.43 µs | ±0.8% | 5.18x | 5.2x |
-| `polkavm64_recompiler_sync_gas` | yes | 10.98 µs | ±1.2% | 6.74x | 6.7x |
-| `polkavm64_recompiler_no_gas` | no | 11.60 µs | ±1.5% | 7.12x | 7.1x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 12.08 µs | ±2.4% | 7.42x | 7.4x |
-| `polkavm64_recompiler_async_gas` | yes | 12.63 µs | ±1.1% | 7.76x | 7.8x |
-| `polkavm64_recompiler_async_gas_full` | yes | 12.64 µs | ±1.0% | 7.76x | 7.8x |
-| `wasmer_singlepass` | no | 27.65 µs | ±2.0% | 16.98x | 17.0x |
-| `polkavm64_interpreter` | no | 90.40 µs | ±1.2% | 55.53x | 55.5x |
-| `nub_interp` | yes | 235.81 µs | ±0.6% | 144.85x | 144.8x |
+| `native` | no | 1.64 µs | ±0.6% | 1.00x | 1.0x |
+| `nub_jit` | yes | 6.56 µs | ±0.4% | 4.01x | 4.0x |
+| `wasmtime_cranelift` | no | 7.64 µs | ±1.5% | 4.67x | 4.7x |
+| `wasmtime_cranelift_fuel` | yes | 7.73 µs | ±0.9% | 4.72x | 4.7x |
+| `wasmtime_winch` | no | 8.36 µs | ±1.2% | 5.11x | 5.1x |
+| `polkavm64_recompiler_no_gas` | no | 10.53 µs | ±5.2% | 6.43x | 6.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 10.84 µs | ±1.3% | 6.62x | 6.6x |
+| `polkavm64_recompiler_async_gas` | yes | 10.98 µs | ±1.8% | 6.71x | 6.7x |
+| `polkavm64_recompiler_async_gas_full` | yes | 12.86 µs | ±0.8% | 7.86x | 7.9x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 12.89 µs | ±0.9% | 7.88x | 7.9x |
+| `wasmer_singlepass` | no | 27.56 µs | ±1.9% | 16.85x | 16.8x |
+| `polkavm64_interpreter` | no | 100.77 µs | ±0.8% | 61.60x | 61.6x |
+| `sbpf_jit` | yes | 176.60 µs | ±0.4% | 107.95x | 107.9x |
+| `nub_interp` | yes | 239.30 µs | ±1.1% | 146.27x | 146.3x |
+| `sbpf_interpreter` | yes | 302.32 µs | ±0.7% | 184.79x | 184.8x |
 
 ### mini-verifier
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 225.82 µs | ±0.7% | 1.00x | 1.0x |
-| `nub_jit` | yes | 475.52 µs | ±0.5% | 2.11x | 2.1x |
-| `polkavm64_recompiler_sync_gas` | yes | 512.33 µs | ±0.1% | 2.27x | 2.3x |
-| `polkavm64_recompiler_async_gas_full` | yes | 512.98 µs | ±0.1% | 2.27x | 2.3x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 513.60 µs | ±0.2% | 2.27x | 2.3x |
-| `polkavm64_recompiler_async_gas` | yes | 517.48 µs | ±0.5% | 2.29x | 2.3x |
-| `polkavm64_recompiler_no_gas` | no | 582.47 µs | ±0.0% | 2.58x | 2.6x |
-| `wasmtime_cranelift` | no | 766.30 µs | ±0.5% | 3.39x | 3.4x |
-| `wasmtime_cranelift_fuel` | yes | 785.81 µs | ±0.5% | 3.48x | 3.5x |
-| `wasmtime_winch` | no | 1.30 ms | ±0.4% | 5.77x | 5.8x |
-| `wasmer_singlepass` | no | 4.38 ms | ±0.6% | 19.38x | 19.4x |
-| `polkavm64_interpreter` | no | 9.55 ms | ±0.7% | 42.28x | 42.3x |
-| `nub_interp` | yes | 13.52 ms | ±0.6% | 59.89x | 59.9x |
+| `native` | no | 231.78 µs | ±0.3% | 1.00x | 1.0x |
+| `nub_jit` | yes | 471.39 µs | ±0.5% | 2.03x | 2.0x |
+| `polkavm64_recompiler_sync_gas` | yes | 515.96 µs | ±0.2% | 2.23x | 2.2x |
+| `polkavm64_recompiler_async_gas_full` | yes | 517.21 µs | ±0.5% | 2.23x | 2.2x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 518.11 µs | ±0.4% | 2.24x | 2.2x |
+| `polkavm64_recompiler_async_gas` | yes | 519.56 µs | ±0.6% | 2.24x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 521.32 µs | ±0.7% | 2.25x | 2.2x |
+| `wasmtime_cranelift` | no | 781.66 µs | ±0.4% | 3.37x | 3.4x |
+| `wasmtime_cranelift_fuel` | yes | 797.98 µs | ±0.5% | 3.44x | 3.4x |
+| `wasmtime_winch` | no | 1.32 ms | ±0.5% | 5.68x | 5.7x |
+| `wasmer_singlepass` | no | 4.43 ms | ±1.6% | 19.10x | 19.1x |
+| `sbpf_jit` | yes | 6.42 ms | ±0.7% | 27.69x | 27.7x |
+| `polkavm64_interpreter` | no | 10.66 ms | ±0.7% | 45.99x | 46.0x |
+| `nub_interp` | yes | 14.41 ms | ±0.8% | 62.19x | 62.2x |
+| `sbpf_interpreter` | yes | 29.98 ms | ±0.4% | 129.36x | 129.4x |
 
 ### poly-eval
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 652.67 µs | ±0.3% | 1.00x | 1.0x |
-| `nub_jit` | yes | 1.10 ms | ±0.6% | 1.69x | 1.7x |
-| `polkavm64_recompiler_no_gas` | no | 1.19 ms | ±0.6% | 1.82x | 1.8x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.20 ms | ±0.2% | 1.83x | 1.8x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.21 ms | ±0.4% | 1.86x | 1.9x |
-| `polkavm64_recompiler_sync_gas` | yes | 1.22 ms | ±0.3% | 1.87x | 1.9x |
-| `polkavm64_recompiler_async_gas` | yes | 1.24 ms | ±0.6% | 1.91x | 1.9x |
-| `wasmtime_cranelift_fuel` | yes | 1.48 ms | ±1.0% | 2.27x | 2.3x |
-| `wasmtime_cranelift` | no | 1.50 ms | ±0.5% | 2.30x | 2.3x |
-| `wasmtime_winch` | no | 1.73 ms | ±0.6% | 2.65x | 2.6x |
-| `wasmer_singlepass` | no | 6.08 ms | ±1.1% | 9.31x | 9.3x |
-| `polkavm64_interpreter` | no | 8.09 ms | ±0.9% | 12.40x | 12.4x |
-| `nub_interp` | yes | 17.40 ms | ±0.9% | 26.65x | 26.7x |
+| `native` | no | 666.59 µs | ±0.6% | 1.00x | 1.0x |
+| `nub_jit` | yes | 1.11 ms | ±0.6% | 1.66x | 1.7x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.14 ms | ±0.1% | 1.71x | 1.7x |
+| `polkavm64_recompiler_sync_gas` | yes | 1.14 ms | ±0.2% | 1.72x | 1.7x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.21 ms | ±0.4% | 1.81x | 1.8x |
+| `polkavm64_recompiler_async_gas` | yes | 1.21 ms | ±0.2% | 1.82x | 1.8x |
+| `polkavm64_recompiler_no_gas` | no | 1.21 ms | ±0.2% | 1.82x | 1.8x |
+| `wasmtime_cranelift_fuel` | yes | 1.49 ms | ±0.6% | 2.24x | 2.2x |
+| `wasmtime_cranelift` | no | 1.52 ms | ±0.4% | 2.28x | 2.3x |
+| `wasmtime_winch` | no | 1.70 ms | ±0.6% | 2.55x | 2.5x |
+| `sbpf_jit` | yes | 4.70 ms | ±0.4% | 7.06x | 7.1x |
+| `wasmer_singlepass` | no | 5.84 ms | ±1.0% | 8.77x | 8.8x |
+| `polkavm64_interpreter` | no | 9.06 ms | ±1.4% | 13.59x | 13.6x |
+| `nub_interp` | yes | 17.70 ms | ±0.8% | 26.55x | 26.6x |
+| `sbpf_interpreter` | yes | 33.36 ms | ±0.7% | 50.05x | 50.0x |
 
 ### poseidon2-perm
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 548.84 µs | ±0.2% | 1.00x | 1.0x |
-| `nub_jit` | yes | 1.15 ms | ±0.4% | 2.10x | 2.1x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.25 ms | ±0.1% | 2.27x | 2.3x |
-| `polkavm64_recompiler_async_gas` | yes | 1.25 ms | ±0.1% | 2.27x | 2.3x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.25 ms | ±0.1% | 2.28x | 2.3x |
-| `polkavm64_recompiler_sync_gas` | yes | 1.25 ms | ±0.1% | 2.28x | 2.3x |
-| `polkavm64_recompiler_no_gas` | no | 1.26 ms | ±0.4% | 2.29x | 2.3x |
-| `wasmtime_cranelift` | no | 1.88 ms | ±0.8% | 3.42x | 3.4x |
-| `wasmtime_cranelift_fuel` | yes | 1.94 ms | ±0.4% | 3.54x | 3.5x |
-| `wasmtime_winch` | no | 3.09 ms | ±0.6% | 5.63x | 5.6x |
-| `wasmer_singlepass` | no | 10.62 ms | ±0.3% | 19.35x | 19.3x |
-| `polkavm64_interpreter` | no | 22.19 ms | ±0.7% | 40.44x | 40.4x |
-| `nub_interp` | yes | 34.80 ms | ±0.8% | 63.40x | 63.4x |
+| `native` | no | 558.51 µs | ±0.7% | 1.00x | 1.0x |
+| `nub_jit` | yes | 1.17 ms | ±0.5% | 2.09x | 2.1x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.25 ms | ±0.1% | 2.24x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 1.25 ms | ±0.3% | 2.24x | 2.2x |
+| `polkavm64_recompiler_async_gas` | yes | 1.25 ms | ±0.1% | 2.24x | 2.2x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.25 ms | ±0.1% | 2.25x | 2.2x |
+| `polkavm64_recompiler_sync_gas` | yes | 1.26 ms | ±0.2% | 2.25x | 2.2x |
+| `wasmtime_cranelift` | no | 1.91 ms | ±0.5% | 3.42x | 3.4x |
+| `wasmtime_cranelift_fuel` | yes | 1.95 ms | ±0.3% | 3.49x | 3.5x |
+| `wasmtime_winch` | no | 3.31 ms | ±0.4% | 5.92x | 5.9x |
+| `wasmer_singlepass` | no | 10.61 ms | ±0.1% | 18.99x | 19.0x |
+| `sbpf_jit` | yes | 16.03 ms | ±0.4% | 28.70x | 28.7x |
+| `polkavm64_interpreter` | no | 24.66 ms | ±0.7% | 44.16x | 44.2x |
+| `nub_interp` | yes | 36.51 ms | ±0.8% | 65.37x | 65.4x |
+| `sbpf_interpreter` | yes | 76.03 ms | ±1.0% | 136.13x | 136.1x |
 
 ### prime-sieve
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 55.60 µs | ±0.6% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 114.02 µs | ±0.1% | 2.05x | 2.1x |
-| `wasmtime_cranelift` | no | 115.06 µs | ±0.6% | 2.07x | 2.1x |
-| `wasmer_singlepass` | no | 159.06 µs | ±2.7% | 2.86x | 2.9x |
-| `wasmtime_cranelift_fuel` | yes | 166.04 µs | ±0.6% | 2.99x | 3.0x |
-| `wasmtime_winch` | no | 169.32 µs | ±0.5% | 3.05x | 3.0x |
-| `nub_jit` | yes | 180.14 µs | ±0.5% | 3.24x | 3.2x |
-| `polkavm64_recompiler_async_gas_full` | yes | 199.67 µs | ±0.1% | 3.59x | 3.6x |
-| `polkavm64_recompiler_async_gas` | yes | 199.73 µs | ±0.1% | 3.59x | 3.6x |
-| `polkavm64_recompiler_sync_gas` | yes | 201.11 µs | ±0.1% | 3.62x | 3.6x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 216.61 µs | ±0.1% | 3.90x | 3.9x |
-| `polkavm64_interpreter` | no | 2.09 ms | ±0.4% | 37.58x | 37.6x |
-| `nub_interp` | yes | 8.02 ms | ±0.7% | 144.27x | 144.3x |
+| `native` | no | 55.49 µs | ±0.5% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 104.19 µs | ±0.4% | 1.88x | 1.9x |
+| `wasmtime_cranelift` | no | 115.89 µs | ±0.9% | 2.09x | 2.1x |
+| `wasmtime_cranelift_fuel` | yes | 165.01 µs | ±0.6% | 2.97x | 3.0x |
+| `wasmtime_winch` | no | 171.11 µs | ±0.5% | 3.08x | 3.1x |
+| `wasmer_singlepass` | no | 171.31 µs | ±3.4% | 3.09x | 3.1x |
+| `nub_jit` | yes | 180.39 µs | ±1.0% | 3.25x | 3.3x |
+| `polkavm64_recompiler_async_gas` | yes | 199.76 µs | ±0.1% | 3.60x | 3.6x |
+| `polkavm64_recompiler_async_gas_full` | yes | 200.39 µs | ±0.1% | 3.61x | 3.6x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 201.05 µs | ±0.1% | 3.62x | 3.6x |
+| `polkavm64_recompiler_sync_gas` | yes | 201.27 µs | ±0.2% | 3.63x | 3.6x |
+| `polkavm64_interpreter` | no | 2.10 ms | ±1.0% | 37.83x | 37.8x |
+| `nub_interp` | yes | 8.09 ms | ±0.6% | 145.82x | 145.8x |
 
 ## runtime
 
@@ -715,164 +767,178 @@ Rows are absent where a program cannot be re-run in one instance (the three gues
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 628.9 ns | ±0.9% | 1.00x | 1.0x |
-| `wasmtime_cranelift` | no | 764.4 ns | ±0.5% | 1.22x | 1.2x |
-| `wasmtime_cranelift_fuel` | yes | 790.2 ns | ±0.6% | 1.26x | 1.3x |
-| `wasmtime_winch` | no | 1.22 µs | ±0.7% | 1.94x | 1.9x |
-| `polkavm64_recompiler_no_gas` | no | 1.41 µs | ±0.4% | 2.24x | 2.2x |
-| `polkavm64_recompiler_async_gas_full` | yes | 2.11 µs | ±0.3% | 3.35x | 3.3x |
-| `polkavm64_recompiler_sync_gas` | yes | 2.20 µs | ±0.4% | 3.50x | 3.5x |
-| `polkavm64_recompiler_async_gas` | yes | 2.34 µs | ±0.5% | 3.73x | 3.7x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 2.37 µs | ±0.3% | 3.77x | 3.8x |
-| `nub_jit` † | yes | 4.56 µs | ±0.5% | 7.26x | 7.3x |
-| `wasmer_singlepass` | no | 4.69 µs | ±0.3% | 7.45x | 7.5x |
-| `polkavm64_interpreter` | no | 40.43 µs | ±0.7% | 64.29x | 64.3x |
-| `nub_interp` | yes | 140.80 µs | ±0.7% | 223.90x | 223.9x |
+| `native` | no | 639.5 ns | ±0.7% | 1.00x | 1.0x |
+| `wasmtime_cranelift` | no | 767.8 ns | ±0.7% | 1.20x | 1.2x |
+| `wasmtime_cranelift_fuel` | yes | 797.9 ns | ±0.4% | 1.25x | 1.2x |
+| `wasmtime_winch` | no | 1.24 µs | ±0.4% | 1.94x | 1.9x |
+| `polkavm64_recompiler_no_gas` | no | 1.41 µs | ±0.4% | 2.20x | 2.2x |
+| `polkavm64_recompiler_async_gas` | yes | 2.16 µs | ±0.3% | 3.38x | 3.4x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 2.17 µs | ±0.2% | 3.40x | 3.4x |
+| `polkavm64_recompiler_async_gas_full` | yes | 2.27 µs | ±0.2% | 3.55x | 3.6x |
+| `polkavm64_recompiler_sync_gas` | yes | 2.45 µs | ±0.5% | 3.83x | 3.8x |
+| `nub_jit` † | yes | 4.75 µs | ±0.3% | 7.43x | 7.4x |
+| `wasmer_singlepass` | no | 4.75 µs | ±0.7% | 7.43x | 7.4x |
+| `polkavm64_interpreter` | no | 45.05 µs | ±0.6% | 70.44x | 70.4x |
+| `sbpf_jit` | yes | 61.54 µs | ±0.5% | 96.24x | 96.2x |
+| `sbpf_interpreter` | yes | 129.71 µs | ±0.5% | 202.85x | 202.8x |
+| `nub_interp` | yes | 145.62 µs | ±0.7% | 227.72x | 227.7x |
 
 ### ecrecover
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 91.67 µs | ±0.3% | 1.00x | 1.0x |
-| `wasmtime_cranelift` | no | 252.03 µs | ±0.4% | 2.75x | 2.7x |
-| `wasmtime_cranelift_fuel` | yes | 259.77 µs | ±0.4% | 2.83x | 2.8x |
-| `polkavm64_recompiler_no_gas` | no | 308.40 µs | ±0.1% | 3.36x | 3.4x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 320.02 µs | ±0.1% | 3.49x | 3.5x |
-| `polkavm64_recompiler_sync_gas` | yes | 320.29 µs | ±0.2% | 3.49x | 3.5x |
-| `polkavm64_recompiler_async_gas_full` | yes | 323.06 µs | ±0.1% | 3.52x | 3.5x |
-| `polkavm64_recompiler_async_gas` | yes | 323.45 µs | ±0.2% | 3.53x | 3.5x |
-| `nub_jit` † | yes | 368.45 µs | ±0.6% | 4.02x | 4.0x |
-| `wasmtime_winch` | no | 394.13 µs | ±0.4% | 4.30x | 4.3x |
-| `wasmer_singlepass` | no | 762.30 µs | ±0.7% | 8.32x | 8.3x |
-| `polkavm64_interpreter` | no | 11.40 ms | ±1.6% | 124.35x | 124.3x |
-| `nub_interp` | yes | 26.32 ms | ±0.7% | 287.10x | 287.1x |
+| `native` | no | 93.93 µs | ±0.5% | 1.00x | 1.0x |
+| `wasmtime_cranelift` | no | 252.56 µs | ±0.4% | 2.69x | 2.7x |
+| `wasmtime_cranelift_fuel` | yes | 261.00 µs | ±0.9% | 2.78x | 2.8x |
+| `polkavm64_recompiler_no_gas` | no | 311.29 µs | ±0.4% | 3.31x | 3.3x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 321.74 µs | ±0.3% | 3.43x | 3.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 322.34 µs | ±0.5% | 3.43x | 3.4x |
+| `polkavm64_recompiler_async_gas_full` | yes | 324.55 µs | ±0.3% | 3.46x | 3.5x |
+| `polkavm64_recompiler_async_gas` | yes | 325.37 µs | ±0.3% | 3.46x | 3.5x |
+| `nub_jit` † | yes | 371.39 µs | ±0.4% | 3.95x | 4.0x |
+| `wasmtime_winch` | no | 409.75 µs | ±0.3% | 4.36x | 4.4x |
+| `wasmer_singlepass` | no | 765.26 µs | ±0.5% | 8.15x | 8.1x |
+| `polkavm64_interpreter` | no | 12.01 ms | ±0.8% | 127.84x | 127.8x |
+| `nub_interp` | yes | 26.88 ms | ±0.5% | 286.13x | 286.1x |
 
 ### ed25519
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 29.75 µs | ±0.8% | 1.00x | 1.0x |
-| `polkavm64_recompiler_no_gas` | no | 65.67 µs | ±0.1% | 2.21x | 2.2x |
-| `polkavm64_recompiler_async_gas_full` | yes | 73.76 µs | ±0.1% | 2.48x | 2.5x |
-| `polkavm64_recompiler_sync_gas` | yes | 73.88 µs | ±0.1% | 2.48x | 2.5x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 73.91 µs | ±0.2% | 2.48x | 2.5x |
-| `nub_jit` † | yes | 90.61 µs | ±0.7% | 3.05x | 3.0x |
-| `polkavm64_recompiler_async_gas` | yes | 91.59 µs | ±0.0% | 3.08x | 3.1x |
-| `wasmtime_cranelift` | no | 192.16 µs | ±0.5% | 6.46x | 6.5x |
-| `wasmtime_cranelift_fuel` | yes | 232.29 µs | ±0.3% | 7.81x | 7.8x |
-| `wasmtime_winch` | no | 340.82 µs | ±0.4% | 11.46x | 11.5x |
-| `wasmer_singlepass` | no | 906.42 µs | ±0.3% | 30.47x | 30.5x |
-| `polkavm64_interpreter` | no | 1.43 ms | ±0.9% | 48.18x | 48.2x |
-| `nub_interp` | yes | 4.80 ms | ±0.8% | 161.38x | 161.4x |
+| `native` | no | 29.74 µs | ±0.6% | 1.00x | 1.0x |
+| `polkavm64_recompiler_no_gas` | no | 65.74 µs | ±0.2% | 2.21x | 2.2x |
+| `polkavm64_recompiler_async_gas_full` | yes | 73.63 µs | ±0.1% | 2.48x | 2.5x |
+| `polkavm64_recompiler_sync_gas` | yes | 73.78 µs | ±0.1% | 2.48x | 2.5x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 91.38 µs | ±0.0% | 3.07x | 3.1x |
+| `polkavm64_recompiler_async_gas` | yes | 91.60 µs | ±0.0% | 3.08x | 3.1x |
+| `nub_jit` † | yes | 93.37 µs | ±0.3% | 3.14x | 3.1x |
+| `wasmtime_cranelift` | no | 190.39 µs | ±0.7% | 6.40x | 6.4x |
+| `wasmtime_cranelift_fuel` | yes | 237.30 µs | ±0.3% | 7.98x | 8.0x |
+| `wasmtime_winch` | no | 341.80 µs | ±0.3% | 11.49x | 11.5x |
+| `wasmer_singlepass` | no | 908.94 µs | ±0.5% | 30.57x | 30.6x |
+| `polkavm64_interpreter` | no | 1.62 ms | ±0.7% | 54.53x | 54.5x |
+| `nub_interp` | yes | 4.89 ms | ±0.5% | 164.58x | 164.6x |
 
 ### fri-fold-tree
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 222.21 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` † | yes | 456.30 µs | ±0.4% | 2.05x | 2.1x |
-| `wasmtime_cranelift` | no | 721.32 µs | ±0.5% | 3.25x | 3.2x |
-| `wasmtime_cranelift_fuel` | yes | 748.69 µs | ±0.4% | 3.37x | 3.4x |
-| `wasmtime_winch` | no | 1.25 ms | ±0.5% | 5.64x | 5.6x |
-| `wasmer_singlepass` | no | 3.61 ms | ±0.3% | 16.26x | 16.3x |
+| `native` | no | 223.02 µs | ±0.4% | 1.00x | 1.0x |
+| `nub_jit` † | yes | 454.29 µs | ±0.6% | 2.04x | 2.0x |
+| `wasmtime_cranelift` | no | 728.80 µs | ±0.4% | 3.27x | 3.3x |
+| `wasmtime_cranelift_fuel` | yes | 756.82 µs | ±0.5% | 3.39x | 3.4x |
+| `wasmtime_winch` | no | 1.27 ms | ±0.8% | 5.70x | 5.7x |
+| `wasmer_singlepass` | no | 3.64 ms | ±0.4% | 16.30x | 16.3x |
+| `sbpf_jit` | yes | 5.84 ms | ±0.5% | 26.16x | 26.2x |
+| `sbpf_interpreter` | yes | 28.20 ms | ±0.5% | 126.45x | 126.4x |
 
 ### goldilocks-mul
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 194.84 µs | ±0.5% | 1.00x | 1.0x |
-| `nub_jit` † | yes | 307.84 µs | ±0.4% | 1.58x | 1.6x |
-| `polkavm64_recompiler_no_gas` | no | 329.01 µs | ±0.1% | 1.69x | 1.7x |
-| `polkavm64_recompiler_sync_gas` | yes | 346.00 µs | ±0.1% | 1.78x | 1.8x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 346.13 µs | ±0.1% | 1.78x | 1.8x |
-| `polkavm64_recompiler_async_gas` | yes | 358.34 µs | ±0.1% | 1.84x | 1.8x |
-| `polkavm64_recompiler_async_gas_full` | yes | 360.58 µs | ±0.1% | 1.85x | 1.9x |
-| `wasmtime_cranelift` | no | 510.14 µs | ±0.5% | 2.62x | 2.6x |
-| `wasmtime_cranelift_fuel` | yes | 512.45 µs | ±0.4% | 2.63x | 2.6x |
-| `wasmtime_winch` | no | 529.88 µs | ±0.7% | 2.72x | 2.7x |
-| `wasmer_singlepass` | no | 1.42 ms | ±0.6% | 7.30x | 7.3x |
-| `polkavm64_interpreter` | no | 2.08 ms | ±0.8% | 10.66x | 10.7x |
-| `nub_interp` | yes | 3.91 ms | ±0.5% | 20.05x | 20.0x |
+| `native` | no | 196.56 µs | ±0.7% | 1.00x | 1.0x |
+| `nub_jit` † | yes | 306.40 µs | ±0.4% | 1.56x | 1.6x |
+| `polkavm64_recompiler_no_gas` | no | 331.61 µs | ±0.2% | 1.69x | 1.7x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 346.89 µs | ±0.1% | 1.76x | 1.8x |
+| `polkavm64_recompiler_sync_gas` | yes | 347.46 µs | ±0.3% | 1.77x | 1.8x |
+| `polkavm64_recompiler_async_gas_full` | yes | 359.63 µs | ±0.1% | 1.83x | 1.8x |
+| `polkavm64_recompiler_async_gas` | yes | 359.99 µs | ±0.3% | 1.83x | 1.8x |
+| `wasmtime_cranelift_fuel` | yes | 511.29 µs | ±0.5% | 2.60x | 2.6x |
+| `wasmtime_cranelift` | no | 517.32 µs | ±0.6% | 2.63x | 2.6x |
+| `wasmtime_winch` | no | 532.74 µs | ±0.7% | 2.71x | 2.7x |
+| `sbpf_jit` | yes | 658.01 µs | ±0.5% | 3.35x | 3.3x |
+| `wasmer_singlepass` | no | 1.45 ms | ±0.6% | 7.36x | 7.4x |
+| `polkavm64_interpreter` | no | 2.38 ms | ±0.8% | 12.12x | 12.1x |
+| `nub_interp` | yes | 4.00 ms | ±0.7% | 20.34x | 20.3x |
+| `sbpf_interpreter` | yes | 10.18 ms | ±0.7% | 51.78x | 51.8x |
 
 ### keccak
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 1.61 µs | ±0.6% | 1.00x | 1.0x |
-| `wasmtime_cranelift` | no | 2.19 µs | ±0.5% | 1.36x | 1.4x |
-| `wasmtime_cranelift_fuel` | yes | 2.28 µs | ±0.5% | 1.42x | 1.4x |
-| `polkavm64_recompiler_no_gas` | no | 2.37 µs | ±0.2% | 1.48x | 1.5x |
-| `wasmtime_winch` | no | 2.70 µs | ±0.4% | 1.68x | 1.7x |
-| `polkavm64_recompiler_async_gas_full` | yes | 3.36 µs | ±0.2% | 2.09x | 2.1x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 3.39 µs | ±0.3% | 2.10x | 2.1x |
-| `wasmer_singlepass` | no | 3.45 µs | ±0.4% | 2.14x | 2.1x |
-| `polkavm64_recompiler_sync_gas` | yes | 3.52 µs | ±0.2% | 2.18x | 2.2x |
-| `polkavm64_recompiler_async_gas` | yes | 3.53 µs | ±0.2% | 2.19x | 2.2x |
-| `nub_jit` † | yes | 6.66 µs | ±0.4% | 4.14x | 4.1x |
-| `polkavm64_interpreter` | no | 70.68 µs | ±1.3% | 43.91x | 43.9x |
-| `nub_interp` | yes | 230.67 µs | ±0.8% | 143.32x | 143.3x |
+| `native` | no | 1.64 µs | ±0.2% | 1.00x | 1.0x |
+| `wasmtime_cranelift` | no | 2.17 µs | ±0.4% | 1.32x | 1.3x |
+| `wasmtime_cranelift_fuel` | yes | 2.28 µs | ±0.5% | 1.40x | 1.4x |
+| `polkavm64_recompiler_no_gas` | no | 2.37 µs | ±0.2% | 1.45x | 1.4x |
+| `wasmtime_winch` | no | 2.70 µs | ±0.6% | 1.65x | 1.7x |
+| `polkavm64_recompiler_async_gas_full` | yes | 3.36 µs | ±0.2% | 2.05x | 2.1x |
+| `wasmer_singlepass` | no | 3.50 µs | ±0.3% | 2.14x | 2.1x |
+| `polkavm64_recompiler_async_gas` | yes | 3.51 µs | ±0.1% | 2.14x | 2.1x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 3.53 µs | ±0.1% | 2.16x | 2.2x |
+| `polkavm64_recompiler_sync_gas` | yes | 3.96 µs | ±0.0% | 2.42x | 2.4x |
+| `nub_jit` † | yes | 6.54 µs | ±0.4% | 3.99x | 4.0x |
+| `polkavm64_interpreter` | no | 80.26 µs | ±0.3% | 49.05x | 49.1x |
+| `sbpf_jit` | yes | 175.11 µs | ±0.4% | 107.01x | 107.0x |
+| `nub_interp` | yes | 237.69 µs | ±0.6% | 145.26x | 145.3x |
+| `sbpf_interpreter` | yes | 297.20 µs | ±0.7% | 181.62x | 181.6x |
 
 ### mini-verifier
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 230.80 µs | ±0.3% | 1.00x | 1.0x |
-| `nub_jit` † | yes | 467.07 µs | ±0.6% | 2.02x | 2.0x |
-| `polkavm64_recompiler_async_gas_full` | yes | 507.94 µs | ±0.2% | 2.20x | 2.2x |
-| `polkavm64_recompiler_async_gas` | yes | 508.43 µs | ±0.2% | 2.20x | 2.2x |
-| `polkavm64_recompiler_sync_gas` | yes | 509.12 µs | ±0.3% | 2.21x | 2.2x |
-| `polkavm64_recompiler_no_gas` | no | 509.14 µs | ±0.3% | 2.21x | 2.2x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 509.55 µs | ±0.3% | 2.21x | 2.2x |
-| `wasmtime_cranelift` | no | 764.94 µs | ±0.6% | 3.31x | 3.3x |
-| `wasmtime_cranelift_fuel` | yes | 794.11 µs | ±0.4% | 3.44x | 3.4x |
-| `wasmtime_winch` | no | 1.32 ms | ±0.5% | 5.72x | 5.7x |
-| `wasmer_singlepass` | no | 3.95 ms | ±0.5% | 17.11x | 17.1x |
-| `polkavm64_interpreter` | no | 9.62 ms | ±0.7% | 41.67x | 41.7x |
-| `nub_interp` | yes | 13.66 ms | ±0.4% | 59.18x | 59.2x |
+| `native` | no | 227.86 µs | ±0.6% | 1.00x | 1.0x |
+| `nub_jit` † | yes | 471.62 µs | ±0.3% | 2.07x | 2.1x |
+| `polkavm64_recompiler_async_gas` | yes | 510.08 µs | ±0.2% | 2.24x | 2.2x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 510.20 µs | ±0.3% | 2.24x | 2.2x |
+| `polkavm64_recompiler_sync_gas` | yes | 511.12 µs | ±0.2% | 2.24x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 512.57 µs | ±0.6% | 2.25x | 2.2x |
+| `polkavm64_recompiler_async_gas_full` | yes | 574.03 µs | ±0.1% | 2.52x | 2.5x |
+| `wasmtime_cranelift` | no | 780.06 µs | ±0.3% | 3.42x | 3.4x |
+| `wasmtime_cranelift_fuel` | yes | 790.30 µs | ±0.7% | 3.47x | 3.5x |
+| `wasmtime_winch` | no | 1.32 ms | ±1.0% | 5.81x | 5.8x |
+| `wasmer_singlepass` | no | 3.97 ms | ±0.5% | 17.42x | 17.4x |
+| `sbpf_jit` | yes | 6.26 ms | ±0.6% | 27.49x | 27.5x |
+| `polkavm64_interpreter` | no | 10.60 ms | ±0.3% | 46.54x | 46.5x |
+| `nub_interp` | yes | 14.42 ms | ±0.7% | 63.28x | 63.3x |
+| `sbpf_interpreter` | yes | 29.87 ms | ±0.5% | 131.09x | 131.1x |
 
 ### poly-eval
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 659.94 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` † | yes | 1.10 ms | ±0.4% | 1.66x | 1.7x |
-| `wasmtime_cranelift_fuel` | yes | 1.47 ms | ±0.4% | 2.23x | 2.2x |
-| `wasmtime_cranelift` | no | 1.52 ms | ±0.4% | 2.30x | 2.3x |
-| `wasmtime_winch` | no | 1.68 ms | ±0.7% | 2.55x | 2.6x |
-| `wasmer_singlepass` | no | 4.93 ms | ±0.4% | 7.48x | 7.5x |
+| `native` | no | 668.99 µs | ±0.4% | 1.00x | 1.0x |
+| `nub_jit` † | yes | 1.11 ms | ±0.4% | 1.65x | 1.7x |
+| `wasmtime_cranelift_fuel` | yes | 1.48 ms | ±0.5% | 2.21x | 2.2x |
+| `wasmtime_cranelift` | no | 1.50 ms | ±0.5% | 2.24x | 2.2x |
+| `wasmtime_winch` | no | 1.67 ms | ±0.4% | 2.50x | 2.5x |
+| `sbpf_jit` | yes | 4.68 ms | ±0.3% | 6.99x | 7.0x |
+| `wasmer_singlepass` | no | 4.96 ms | ±0.3% | 7.41x | 7.4x |
+| `sbpf_interpreter` | yes | 33.16 ms | ±0.5% | 49.57x | 49.6x |
 
 ### poseidon2-perm
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 559.16 µs | ±0.4% | 1.00x | 1.0x |
-| `nub_jit` † | yes | 1.18 ms | ±0.4% | 2.11x | 2.1x |
-| `polkavm64_recompiler_no_gas` | no | 1.24 ms | ±0.2% | 2.22x | 2.2x |
-| `polkavm64_recompiler_async_gas_full` | yes | 1.24 ms | ±0.1% | 2.22x | 2.2x |
-| `polkavm64_recompiler_async_gas` | yes | 1.24 ms | ±0.2% | 2.22x | 2.2x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 1.25 ms | ±0.1% | 2.23x | 2.2x |
-| `polkavm64_recompiler_sync_gas` | yes | 1.40 ms | ±0.0% | 2.51x | 2.5x |
-| `wasmtime_cranelift` | no | 1.88 ms | ±0.7% | 3.36x | 3.4x |
-| `wasmtime_cranelift_fuel` | yes | 1.93 ms | ±0.4% | 3.45x | 3.5x |
-| `wasmtime_winch` | no | 3.23 ms | ±0.8% | 5.78x | 5.8x |
-| `wasmer_singlepass` | no | 9.91 ms | ±0.3% | 17.73x | 17.7x |
-| `polkavm64_interpreter` | no | 22.23 ms | ±0.8% | 39.76x | 39.8x |
-| `nub_interp` | yes | 34.58 ms | ±0.9% | 61.85x | 61.8x |
+| `native` | no | 558.46 µs | ±0.8% | 1.00x | 1.0x |
+| `nub_jit` † | yes | 1.17 ms | ±0.4% | 2.10x | 2.1x |
+| `polkavm64_recompiler_async_gas_full` | yes | 1.24 ms | ±0.2% | 2.23x | 2.2x |
+| `polkavm64_recompiler_async_gas` | yes | 1.25 ms | ±0.2% | 2.23x | 2.2x |
+| `polkavm64_recompiler_sync_gas` | yes | 1.25 ms | ±0.4% | 2.24x | 2.2x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 1.25 ms | ±0.3% | 2.25x | 2.2x |
+| `polkavm64_recompiler_no_gas` | no | 1.37 ms | ±0.6% | 2.46x | 2.5x |
+| `wasmtime_cranelift` | no | 1.90 ms | ±0.6% | 3.41x | 3.4x |
+| `wasmtime_cranelift_fuel` | yes | 1.95 ms | ±0.3% | 3.49x | 3.5x |
+| `wasmtime_winch` | no | 3.10 ms | ±0.6% | 5.54x | 5.5x |
+| `wasmer_singlepass` | no | 9.75 ms | ±0.8% | 17.46x | 17.5x |
+| `sbpf_jit` | yes | 15.99 ms | ±0.5% | 28.63x | 28.6x |
+| `polkavm64_interpreter` | no | 24.51 ms | ±0.9% | 43.90x | 43.9x |
+| `nub_interp` | yes | 36.50 ms | ±0.4% | 65.35x | 65.4x |
+| `sbpf_interpreter` | yes | 76.61 ms | ±0.4% | 137.18x | 137.2x |
 
 ### prime-sieve
 
 | Engine | Metered | Time | ± | vs fastest | vs native |
 |---|---|--:|--:|--:|--:|
-| `native` | no | 55.25 µs | ±0.6% | 1.00x | 1.0x |
-| `wasmtime_cranelift` | no | 75.66 µs | ±0.6% | 1.37x | 1.4x |
-| `polkavm64_recompiler_no_gas` | no | 88.63 µs | ±4.1% | 1.60x | 1.6x |
-| `wasmer_singlepass` | no | 118.26 µs | ±0.7% | 2.14x | 2.1x |
-| `wasmtime_cranelift_fuel` | yes | 140.50 µs | ±0.3% | 2.54x | 2.5x |
-| `wasmtime_winch` | no | 147.46 µs | ±0.6% | 2.67x | 2.7x |
-| `nub_jit` † | yes | 183.77 µs | ±0.9% | 3.33x | 3.3x |
-| `polkavm64_recompiler_sync_gas_full` | yes | 184.79 µs | ±0.1% | 3.34x | 3.3x |
-| `polkavm64_recompiler_async_gas` | yes | 184.86 µs | ±0.2% | 3.35x | 3.3x |
-| `polkavm64_recompiler_async_gas_full` | yes | 185.11 µs | ±0.2% | 3.35x | 3.4x |
-| `polkavm64_recompiler_sync_gas` | yes | 185.17 µs | ±0.1% | 3.35x | 3.4x |
-| `polkavm64_interpreter` | no | 2.09 ms | ±0.6% | 37.85x | 37.9x |
-| `nub_interp` | yes | 7.91 ms | ±0.7% | 143.21x | 143.2x |
+| `native` | no | 56.07 µs | ±0.5% | 1.00x | 1.0x |
+| `wasmtime_cranelift` | no | 77.89 µs | ±1.8% | 1.39x | 1.4x |
+| `polkavm64_recompiler_no_gas` | no | 90.57 µs | ±0.1% | 1.62x | 1.6x |
+| `wasmer_singlepass` | no | 120.34 µs | ±0.4% | 2.15x | 2.1x |
+| `wasmtime_cranelift_fuel` | yes | 143.36 µs | ±0.5% | 2.56x | 2.6x |
+| `wasmtime_winch` | no | 147.66 µs | ±0.5% | 2.63x | 2.6x |
+| `nub_jit` † | yes | 184.75 µs | ±0.6% | 3.29x | 3.3x |
+| `polkavm64_recompiler_sync_gas_full` | yes | 185.05 µs | ±0.1% | 3.30x | 3.3x |
+| `polkavm64_recompiler_async_gas_full` | yes | 185.27 µs | ±0.2% | 3.30x | 3.3x |
+| `polkavm64_recompiler_async_gas` | yes | 189.63 µs | ±0.8% | 3.38x | 3.4x |
+| `polkavm64_recompiler_sync_gas` | yes | 199.60 µs | ±0.2% | 3.56x | 3.6x |
+| `polkavm64_interpreter` | no | 2.09 ms | ±0.5% | 37.33x | 37.3x |
+| `nub_interp` | yes | 8.01 ms | ±0.9% | 142.79x | 142.8x |
