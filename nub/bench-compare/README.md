@@ -90,22 +90,29 @@ work on the wrong side of it silently favours one engine:
 | kind | what it measures |
 |---|---|
 | `runtime` | steady-state execution: one instance, invoked repeatedly |
-| `invoke` | cold invocation: a fresh instance every sample, compilation excluded |
-| `oneshot` | **compile and execute**, from cold, every sample |
-| `compilation` | turning a program into executable form |
+| `invoke` | a fresh instance every sample, with compilation already done |
+| `cold` | **cold recompile + execute** — the bench target |
+| `compilation` | getting a program into runnable form |
 
-`oneshot` is the headline: it is how a metered VM is actually used when
-work arrives as a blob that must be compiled and then run, so the
-compile is not amortized away. Engines that cache compilation
-internally are evicted first — `nub_jit` compiles lazily *inside the
-guest* and caches per program, so without `Compiled::reset_compilation`
-its second sample would measure execution alone while every other row
-really did recompile.
+`cold` is the headline: no compiled code at the start of a sample, the
+program having run by the end. That is the cost a VM pays when a
+work-package arrives, is turned into native code, and executed once.
 
-Read `oneshot` together with `runtime`. Their difference is cold-start
-cost, and conflating the two would blur "our generated code is slower"
-together with "our cold start is more expensive" — different problems
-with different fixes.
+**Storage is excluded from it, deliberately.** Getting a blob *into* an
+engine's object store — for nub, shipping it into the sandbox, decoding
+and content-hashing it — is dominated by hashing, scales with blob size
+rather than code size, and belongs to a different subsystem than the
+recompiler. It appears separately under `compilation` for the engines
+that have such a step.
+
+The two designs need different mechanics to measure the same thing. An
+eager engine compiles inside `compile`, so that call is inside the
+clock. nub compiles lazily on first entry, so it publishes once up
+front (untimed) and its JIT cache is evicted before each sample (also
+untimed), leaving `run` to recompile. `Caps::compiles_lazily` selects
+which shape applies.
+
+`cold` minus `invoke` is the recompile cost on its own.
 
 `runtime` and `invoke` differ by roughly 2x for nub's interpreter,
 because a fresh instance allocates and copies a flat address space

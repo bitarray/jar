@@ -111,6 +111,17 @@ pub struct Caps {
     /// Interpreter-class: orders of magnitude slower, so the harness
     /// takes fewer samples rather than making everyone wait.
     pub slow: bool,
+    /// This engine compiles **lazily, inside `run`**, rather than
+    /// eagerly in [`Compiler::compile`].
+    ///
+    /// True for `nub_jit`: its `compile` is *publish* — ship the blob
+    /// into the sandbox, decode it, content-hash it, materialize its
+    /// data image — and the JIT only runs on first entry. Publishing is
+    /// a storage cost (dominated by hashing) and is deliberately **not**
+    /// part of the recompile+execute target, so the `cold` measurement
+    /// hoists it out and evicts the JIT cache instead. For an eager
+    /// engine `compile` *is* the codegen and must stay inside the clock.
+    pub compiles_lazily: bool,
     /// This engine rebuilds its execution context on every `run`, so
     /// `spawn` cannot hoist that work out of the timed region.
     ///
@@ -129,6 +140,7 @@ impl Caps {
             compiles: true,
             metered: false,
             slow: false,
+            compiles_lazily: false,
             rebuilds_per_run: false,
         }
     }
@@ -147,6 +159,11 @@ impl Caps {
     /// See [`Caps::rebuilds_per_run`].
     pub const fn rebuilds_per_run(mut self) -> Self {
         self.rebuilds_per_run = true;
+        self
+    }
+    /// See [`Caps::compiles_lazily`].
+    pub const fn compiles_lazily(mut self) -> Self {
+        self.compiles_lazily = true;
         self
     }
 }

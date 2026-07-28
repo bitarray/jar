@@ -265,7 +265,7 @@ mod sandbox {
             //
             // Every invoke builds a fresh frame, so `spawn` cannot hoist
             // setup out of the timed region as it can elsewhere.
-            Caps::new().metered().rebuilds_per_run()
+            Caps::new().metered().compiles_lazily().rebuilds_per_run()
         }
         fn create(&self) -> Result<Box<dyn BcCompiler>> {
             nub()?;

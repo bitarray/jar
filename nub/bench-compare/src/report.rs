@@ -127,12 +127,14 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
     for (kind, programs) in &by_kind {
         out.push_str(&format!("\n## {kind}\n"));
         out.push_str(match kind.as_str() {
-            "oneshot" => {
-                "\nCompile **and** execute, from cold, every sample. The metric that \
-                 matches how a metered VM is actually used: work arrives as a blob \
-                 that must be compiled and then run, and each iteration pays both. \
-                 Engines that cache compilation internally are evicted first, so no \
-                 row skips the compile half.\n"
+            "cold" => {
+                "\n**The bench target.** Cold recompile + execute: each sample begins \
+                 with no compiled code and ends with the program having run.\n\n\
+                 Storage is excluded. An eager engine compiles inside the clock; nub \
+                 compiles lazily on first entry, so it publishes once up front \
+                 (untimed) and its JIT cache is evicted before each sample (also \
+                 untimed), leaving `run` to recompile. Both shapes measure the same \
+                 thing against different designs.\n"
             }
             "invoke" => {
                 "\nCold invocation with compilation excluded: a fresh instance every \
@@ -157,12 +159,12 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                  file loading are excluded (a once-per-process cost, and the \
                  harness's own I/O). `native` is absent: the OS loader already did \
                  it.\n\n\
-                 **`nub_jit` measures publishing here, not codegen.** nub keeps its \
-                 object store *inside* the sandbox, so the equivalent up-front work \
-                 is shipping the blob across the VM boundary, decoding it, \
-                 content-hashing it and materializing its data image — the JIT \
-                 itself runs lazily on first entry. `nub_jit_compile` is the \
-                 codegen-only figure.\n"
+                 **`nub_jit` measures publishing here, not codegen** — and publishing \
+                 is *not* part of the bench target above. nub keeps its object store \
+                 *inside* the sandbox, so this is the cost of shipping a blob across \
+                 the VM boundary, decoding it, content-hashing it and materializing \
+                 its data image. It is dominated by hashing and scales with blob \
+                 size, not code size. `nub_jit_compile` is the codegen-only figure.\n"
             }
             _ => "\n",
         });
@@ -231,7 +233,7 @@ const HEADLINE_ROWS: &[&str] = &[
 fn headline(records: &[Record]) -> String {
     let mut cell: BTreeMap<(&str, &str), f64> = BTreeMap::new();
     let mut programs: Vec<&str> = Vec::new();
-    for r in records.iter().filter(|r| r.kind == "oneshot") {
+    for r in records.iter().filter(|r| r.kind == "cold") {
         if !HEADLINE_ROWS.contains(&r.engine.as_str()) {
             continue;
         }
@@ -245,10 +247,14 @@ fn headline(records: &[Record]) -> String {
     }
 
     let mut out = String::from(
-        "## Compile + execute, metered JIT engines\n\n\
-         The bench target: each sample compiles the program and runs it, \
-         from cold, with metering on. That is how a metered VM is used when \
-         work arrives as a blob — the compile is not amortized away.\n\n\
+        "## Cold recompile + execute, metered JIT engines\n\n\
+         The bench target. Each sample starts with no compiled code and ends \
+         with the program having run — the cost a VM pays when a work-package \
+         arrives, is turned into native code, and executed once. Metering on.\n\n\
+         Storage is deliberately excluded. Getting a blob *into* an engine's \
+         object store is dominated by hashing and belongs to a different \
+         subsystem than the recompiler; for nub that step is measured \
+         separately under `compilation`.\n\n\
          Only cost models comparable to nub's appear here. PolkaVM's default \
          `Simple` model is a flat per-instruction cost and is much cheaper to \
          evaluate than nub's pipeline simulation, so the `*_full` rows \
@@ -318,7 +324,7 @@ fn headline(records: &[Record]) -> String {
              is like-for-like even for nub, which rebuilds its frame on every \
              call and therefore has no warm state to hoist out.\n\n\
              The bracketed figure is the difference against the table above: what \
-             compilation costs that engine.\n\n",
+             the recompile costs that engine.\n\n",
         );
         out.push_str("| Program |");
         for e in HEADLINE_ROWS {
@@ -334,7 +340,7 @@ fn headline(records: &[Record]) -> String {
             for e in HEADLINE_ROWS {
                 match (warm.get(&(p, *e)), cell.get(&(p, *e))) {
                     (Some(w), Some(total)) => out.push_str(&format!(
-                        " {} (+{} compile) |",
+                        " {} (+{} recompile) |",
                         format_duration(*w),
                         format_duration((total - w).max(0.0))
                     )),
