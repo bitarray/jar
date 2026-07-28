@@ -194,12 +194,38 @@ fn build_pvm2(root: &Path, artifacts: &Path, program: &str) -> Result<Artifact> 
 /// that cost.
 fn build_cdylib(root: &Path, artifacts: &Path, program: &str, family: Family) -> Result<Artifact> {
     let target_dir = root.join("target/guests");
-    let status = cargo(root)
-        .args(["build", "--release", "-p"])
+    let mut cmd = cargo(root);
+    cmd.args(["build", "--release", "-p"])
         .arg(format!("guest-{program}"))
         .args(["--target", family.triple()])
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .status()?;
+        .env("CARGO_TARGET_DIR", &target_dir);
+
+    // Strip the wasm guests, so the size comparison is like-for-like.
+    //
+    // The workspace root sets `[profile.release] debug = true` for the
+    // *harness* — it is what makes the measuring process profilable —
+    // but `members` includes `guests/*`, so without this every guest
+    // inherits it. That put full DWARF in every `.wasm`: 86-98% of each
+    // artifact, and 1.33 MB of ed25519's 1.39 MB. PolkaVM strips at
+    // link (`Config::set_strip(true)`) and nub's linker never copies
+    // debug info, so leaving wasm unstripped would compare one
+    // unstripped format against two stripped ones.
+    //
+    // Env vars rather than `[profile.release.package.*]` overrides
+    // because a per-package override would only reach the thin
+    // `guest-*` wrapper crates. Nearly all of that DWARF comes from the
+    // kernel crate under `nub/programs/` and its transitive crypto
+    // dependencies, which the env var covers and a package override
+    // does not.
+    //
+    // Debug info cannot affect code generation, so this changes only
+    // the artifact's size — not what any engine executes.
+    if matches!(family, Family::Wasm32) {
+        cmd.env("CARGO_PROFILE_RELEASE_DEBUG", "false")
+            .env("CARGO_PROFILE_RELEASE_STRIP", "symbols");
+    }
+
+    let status = cmd.status()?;
     if !status.success() {
         bail!("{} build failed for {program}", family.dir());
     }
@@ -225,7 +251,11 @@ fn build_cdylib(root: &Path, artifacts: &Path, program: &str, family: Family) ->
         family: family.dir().into(),
         path: rel(root, &dest),
         target: family.triple().into(),
-        rustflags: "(default)".into(),
+        rustflags: match family {
+            Family::Wasm32 => "(default) + CARGO_PROFILE_RELEASE_{DEBUG=false,STRIP=symbols}",
+            Family::Native => "(default)",
+        }
+        .into(),
     })
 }
 

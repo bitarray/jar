@@ -7,8 +7,8 @@
 //!
 //! **Raw code** excludes the data regions. It exists because several
 //! kernels carry large initialized data that swamps the signal
-//! completely: `prime-sieve` is 178 bytes of nub code inside a
-//! 158,182-byte blob — 0.1%. A whole-blob comparison of that row
+//! completely: `prime-sieve` is 214 bytes of nub code inside a
+//! 158,338-byte blob — 0.1%. A whole-blob comparison of that row
 //! compares static lookup tables, not code generators.
 //!
 //! # What counts as code, per format
@@ -72,16 +72,16 @@
 //!
 //! | program | pvm2 | polkavm64 | wasm32 |
 //! |---|--:|--:|--:|
-//! | goldilocks-mul | 126 | 138 | 346 |
-//! | keccak | 1848 | 4551 | 2760 |
-//! | blake2b | 6944 | 12453 | 6552 |
-//! | ed25519 | 41406 | 53632 | 60116 |
-//! | ecrecover | 96112 | 130599 | 82977 |
-//! | prime-sieve | 178 | 168 | 318 |
-//! | poly-eval | 766 | 1000 | 10885 |
-//! | poseidon2-perm | 3368 | 4625 | 5183 |
-//! | fri-fold-tree | 4134 | 6256 | 17178 |
-//! | mini-verifier | 4246 | 6276 | 6659 |
+//! | goldilocks-mul | 162 | 138 | 346 |
+//! | keccak | 1884 | 4551 | 2760 |
+//! | blake2b | 6980 | 12453 | 6552 |
+//! | ed25519 | 41442 | 53632 | 60116 |
+//! | ecrecover | 96170 | 130599 | 83023 |
+//! | prime-sieve | 214 | 168 | 318 |
+//! | poly-eval | 824 | 996 | 10885 |
+//! | poseidon2-perm | 3404 | 4625 | 5183 |
+//! | fri-fold-tree | 4192 | 6252 | 17178 |
+//! | mini-verifier | 4282 | 6276 | 6659 |
 
 use std::path::Path;
 
@@ -476,7 +476,7 @@ pub fn render(root: &Path, programs: &[&str]) -> String {
          story — it is what gets gossiped, stored and paid for.\n\n\
          **Raw code excludes the data regions**, and that is the figure to read. \
          Several kernels carry large initialized data that swamps everything \
-         else: `prime-sieve` is 178 bytes of nub code inside a 158,182-byte \
+         else: `prime-sieve` is 214 bytes of nub code inside a 158,338-byte \
          blob, 0.1% of it. Comparing whole blobs there compares static lookup \
          tables, not code generators.\n\n\
          The code figure is `code` for nub, `code + jump table + bitmask` for \
