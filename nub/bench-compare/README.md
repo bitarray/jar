@@ -85,7 +85,7 @@ work on the wrong side of it silently favours one engine:
   `ProgramInstance` at all — `run_program` used to do setup and
   execution in one call.
 
-**1b. Three measurement kinds, because one number would hide things.**
+**1b. Four measurement kinds, because one number would hide things.**
 
 | kind | what it measures |
 |---|---|
@@ -240,9 +240,26 @@ feature flag reserved.
   unoptimized numbers are not comparable to anything. Override with
   `TRUST_ME_BRO_I_KNOW_WHAT_I_AM_DOING=1` if you must.
 - **The harness is built `lto = true, codegen-units = 1`.**
+- **criterion does the measurement**, not a hand-rolled sample loop:
+  warm-up, iteration counts chosen from a time budget rather than a
+  fixed count, bootstrap confidence intervals, outlier classification.
+  A hand-rolled 50-sample median was not enough to resolve these rows —
+  it reported swings of 30–50% between runs of the same row as single
+  authoritative numbers.
+- **One process per row**, which `scripts/run.sh` enforces and
+  `--exact` makes precise. This is a correctness requirement, not
+  hygiene: nub's sandbox is a process-wide singleton whose guest heap is
+  never swept, so several rows in one process contaminate each other —
+  measured at up to 47%. Engine names also nest
+  (`..._sync_gas` is a prefix of `..._sync_gas_full`), so a substring
+  filter naming the shorter one silently runs both.
 - **The median is reported, not the mean.** A scheduler preemption adds
   a long tail but never a short one, so the mean is biased upward by
   exactly the noise we want to exclude.
+- **The confidence interval is reported alongside it**, whenever it
+  exceeds 2% of the median. A row with a 30%-wide interval is a range,
+  not a number, and without the interval shown it looks exactly as
+  authoritative as one measured to 1%.
 - Dispatch is `Box<dyn>`, costing roughly 2 ns per `run()`. The fastest
   row here is a native hash at a few µs, so that is under 0.1% — and
   every engine pays it identically, so it cannot tilt the comparison.
