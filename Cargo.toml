@@ -15,8 +15,24 @@ members = [
     "nub/nub-host-guest-macro",
     "nub/nub-arch-local",
     "nub/nub-kernel",
-    "rust/subsoil",
-    "rust/subsoil-derive",
+    "nub/nub-program",
+    "nub/nub-linker",
+    "nub/nub-rt",
+    "nub/nub-rt-macro",
+    "nub/nub-bench",
+    "nub/nub-flat",
+    "nub/nub-flat-guest-x86",
+    "nub/programs/blake2b",
+    "nub/programs/ecrecover",
+    "nub/programs/ed25519",
+    "nub/programs/fri-fold-tree",
+    "nub/programs/goldilocks-mul",
+    "nub/programs/goldilocks-poseidon2",
+    "nub/programs/keccak",
+    "nub/programs/mini-verifier",
+    "nub/programs/poly-eval",
+    "nub/programs/poseidon2-perm",
+    "nub/programs/prime-sieve",
     "rust/javm-guest-tests",
     "rust/javm-transpiler",
     "rust/ssz",
@@ -26,17 +42,6 @@ members = [
     "nub/nub-recompiler-x86",
     "rust/javm-bench",
     "rust/javm-fuzz",
-    "components/benches/blake2b",
-    "components/benches/ecrecover",
-    "components/benches/ed25519",
-    "components/benches/fri-fold-tree",
-    "components/benches/goldilocks-mul",
-    "components/benches/goldilocks-poseidon2",
-    "components/benches/keccak",
-    "components/benches/mini-verifier",
-    "components/benches/poly-eval",
-    "components/benches/poseidon2-perm",
-    "components/benches/prime-sieve",
     "components/benches/sub-vm-recurse",
     "components/benches/sub-vm-data-recurse",
     "components/benches/pt-cache",
@@ -50,6 +55,12 @@ exclude = [
     # the workspace prevents `cargo build --workspace` (host target)
     # from trying to link a no_std panic_impl into a std world.
     "nub/nub-arch-guestbin",
+    # Multi-engine benchmark comparison. Its own workspace + Cargo.lock so
+    # polkavm/wasmtime/wasmer (hundreds of crates) never enter this
+    # lockfile, `cargo audit`, or the SBOM. It ships nothing; it only
+    # measures. Build it with
+    # `--manifest-path nub/bench-compare/Cargo.toml`.
+    "nub/bench-compare",
 ]
 
 [workspace.package]
@@ -64,8 +75,7 @@ nub-exec = { path = "nub/nub-exec" }
 nub-recompiler-x86 = { path = "nub/nub-recompiler-x86" }
 javm-transpiler = { path = "rust/javm-transpiler" }
 javm-cap = { path = "rust/javm-cap" }
-subsoil = { path = "rust/subsoil" }
-subsoil-derive = { path = "rust/subsoil-derive" }
+nub-rt = { path = "nub/nub-rt" }
 ssz = { path = "rust/ssz", default-features = false }
 ssz-derive = { path = "rust/ssz-derive" }
 

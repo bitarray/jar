@@ -160,5 +160,7 @@ jobs:
           --exclude nub-build
           --exclude nub-recompiler-x86
           --exclude javm-guest-x86
+          --exclude nub-flat
+          --exclude nub-flat-guest-x86
         env:
           RUSTFLAGS: "-D warnings"

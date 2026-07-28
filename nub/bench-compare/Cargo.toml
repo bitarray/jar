@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [".", "bench-build", "guests/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[package]
+name = "bench-compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = true
+description = "Cross-engine benchmark comparison for nub: native, polkavm, wasmtime, wasmer"
+
+[features]
+default = ["polkavm-engine", "wasmtime-engine", "wasmer-engine"]
+# Tier 1: the engines whose numbers the report is built around.
+polkavm-engine = ["dep:polkavm"]
+wasmtime-engine = ["dep:wasmtime"]
+wasmer-engine = ["dep:wasmer", "dep:wasmer-compiler-singlepass"]
+# Tier 2: opt-in.
+wasmi-engine = ["dep:wasmi"]
+
+[dependencies]
+# The subject. Path deps into the main workspace: a package belongs to
+# the nearest ancestor manifest with a [workspace] table, so these
+# resolve against nub's root regardless of who depends on them.
+nub-arch-local = { path = "../nub-arch-local" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+nub-exec = { path = "../nub-exec" }
+nub-program = { path = "../nub-program" }
+
+libloading = "0.9"
+criterion = { version = "0.5", features = ["html_reports"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+libc = "0.2"
+
+polkavm = { version = "0.36", optional = true }
+wasmtime = { version = "47", default-features = false, features = ["cranelift", "winch", "runtime", "std", "gc", "gc-drc", "component-model"], optional = true }
+wasmer = { version = "7", default-features = false, features = ["std", "singlepass", "sys"], optional = true }
+wasmer-compiler-singlepass = { version = "7", optional = true }
+wasmi = { version = "1.1", optional = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+nub-recompiler-x86 = { path = "../nub-recompiler-x86" }
+# The sandbox path for the `nub_jit` row.
+nub = { path = "../nub" }
+nub-flat = { path = "../nub-flat" }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.build-dependencies]
+nub-build = { path = "../nub-build" }
+
+# Interpreters are part of the comparison, so the harness itself must be
+# optimized or the numbers are meaningless. `main` refuses to run a debug
+# build; this is the other half of that guarantee.
+[profile.release]
+lto = true
+codegen-units = 1
+debug = true

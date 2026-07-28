@@ -9,12 +9,20 @@
 //! [`InvocationResult`]. This is the in-process counterpart to
 //! nub-arch-x86's JIT-driven `enter_frame` / `build_frame_runtime`.
 //! The personality lowers its own object types into a `ProgramSpec`
-//! (JAVM: `javm::JavmLocal`'s `run_instance`).
+//! (JAVM: `javm::JavmLocal`'s `run_instance`). For a program with no
+//! personality at all, [`program::PreparedProgram`] lowers a
+//! `nub_program::ProgramBlob` directly.
+
+pub mod program;
+
+pub use program::{PrepareError, PreparedProgram, run_blob};
 
 use nub_arch_x86_abi::{InvocationResult, SCRATCHPAD_HEAD_LEN};
 use nub_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
-    Regs, gas_const, interp::Interpreter, predecode::predecode_rv_with_mem_cycles,
+    Regs, gas_const,
+    interp::Interpreter,
+    predecode::{Predecode, predecode_rv_with_mem_cycles},
 };
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
@@ -92,94 +100,143 @@ pub struct ProgramSpec<'a> {
     pub regs: Regs,
 }
 
+/// A prepared address space plus predecoded code, ready to execute.
+///
+/// Splitting this out of [`run_program`] separates *setup* (build the
+/// flat memory, map the read-only overlays, predecode the code) from
+/// *execution* (interpret to an exit). Callers that measure execution
+/// need that split: every other engine a benchmark might compare
+/// against instantiates before the clock starts, so folding nub's
+/// setup into the timed region would understate it.
+///
+/// [`invoke`](Self::invoke) continues from the current memory state, so
+/// repeated calls observe the guest's own mutations. Build a fresh
+/// instance for a cold run.
+pub struct ProgramInstance {
+    mem: CopyingMemory,
+    predecode: Predecode,
+    code: Vec<u8>,
+    code_base: u32,
+    data_base: u32,
+    regs: Regs,
+}
+
+impl ProgramInstance {
+    /// Build the address space and predecode the code.
+    pub fn new(spec: &ProgramSpec<'_>) -> Self {
+        // Base the flat buffer at data_base so [0, data_base) faults,
+        // matching the recompiler's page table.
+        let mut mem = CopyingMemory::new();
+        mem.base = spec.data_base;
+        if !spec.mem_image.is_empty() {
+            mem.map_region(
+                spec.data_base as u64,
+                spec.mem_image.len() as u64,
+                Access::ReadWrite,
+                Some(spec.mem_image),
+            )
+            .expect("map base RW region");
+        }
+        for o in spec.ro_overlays {
+            overlay(
+                &mut mem,
+                o.start,
+                &spec.mem_image[o.image_off..o.image_off + o.len],
+                Access::ReadOnly,
+            );
+        }
+
+        // Category #3: guest PIC data loads of the program's own bytecode
+        // page-in the touched code page(s) on first read (read-only forever),
+        // identical to the recompiler's lazy code materialization.
+        mem.set_code_region(spec.code_base, spec.code.len() as u32);
+
+        // Category #2: the load/store base latency (mem_cycles) is scaled
+        // ×1..4 by the declared memory footprint, the same value the
+        // recompiler derives, so both engines pick the same tier.
+        let mem_cycles = gas_const::mem_cycles_for(gas_const::accessible_pages(
+            spec.declared_mem_size,
+            spec.data_base,
+        ));
+
+        ProgramInstance {
+            predecode: predecode_rv_with_mem_cycles(spec.code, mem_cycles),
+            code: spec.code.to_vec(),
+            mem,
+            code_base: spec.code_base,
+            data_base: spec.data_base,
+            regs: spec.regs.clone(),
+        }
+    }
+
+    /// Interpret from `regs` until the program exits.
+    ///
+    /// `handler` decides what ecall/ecalli mean;
+    /// [`ExitingEcallHandler`] surfaces them as exits, matching the JIT
+    /// trampoline.
+    pub fn invoke(&mut self, handler: &mut dyn EcallHandler, initial_gas: u64) -> InvocationResult {
+        let mut regs = self.regs.clone();
+        let mut gas = GasCounter::new(initial_gas);
+
+        let exit = Interpreter::run(
+            &self.predecode,
+            &self.code,
+            self.code_base,
+            &mut regs,
+            &mut self.mem,
+            &mut gas,
+            handler,
+        );
+
+        let (exit_reason, exit_arg) = match exit {
+            ExitReason::Halt => (0, 0),
+            ExitReason::Panic => (1, 0),
+            ExitReason::OutOfGas => (2, 0),
+            ExitReason::PageFault(addr) => (3, addr),
+            ExitReason::HostCall(imm) => (4, imm),
+            ExitReason::Ecall => (6, 0),
+            ExitReason::Trap => (7, 0),
+        };
+
+        // Surface the scratchpad head — the effective bytes of
+        // `[data_base, data_base + SCRATCHPAD_HEAD_LEN)` from the final
+        // flat memory. The recompiler reads the identical window from its
+        // post-run CoW pages, so the two engines surface byte-identical
+        // result data.
+        let mut scratchpad_head = [0u8; SCRATCHPAD_HEAD_LEN];
+        for (i, byte) in scratchpad_head.iter_mut().enumerate() {
+            *byte = self.mem.read_u8(self.data_base + i as u32).unwrap_or(0);
+        }
+
+        InvocationResult {
+            exit_reason,
+            exit_arg,
+            return_value: regs.gpr[7],
+            gas_remaining: gas.remaining(),
+            scratchpad_head,
+        }
+    }
+
+    /// Re-enter at a different PC on the next [`invoke`](Self::invoke).
+    pub fn set_entry_pc(&mut self, pc: u64) {
+        self.regs.pc = pc;
+    }
+}
+
 /// Run a prepared [`ProgramSpec`] through the PVM2 (RISC-V)
 /// interpreter, returning the same `InvocationResult` shape
 /// `nub-arch-x86`'s JIT path produces. The exit-reason mapping matches
 /// the JIT exit codes (HostCall=4, Trap=7, etc.) so the two backends
 /// agree on a well-formed program.
 ///
-/// `handler` decides what ecall/ecalli mean; [`ExitingEcallHandler`]
-/// surfaces them as exits, matching the JIT trampoline.
+/// Equivalent to [`ProgramInstance::new`] followed by one
+/// [`invoke`](ProgramInstance::invoke) — same bytes, same gas.
 pub fn run_program(
     spec: &ProgramSpec<'_>,
     handler: &mut dyn EcallHandler,
     initial_gas: u64,
 ) -> InvocationResult {
-    // Base the flat buffer at data_base so [0, data_base) faults,
-    // matching the recompiler's page table.
-    let mut mem = CopyingMemory::new();
-    mem.base = spec.data_base;
-    if !spec.mem_image.is_empty() {
-        mem.map_region(
-            spec.data_base as u64,
-            spec.mem_image.len() as u64,
-            Access::ReadWrite,
-            Some(spec.mem_image),
-        )
-        .expect("map base RW region");
-    }
-    for o in spec.ro_overlays {
-        overlay(
-            &mut mem,
-            o.start,
-            &spec.mem_image[o.image_off..o.image_off + o.len],
-            Access::ReadOnly,
-        );
-    }
-
-    let mut regs = spec.regs.clone();
-    let mut gas = GasCounter::new(initial_gas);
-
-    // Category #3: guest PIC data loads of the program's own bytecode
-    // page-in the touched code page(s) on first read (read-only forever),
-    // identical to the recompiler's lazy code materialization.
-    mem.set_code_region(spec.code_base, spec.code.len() as u32);
-
-    // Category #2: the load/store base latency (mem_cycles) is scaled
-    // ×1..4 by the declared memory footprint, the same value the
-    // recompiler derives, so both engines pick the same tier.
-    let mem_cycles = gas_const::mem_cycles_for(gas_const::accessible_pages(
-        spec.declared_mem_size,
-        spec.data_base,
-    ));
-    let predecode = predecode_rv_with_mem_cycles(spec.code, mem_cycles);
-    let exit = Interpreter::run(
-        &predecode,
-        spec.code,
-        spec.code_base,
-        &mut regs,
-        &mut mem,
-        &mut gas,
-        handler,
-    );
-
-    let (exit_reason, exit_arg) = match exit {
-        ExitReason::Halt => (0, 0),
-        ExitReason::Panic => (1, 0),
-        ExitReason::OutOfGas => (2, 0),
-        ExitReason::PageFault(addr) => (3, addr),
-        ExitReason::HostCall(imm) => (4, imm),
-        ExitReason::Ecall => (6, 0),
-        ExitReason::Trap => (7, 0),
-    };
-
-    // Surface the scratchpad head — the effective bytes of
-    // `[data_base, data_base + SCRATCHPAD_HEAD_LEN)` from the final
-    // flat memory. The recompiler reads the identical window from its
-    // post-run CoW pages, so the two engines surface byte-identical
-    // result data.
-    let mut scratchpad_head = [0u8; SCRATCHPAD_HEAD_LEN];
-    for (i, byte) in scratchpad_head.iter_mut().enumerate() {
-        *byte = mem.read_u8(spec.data_base + i as u32).unwrap_or(0);
-    }
-
-    InvocationResult {
-        exit_reason,
-        exit_arg,
-        return_value: regs.gpr[7],
-        gas_remaining: gas.remaining(),
-        scratchpad_head,
-    }
+    ProgramInstance::new(spec).invoke(handler, initial_gas)
 }
 
 fn page_round_up_u64(n: u64) -> u64 {

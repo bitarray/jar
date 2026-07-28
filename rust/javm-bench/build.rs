@@ -11,52 +11,48 @@ fn main() {
     }
     for (path, crate_name, env) in [
         (
-            "../../components/benches/prime-sieve",
+            "../../nub/programs/prime-sieve",
             "bench-prime-sieve",
             "PRIME_SIEVE_BLOB",
         ),
         (
-            "../../components/benches/ed25519",
+            "../../nub/programs/ed25519",
             "bench-ed25519",
             "ED25519_BLOB",
         ),
+        ("../../nub/programs/keccak", "bench-keccak", "KECCAK_BLOB"),
         (
-            "../../components/benches/keccak",
-            "bench-keccak",
-            "KECCAK_BLOB",
-        ),
-        (
-            "../../components/benches/blake2b",
+            "../../nub/programs/blake2b",
             "bench-blake2b",
             "BLAKE2B_BLOB",
         ),
         (
-            "../../components/benches/ecrecover",
+            "../../nub/programs/ecrecover",
             "bench-ecrecover",
             "ECRECOVER_BLOB",
         ),
         (
-            "../../components/benches/goldilocks-mul",
+            "../../nub/programs/goldilocks-mul",
             "bench-goldilocks-mul",
             "GOLDILOCKS_MUL_BLOB",
         ),
         (
-            "../../components/benches/poseidon2-perm",
+            "../../nub/programs/poseidon2-perm",
             "bench-poseidon2-perm",
             "POSEIDON2_PERM_BLOB",
         ),
         (
-            "../../components/benches/mini-verifier",
+            "../../nub/programs/mini-verifier",
             "bench-mini-verifier",
             "MINI_VERIFIER_BLOB",
         ),
         (
-            "../../components/benches/poly-eval",
+            "../../nub/programs/poly-eval",
             "bench-poly-eval",
             "POLY_EVAL_BLOB",
         ),
         (
-            "../../components/benches/fri-fold-tree",
+            "../../nub/programs/fri-fold-tree",
             "bench-fri-fold-tree",
             "FRI_FOLD_TREE_BLOB",
         ),

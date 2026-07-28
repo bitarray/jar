@@ -1,6 +1,6 @@
 //! Guest entry binary for `javm-guest-tests`.
 //!
-//! Defines one `#[subsoil::endpoint(N)]` per legacy test_id. Each
+//! Defines one `#[nub_rt::endpoint(N)]` per legacy test_id. Each
 //! endpoint calls into its corresponding library suite, which bakes
 //! its own input corpus and returns a u64 fingerprint of the
 //! results.
@@ -8,23 +8,23 @@
 //! The trampoline definitions live here (the binary) rather than in
 //! `lib.rs` because rustc/ld drop rlib object files whose only
 //! contribution is `#[used]` statics — putting them directly in the
-//! bin's compilation unit ensures the `.subsoil.endpoints`
+//! bin's compilation unit ensures the `.nub_rt.endpoints`
 //! descriptors propagate into the final ELF.
 //!
 //! The `SUITE_TABLE` in [`lib.rs`] mirrors this assignment for the
 //! host-side harness. Both lists must stay in sync.
 
-#![cfg_attr(target_env = "javm", no_std)]
-#![cfg_attr(target_env = "javm", no_main)]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 use javm_guest_tests as _;
-use subsoil as _;
+use nub_rt as _;
 
 macro_rules! suite_endpoints {
     ($($idx:literal => $family:ident :: $suite:ident,)*) => {
         $(
-            #[cfg(all(target_env = "javm", target_os = "none"))]
-            #[subsoil::endpoint($idx)]
+            #[cfg(target_os = "none")]
+            #[nub_rt::endpoint($idx)]
             fn $suite(_: u64) -> u64 {
                 ::javm_guest_tests::tests::$family::$suite()
             }
@@ -60,5 +60,5 @@ suite_endpoints! {
     41 => crypto::keccak_256_suite,
 }
 
-#[cfg(not(target_env = "javm"))]
+#[cfg(not(target_os = "none"))]
 fn main() {}

@@ -91,7 +91,7 @@ fn ecrecover() {
         "ecrecover",
         include_bytes!(env!("ECRECOVER_BLOB")),
         0x1,
-        6_811_560,
+        6_811_627,
     );
 }
 
@@ -131,7 +131,7 @@ fn poly_eval() {
         "poly_eval",
         include_bytes!(env!("POLY_EVAL_BLOB")),
         0x01da_34e2,
-        9_005_925,
+        9_005_991,
     );
 }
 
@@ -141,6 +141,6 @@ fn fri_fold_tree() {
         "fri_fold_tree",
         include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
         0x37e6_76f4,
-        6_194_372,
+        6_194_439,
     );
 }

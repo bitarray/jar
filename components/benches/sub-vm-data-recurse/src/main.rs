@@ -1,21 +1,21 @@
-#![cfg_attr(target_env = "javm", no_std)]
-#![cfg_attr(target_env = "javm", no_main)]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 use bench_sub_vm_data_recurse as _;
-use subsoil as _;
+use nub_rt as _;
 
-#[cfg(target_env = "javm")]
+#[cfg(target_os = "none")]
 mod kernel_abi;
 
 /// 64 KiB pinned-slot RO blob. Compile-time `.rodata` initialisation
-/// gives the linker a stable section to map; subsoil picks it up
+/// gives the linker a stable section to map; nub_rt picks it up
 /// and emits a `MemoryMapping` pointing at a pinned `Cap::Data`.
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 static RO_DATA: [u8; RO_DATA_SIZE] = make_ro_pattern();
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const RO_DATA_SIZE: usize = 65536;
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const fn make_ro_pattern() -> [u8; RO_DATA_SIZE] {
     let mut arr = [0u8; RO_DATA_SIZE];
     let mut i = 0;
@@ -29,12 +29,12 @@ const fn make_ro_pattern() -> [u8; RO_DATA_SIZE] {
 /// 4 KiB initial-slot RW blob — exercises the CoW write path. The
 /// non-zero initialiser keeps the linker from collapsing it into
 /// `.bss` (which would render the slot ephemeral, not CoW-armed).
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 static mut RW_DATA: [u8; RW_DATA_SIZE] = make_rw_init();
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const RW_DATA_SIZE: usize = 4096;
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const fn make_rw_init() -> [u8; RW_DATA_SIZE] {
     let mut arr = [0u8; RW_DATA_SIZE];
     let mut i = 0;
@@ -45,23 +45,23 @@ const fn make_rw_init() -> [u8; RW_DATA_SIZE] {
     arr
 }
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const SLOT_IMAGE_RECURSE: u8 = 3;
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const SLOT_CHILD: u8 = 6;
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const CHILD_ENDPOINT: u8 = 0;
 
 /// One read sample per 64 bytes — keeps the bench fast while still
 /// touching every page in the 64 KiB pinned RO blob (16 pages × 64
 /// samples = 1024 reads per level).
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const RO_STRIDE: usize = 64;
 
-#[cfg(all(target_env = "javm", target_os = "none"))]
-#[subsoil::endpoint(0)]
+#[cfg(target_os = "none")]
+#[nub_rt::endpoint(0)]
 fn javm_main(depth: u64) -> u64 {
     use kernel_abi::*;
 
@@ -101,5 +101,5 @@ fn javm_main(depth: u64) -> u64 {
     sum
 }
 
-#[cfg(not(target_env = "javm"))]
+#[cfg(not(target_os = "none"))]
 fn main() {}

@@ -20,9 +20,9 @@ The repository hosts two parallel tracks that converge in `rust/`:
 |-----------|-------------|
 | [`spec/`](spec/) | Lean 4 formal specification for SSZ, PVM2, caps, SubVM, JAVM kernel core, and Genesis scoring |
 | [`website/content/spec/`](website/content/spec/) | Minimum-kernel v3 architecture spec (cap system, Image / Instance, `nub` microkernel design) |
-| [`nub/`](nub/) | nub: standalone, personality-generic execution engine (KVM/Hyperlight sandbox, PVM2 interpreter, x86-64 JIT) |
-| [`rust/`](rust/) | Rust workspace — the JAVM layer on top of nub (`javm`, `javm-cap`, `javm-guest-x86`, transpiler, `subsoil`, `ssz`) |
-| [`components/`](components/) | Guest crates compiled to PVM blobs (bench guests; future userspace services) |
+| [`nub/`](nub/) | nub: standalone, personality-generic execution engine (KVM/Hyperlight sandbox, PVM2 interpreter, x86-64 JIT, ELF→PVM2 linker, guest runtime, compute programs) |
+| [`rust/`](rust/) | Rust workspace — the JAVM layer on top of nub (`javm`, `javm-cap`, `javm-guest-x86`, transpiler, `ssz`) |
+| [`components/`](components/) | JAVM-specific guest crates (capability-system bench guests; future userspace services) |
 | [`tools/`](tools/) | Genesis Proof-of-Intelligence CLI tooling |
 
 ### Key Rust crates
@@ -43,24 +43,37 @@ The repository hosts two parallel tracks that converge in `rust/`:
 
 JAVM compiles untrusted PVM bytecode to native x86-64. Running that JIT in the same address space as the chain client was the trade-off PolkaVM eventually rejected by sandboxing into a separate process — which trades safety for hostcall round-trip cost. `nub` instead runs the JIT inside a hardware-virtualization guest (KVM on Linux via Hyperlight; Hypervisor.framework on macOS and WHP on Windows are on the roadmap), keeps σ resident in the guest, and lets the JIT issue hostcalls without crossing back to the host for most operations. As a side benefit, the per-Instance memory model (CoW, `mgmt_copy` as a near-zero-cost page-table operation, per-Instance fault handling) maps directly onto ring-0 page tables. See [`website/content/spec/implementation/kvm-microkernel.md`](website/content/spec/implementation/kvm-microkernel.md).
 
-## PVM Recompiler Benchmarks
+## Benchmarks
 
-The x86-64 JIT recompiler matches or beats PolkaVM's compiler across both the general workload suite (`cargo bench -p javm-bench --bench pvm_bench`) and the STARK-shaped workloads (`cargo bench -p javm-bench --bench stark_bench`). Numbers below are criterion 100-sample medians on Linux x86_64; the PolkaVM column measures recompile + execute per iteration, which is the cost JAR pays per Cap invocation under the current state-cache design.
+Two suites, deliberately separate:
 
-| Workload | JAVM recompiler | PolkaVM | JAVM vs PolkaVM |
-|----------|----------------:|--------:|----------------:|
-| `prime_sieve` | 177 µs | 353 µs | **2.0× faster** |
-| `ed25519` (sign + verify) | 956 µs | 1.35 ms | **1.4× faster** |
-| `keccak` | 53 µs | 140 µs | **2.6× faster** |
-| `blake2b` | 88 µs | 276 µs | **3.1× faster** |
-| `ecrecover` (secp256k1) | 1.43 ms | 3.32 ms | **2.3× faster** |
-| `goldilocks_mul` (100k chained GL muls) | 518 µs | 531 µs | 2.5% ahead |
-| `poseidon2_perm` (1k Poseidon2-WIDTH8 perms) | 1.82 ms | 2.02 ms | 9.9% ahead |
-| `mini_verifier` (~400 Poseidon2 + ~2400 GL ops) | 777 µs | 924 µs | 15.9% ahead |
-| `poly_eval` (degree-4096 Horner ×64 points) | 1.71 ms | 1.74 ms | 1.7% ahead |
-| `fri_fold_tree` (30 queries × 12 levels) | 773 µs | 962 µs | 19.6% ahead |
+- **`nub/bench-compare`** — cross-engine comparison. The same Rust compute
+  kernel compiled to four targets and run through nub's interpreter, native
+  code, PolkaVM (interpreter + recompiler), Wasmtime (Cranelift + Winch) and
+  Wasmer Singlepass. It lives in its own cargo workspace so that several
+  hundred engine dependencies never enter this lockfile. See
+  [`nub/bench-compare/README.md`](nub/bench-compare/README.md) for the
+  fairness rules and [`BENCHMARKS.md`](nub/bench-compare/BENCHMARKS.md) for
+  results.
 
-Key optimisations: per-basic-block pipeline gas simulation, peephole instruction fusion (load-imm + ALU, address-gen, `mul_64` + `mul_upper`), branchless `cmov_iz/nz_imm` lowering, mprotect+SIGSEGV memory bounds checking (zero-instruction hot path), and register-mapped PVM state.
+  ```bash
+  cd nub/bench-compare
+  cargo run --release -p bench-build   # fan each kernel out to 4 targets
+  cargo run --release -- validate      # do all engines agree?
+  ./scripts/run.sh                     # measure, then write BENCHMARKS.md
+  ```
+
+- **`cargo bench -p nub-bench`** — nub in isolation: interpreter throughput
+  and JIT emission throughput over the programs in `nub/programs`.
+
+- **`cargo bench -p javm-bench`** — the capability system: sub-VM spawn
+  depth, page-table cache behaviour, and CoW fault cost. These measure JAVM
+  kernel mechanisms and have no cross-engine equivalent.
+
+Key recompiler optimisations: per-basic-block pipeline gas simulation,
+peephole instruction fusion (load-imm + ALU, address-gen, `mul_64` +
+`mul_upper`), branchless `cmov_iz/nz_imm` lowering, mprotect+SIGSEGV memory
+bounds checking (zero-instruction hot path), and register-mapped PVM state.
 
 ## Genesis — Proof of Intelligence
 

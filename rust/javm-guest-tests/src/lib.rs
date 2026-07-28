@@ -21,7 +21,7 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
-use subsoil as _;
+use nub_rt as _;
 
 pub mod tests;
 
@@ -31,12 +31,12 @@ pub type SuiteEntry = (u8, &'static str, fn() -> u64);
 
 /// Endpoint index → suite directory.
 ///
-/// The host-side mirror of `src/main.rs`'s `#[subsoil::endpoint(N)]`
+/// The host-side mirror of `src/main.rs`'s `#[nub_rt::endpoint(N)]`
 /// table. Both lists must stay in sync; the conformance harness
 /// iterates this one to drive every endpoint without duplicating
 /// the indices in the test code.
 ///
-/// The `#[subsoil::endpoint(N)]` annotations live in `main.rs`
+/// The `#[nub_rt::endpoint(N)]` annotations live in `main.rs`
 /// (the binary crate) because `#[used] static` in an rlib doesn't
 /// propagate into a bin's final ELF if nothing in the bin
 /// references it — the linker drops the whole rlib object file.

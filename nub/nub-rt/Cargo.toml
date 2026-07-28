@@ -1,0 +1,13 @@
+[package]
+name = "nub-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Guest-side runtime support for PVM2 programs: builtins, panic handler, #[endpoint] macro"
+
+[dependencies]
+nub-rt-macro = { path = "../nub-rt-macro" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

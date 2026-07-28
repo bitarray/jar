@@ -26,17 +26,22 @@ jar/
     nub-arch-x86*/          # Generic bare-metal guest-kernel lib + wire ABI
     nub-arch-local/         # In-process interpreter backend (run_program)
     nub-host-*/             # KVM/Hyperlight host driver + shared host/guest types
-    nub-build/              # build.rs helper for cross-compiling guest blobs
+    nub-build/              # build.rs helpers for cross-compiling guests
+    nub-program/            # PVM2 program blob + address-space ABI constants
+    nub-linker/             # RISC-V ELF → PVM2 linker
+    nub-rt/, nub-rt-macro/  # Guest-side runtime + #[endpoint(N)] macro
+    nub-bench/              # nub benchmarks + end-to-end program coverage
+    programs/               # PVM2 compute programs (the benchmark kernels)
+    bench-compare/          # Cross-engine comparison (own workspace, excluded)
   rust/                     # Rust workspace — the JAVM layer on top of nub
     javm/                   # JAVM entrypoint: the crate callers invoke JAVM through
     javm-cap/               # Capability system — the JAVM kernel personality
     javm-guest-x86/         # JAVM guest personality + Hyperlight blob binaries
-    javm-transpiler/        # RISC-V ELF → PVM2 transpiler
-    javm-bench/             # PVM benchmarks (vs polkavm)
+    javm-transpiler/        # Wraps a nub ProgramBlob in the cap Image shape
+    javm-bench/             # Capability-system benchmarks (sub-VM, pt-cache)
     javm-guest-tests/       # Conformance vectors for javm guests
     ssz/, ssz-derive/       # SSZ codec
-    subsoil/, subsoil-derive/  # Storage layer
-  components/               # Guest crates consumed by rust/ (bench guests)
+  components/               # JAVM-specific guest crates (cap-system benches)
   spec/                     # Lean 4 formal specification
   tools/jar-genesis/        # Genesis Proof-of-Intelligence tooling
   website/                  # Hugo + Hextra documentation site
@@ -106,7 +111,8 @@ ci: add cargo audit to CI pipeline
 ```bash
 cargo build --workspace              # Build everything
 cargo test --workspace               # Run all tests
-cargo bench -p javm-bench            # PVM interp/recomp vs polkavm
+cargo bench -p nub-bench             # nub interpreter + JIT emission
+cargo bench -p javm-bench            # capability system (sub-VM, pt-cache)
 ```
 
 ## For Zo Computer users

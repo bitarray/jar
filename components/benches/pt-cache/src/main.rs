@@ -1,26 +1,26 @@
-#![cfg_attr(target_env = "javm", no_std)]
-#![cfg_attr(target_env = "javm", no_main)]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 use bench_pt_cache as _;
-use subsoil as _;
+use nub_rt as _;
 
-#[cfg(target_env = "javm")]
+#[cfg(target_os = "none")]
 mod kernel_abi;
 
 /// Image slot `derive_spawn` reads to find the child's image. Left
 /// empty in this guest, so the kernel falls back to the running
 /// frame's own image — the child `B` is another Instance of *this*
 /// image, entered at the echo endpoint.
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const SLOT_IMAGE: u8 = 3;
 
 /// Slot the spawned child `B` lives in (`Owned`); HALT folds the
 /// updated child back here after each CALL, so it stays resident.
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const SLOT_CHILD: u8 = 6;
 
 /// Endpoint index of the echo function — what the caller CALLs.
-#[cfg(all(target_env = "javm", target_os = "none"))]
+#[cfg(target_os = "none")]
 const ECHO_ENDPOINT: u8 = 1;
 
 /// Endpoint 0 — caller `A`. Spawn the resident child `B` once, then
@@ -29,8 +29,8 @@ const ECHO_ENDPOINT: u8 = 1;
 /// accumulator stays in a register (no data-region store), so `A`
 /// triggers no CoW of its own — the run measures only the per-CALL
 /// frame round-trip into the resident `B`.
-#[cfg(all(target_env = "javm", target_os = "none"))]
-#[subsoil::endpoint(0)]
+#[cfg(target_os = "none")]
+#[nub_rt::endpoint(0)]
 fn caller(n: u64) -> u64 {
     use kernel_abi::*;
 
@@ -51,11 +51,11 @@ fn caller(n: u64) -> u64 {
 /// Endpoint 1 — echo `B`. Return the caller-threaded argument
 /// (`φ[7]`) unchanged. No data-region access ⇒ no CoW, no
 /// per-instance page-table delta.
-#[cfg(all(target_env = "javm", target_os = "none"))]
-#[subsoil::endpoint(1)]
+#[cfg(target_os = "none")]
+#[nub_rt::endpoint(1)]
 fn echo(arg: u64) -> u64 {
     arg
 }
 
-#[cfg(not(target_env = "javm"))]
+#[cfg(not(target_os = "none"))]
 fn main() {}

@@ -3,13 +3,10 @@ name = "javm-transpiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "RISC-V ELF to JAVM PVM transpiler"
+description = "RISC-V ELF to JAVM Image: wraps a nub-linker ProgramBlob in the cap shape"
 
 [dependencies]
 javm-cap = { workspace = true }
+nub-linker = { path = "../../nub/nub-linker" }
+nub-program = { path = "../../nub/nub-program" }
 thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-test = { workspace = true }
-
-[dev-dependencies]
-proptest = { workspace = true }

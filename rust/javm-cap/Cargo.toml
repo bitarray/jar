@@ -11,6 +11,9 @@ default = ["std"]
 std = ["ssz/std", "blake2/std", "thiserror/std", "rkyv/std"]
 
 [dependencies]
+# PVM2 address-space ABI constants, re-exported by `layout`. no_std with
+# zero deps, so the guest build picks it up for free.
+nub-program = { path = "../../nub/nub-program" }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }

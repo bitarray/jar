@@ -8,7 +8,7 @@
 //! one ring-3 cycle per poll and dispatches each exit back here:
 //!
 //!   1. On `EXIT_HALT` (or `EXIT_HOST_CALL` with `exit_arg == 0` —
-//!      `subsoil`'s endpoint trampoline issues `li t0, 0; ecall`,
+//!      `nub_rt`'s endpoint trampoline issues `li t0, 0; ecall`,
 //!      which the transpiler emits as PVM `ecalli 0`): pop. If the
 //!      stack is empty, return; otherwise reflect the child's φ[7]
 //!      into the parent's φ[7]. ([`Javm::on_halt`] / `OP_REPLY`)
@@ -836,7 +836,7 @@ impl GuestPersonality for Javm {
                 if drained {
                     // Preserve the JIT exit shape so the host bench
                     // harness (which asserts `(reason=4, arg=0)` for the
-                    // subsoil trampoline halt) doesn't trip.
+                    // nub_rt trampoline halt) doesn't trip.
                     return Ok(ctx.done(info.exit_reason, info.exit_arg, info.regs[7], head));
                 }
                 // Stack still has frames; the parent picks up at the next

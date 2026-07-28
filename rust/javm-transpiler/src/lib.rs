@@ -1,10 +1,14 @@
-//! RISC-V ELF to PVM2 transpiler.
+//! RISC-V ELF to JAVM `Image`.
 //!
-//! Converts RISC-V rv64em+C+Zbb+Zba+Zbs+Zicond+Zicclsm+custom-0 ELF binaries
-//! into PVM2 program blobs suitable for execution by the JAR PVM2
-//! engine (interpreter / x86 recompiler).
+//! A thin adapter over [`nub_linker`]: that crate turns an RV64EMC ELF
+//! into a personality-free [`nub_program::ProgramBlob`], and this one
+//! wraps the blob in the JAVM capability shape — one `Cap::Data` per
+//! data region at its conventional cnode slot, declarative
+//! `MemoryMapping`s, SSZ encoding and content hashing.
+//!
+//! The split is deliberate: everything above is PVM2 ISA work that nub
+//! must be able to do without knowing JAVM exists.
 
-pub mod elf;
 pub mod layout;
 pub mod linker;
 
@@ -12,16 +16,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum TranspileError {
-    #[error("ELF parse error: {0}")]
-    ElfParse(String),
-    #[error("unsupported RISC-V instruction at offset {offset:#x}: {detail}")]
-    UnsupportedInstruction { offset: usize, detail: String },
-    #[error("unsupported relocation: {0}")]
-    UnsupportedRelocation(String),
-    #[error("register mapping error: RISC-V register {0} has no PVM equivalent")]
-    RegisterMapping(u8),
-    #[error("code too large: {0} bytes")]
-    CodeTooLarge(usize),
-    #[error("invalid section: {0}")]
-    InvalidSection(String),
+    #[error("link error: {0}")]
+    Link(#[from] nub_linker::LinkError),
 }
