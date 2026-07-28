@@ -130,7 +130,12 @@ pub fn measure(bytes: &[u8], family: Family) -> Result<Sizes> {
         Family::Pvm2 => nub(bytes),
         Family::Polkavm64 => polkavm(bytes),
         Family::Wasm32 => wasm(bytes),
-        Family::Native => bail!("native artifacts have no comparable size figure"),
+        // Both are real ELFs rather than compact VM containers, so a
+        // byte-exact reconciliation would be measuring ELF packaging.
+        // Same reason `native` is out of the size tables.
+        Family::Native | Family::Sbf => {
+            bail!("ELF artifacts have no comparable container-size figure")
+        }
     }
 }
 

@@ -17,11 +17,15 @@ publish = true
 description = "Cross-engine benchmark comparison for nub: native, polkavm, wasmtime, wasmer"
 
 [features]
-default = ["polkavm-engine", "wasmtime-engine", "wasmer-engine"]
+default = ["polkavm-engine", "wasmtime-engine", "wasmer-engine", "sbpf-engine"]
 # Tier 1: the engines whose numbers the report is built around.
 polkavm-engine = ["dep:polkavm"]
 wasmtime-engine = ["dep:wasmtime"]
 wasmer-engine = ["dep:wasmer", "dep:wasmer-compiler-singlepass"]
+# Solana sBPF. The engine is a light pure-Rust dependency, so it is on
+# by default; its *artifacts* need `bpf-linker` (see README), and rows
+# whose artifact is absent simply do not appear.
+sbpf-engine = ["dep:solana-sbpf"]
 # Tier 2: opt-in.
 wasmi-engine = ["dep:wasmi"]
 
@@ -48,6 +52,7 @@ wasmtime = { version = "47", default-features = false, features = ["cranelift", 
 wasmer = { version = "7", default-features = false, features = ["std", "singlepass", "sys"], optional = true }
 wasmer-compiler-singlepass = { version = "7", optional = true }
 wasmi = { version = "1.1", optional = true }
+solana-sbpf = { version = "0.22", optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 nub-recompiler-x86 = { path = "../nub-recompiler-x86" }

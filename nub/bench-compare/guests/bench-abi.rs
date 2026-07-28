@@ -86,3 +86,55 @@ macro_rules! bench_entry {
         }
     };
 }
+
+// The sBPF global allocator.
+//
+// It cannot be the `.bss` arena above: the sBPF container has no
+// writable segment at all — the strict v3 ELF parser accepts exactly
+// two `PT_LOAD` headers, `PF_R` and `PF_X` — so a mutable global cannot
+// even be expressed, and `sbpf-link` refuses to emit one.
+//
+// Instead the arena *is* the VM's heap region. The host maps writable
+// memory at `MM_HEAP_START` and the guest bumps through it, keeping the
+// cursor in the first 8 bytes of that region rather than in a static.
+// This mirrors what Solana's own `BumpAllocator` does on-chain.
+//
+// The region size is the harness's choice, not Solana's on-chain
+// policy (which defaults to 32 KiB) — `fri-fold-tree` alone needs
+// 65,528 B. `backend/sbpf.rs` maps it and the report discloses it.
+#[cfg(target_arch = "bpf")]
+mod sbpf_heap {
+    use core::alloc::{GlobalAlloc, Layout};
+
+    /// `solana_sbpf::ebpf::MM_HEAP_START`.
+    const HEAP_START: u64 = 3 * (1u64 << 32);
+    /// Must match the region `backend/sbpf.rs` maps.
+    const HEAP_LEN: u64 = 256 * 1024;
+    /// The cursor lives in the first 8 bytes of the region.
+    const CURSOR: u64 = HEAP_START;
+    const BASE: u64 = HEAP_START + 8;
+
+    pub struct HeapBump;
+
+    unsafe impl GlobalAlloc for HeapBump {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe {
+                let cursor = CURSOR as *mut u64;
+                let pos = if *cursor == 0 { BASE } else { *cursor };
+                let align = layout.align() as u64;
+                let aligned = (pos + align - 1) & !(align - 1);
+                let next = aligned + layout.size() as u64;
+                if next > HEAP_START + HEAP_LEN {
+                    return core::ptr::null_mut();
+                }
+                *cursor = next;
+                aligned as *mut u8
+            }
+        }
+        /// Bump arena: the kernels run once and exit, so nothing frees.
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    }
+
+    #[global_allocator]
+    static ALLOC: HeapBump = HeapBump;
+}

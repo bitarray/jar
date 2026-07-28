@@ -1,13 +1,19 @@
 //! Fan each benchmark kernel out to every engine's artifact family.
 //!
-//! One kernel crate in `nub/programs/<name>`, four artifacts:
+//! One kernel crate in `nub/programs/<name>`, five artifacts:
 //!
-//! | family      | artifact                        | consumed by            |
-//! |-------------|---------------------------------|------------------------|
-//! | `pvm2`      | `artifacts/pvm2/<n>.nubp`       | nub interp / JIT       |
-//! | `native`    | `artifacts/native/<n>.so`       | the `native` floor     |
-//! | `wasm32`    | `artifacts/wasm32/<n>.wasm`     | wasmtime, wasmer, wasmi|
-//! | `polkavm64` | `artifacts/polkavm64/<n>.polkavm` | polkavm              |
+//! | family      | artifact                          | consumed by             |
+//! |-------------|-----------------------------------|-------------------------|
+//! | `pvm2`      | `artifacts/pvm2/<n>.nubp`         | nub interp / JIT        |
+//! | `native`    | `artifacts/native/<n>.so`         | the `native` floor      |
+//! | `wasm32`    | `artifacts/wasm32/<n>.wasm`       | wasmtime, wasmer, wasmi |
+//! | `polkavm64` | `artifacts/polkavm64/<n>.polkavm` | polkavm                 |
+//! | `sbpf`      | `artifacts/sbpf/<n>.sbpf`         | solana-sbpf             |
+//!
+//! `sbpf` is partial by construction: three kernels cannot be expressed
+//! on that platform at all (`SBPF_UNSUPPORTED`), and it needs
+//! `bpf-linker` on `PATH` or in `$BPF_LINKER` — without it the family
+//! is skipped rather than failing the build.
 //!
 //! Discovery downstream is by directory name, not by inferring a family
 //! from a path deep inside `target/`. It also keeps artifacts out of a
@@ -42,6 +48,32 @@ const PROGRAMS: &[&str] = &[
 const NATIVE_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 const WASM_TRIPLE: &str = "wasm32-unknown-unknown";
 const POLKAVM_TARGET: &str = "riscv64emac-polkavm";
+/// Upstream rustc's own BPF target. Not a custom JSON — see `build_sbpf`.
+const SBPF_TARGET: &str = "bpfel-unknown-none";
+
+/// Kernels sBPF cannot carry, with the reason.
+///
+/// Listed rather than discovered by letting the build fail, so the gaps
+/// in the sBPF column are a stated fact with a cause attached instead
+/// of a mystery. All three are properties of the platform, not of our
+/// toolchain choice — Solana's own `cargo-build-sbf` would hit the same
+/// walls.
+const SBPF_UNSUPPORTED: &[(&str, &str)] = &[
+    (
+        "prime-sieve",
+        "100 KB writable `static mut`; the sBPF container has no writable segment",
+    ),
+    (
+        "ecrecover",
+        "k256's lincomb needs ~3.8 KB of lookup tables in one frame, against a 4 KiB limit \
+         (this is why Solana ships secp256k1_recover as a syscall)",
+    ),
+    (
+        "ed25519",
+        "ed25519-compact's field arithmetic is 76 u128 sites; LLVM's BPF backend has no \
+         128-bit multiply and the crate cannot be cfg-gated from here",
+    ),
+];
 const POLKAVM_TARGET_JSON: &str = include_str!("../targets/riscv64emac-polkavm.json");
 
 /// Guest stack for the polkavm family, matching the recovered
@@ -88,6 +120,9 @@ fn main() -> Result<()> {
         manifest
             .artifacts
             .push(build_polkavm(&root, &artifacts, program)?);
+        if let Some(a) = build_sbpf(&root, &artifacts, program)? {
+            manifest.artifacts.push(a);
+        }
     }
 
     let path = artifacts.join("manifest.json");
@@ -333,6 +368,129 @@ fn build_polkavm(root: &Path, artifacts: &Path, program: &str) -> Result<Artifac
         target: POLKAVM_TARGET.into(),
         rustflags: "-Zunstable-options -Cpanic=immediate-abort".into(),
     })
+}
+
+/// The sBPF family: upstream rustc's own BPF target, linked by
+/// `bpf-linker` and wrapped by our `sbpf-link`.
+///
+/// Deliberately **not** `cargo-build-sbf`. Solana's toolchain is a
+/// forked rustc (currently 1.84.1) and a forked LLVM; every other
+/// family here is built by the 1.95.0 pinned in `rust-toolchain.toml`,
+/// and a row compiled by a different compiler would attribute a codegen
+/// delta to the engine. Upstream's `bpfel-unknown-none` reaches SBPFv3
+/// because v3 reverts every v2 divergence from stock eBPF, so the
+/// pinned compiler is enough.
+///
+/// Three things about this build are load-bearing and non-obvious:
+///
+/// * The **built-in** target is used, not a custom JSON. A custom
+///   target cannot express `has_reliable_f128 = false` (rustc does not
+///   accept the field), so `compiler_builtins` compiles its f128 paths
+///   and the BPF backend rejects `__ashlti3`. The built-in target
+///   carries `obj-is-bitcode: true`, which defers all instruction
+///   selection to link time and sidesteps it entirely.
+/// * `-bpf-stack-size=4096` because upstream LLVM hardcodes a 512-byte
+///   BPF frame limit and errors above it. 4096 is sBPF's own
+///   `stack_frame_size`.
+/// * `bpf-linker` emits a *relocatable* object with relocations
+///   unapplied; `sbpf-link` applies them and builds the container.
+fn build_sbpf(root: &Path, artifacts: &Path, program: &str) -> Result<Option<Artifact>> {
+    if let Some((_, why)) = SBPF_UNSUPPORTED.iter().find(|(p, _)| *p == program) {
+        eprintln!("  sbpf      SKIP: {why}");
+        return Ok(None);
+    }
+    let Some(bpf_linker) = find_bpf_linker() else {
+        return Ok(None);
+    };
+    let target_dir = root.join("target/guests");
+    let rustflags = [
+        "-Zunstable-options".to_string(),
+        format!("-Clinker={}", bpf_linker.display()),
+        "-Clink-arg=--llvm-args=-bpf-stack-size=4096".to_string(),
+    ]
+    .join("\x1f");
+
+    let status = cargo(root)
+        .args(["build", "--release", "-Zbuild-std=core,alloc", "-p"])
+        .arg(format!("guest-{program}"))
+        .args(["--target", SBPF_TARGET])
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("CARGO_ENCODED_RUSTFLAGS", &rustflags)
+        .env("CARGO_PROFILE_RELEASE_DEBUG", "false")
+        .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "3")
+        .env("CARGO_PROFILE_RELEASE_LTO", "true")
+        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+        .status()?;
+    if !status.success() {
+        bail!("sbpf build failed for {program}");
+    }
+
+    let stem = format!("guest_{}", program.replace('-', "_"));
+    let obj = target_dir
+        .join(SBPF_TARGET)
+        .join("release")
+        .join(format!("lib{stem}.so"));
+    if !obj.exists() {
+        bail!("no sbpf object for {program} at {}", obj.display());
+    }
+
+    let out = artifacts.join("sbpf");
+    std::fs::create_dir_all(&out)?;
+    let dest = out.join(format!("{program}.sbpf"));
+    let linker = std::env::current_exe()?
+        .parent()
+        .map(|d| d.join("sbpf-link"))
+        .filter(|p| p.exists())
+        .context("sbpf-link not built alongside bench-build")?;
+    let status = Command::new(&linker)
+        .arg(&obj)
+        .arg("-o")
+        .arg(&dest)
+        .args(["--entry", "run"])
+        .status()?;
+    if !status.success() {
+        bail!("sbpf-link failed for {program}");
+    }
+    eprintln!("  sbpf      {}", dest.display());
+
+    Ok(Some(Artifact {
+        program: program.into(),
+        family: "sbpf".into(),
+        path: rel(root, &dest),
+        target: SBPF_TARGET.into(),
+        rustflags: "-Clink-arg=--llvm-args=-bpf-stack-size=4096 (bpf-linker + sbpf-link)".into(),
+    }))
+}
+
+/// `bpf-linker`, from `$BPF_LINKER` or `PATH`.
+///
+/// The one out-of-band tool this family needs. It is a statically
+/// linked binary, not a compiler fork — the *compiler* stays pinned —
+/// so the provenance cost is far smaller than platform-tools would be.
+/// Absent, the sBPF family is skipped rather than failing the build,
+/// exactly as the KVM-dependent rows are skipped without `/dev/kvm`.
+fn find_bpf_linker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("BPF_LINKER") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+        eprintln!(
+            "  sbpf      SKIP: $BPF_LINKER={} does not exist",
+            p.display()
+        );
+        return None;
+    }
+    let found = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join("bpf-linker"))
+            .find(|p| p.exists())
+    });
+    if found.is_none() {
+        eprintln!("  sbpf      SKIP: bpf-linker not found (set $BPF_LINKER or add it to PATH)");
+    }
+    found
 }
 
 fn cargo(root: &Path) -> Command {

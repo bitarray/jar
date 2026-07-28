@@ -102,12 +102,23 @@ mod builtins {
 
 // -- Panic handler (freestanding targets only) --------------------------------
 
-// This crate is RISC-V-only by construction: both the panic handler
-// and `_start` below emit `unimp`. Fail loudly rather than silently
-// dropping a panic handler if it is ever built for another
+// The `_start` trampoline and the endpoint ABI below are RISC-V-only by
+// construction — they emit `unimp`. Fail loudly rather than silently
+// dropping a panic handler if this is ever built for some *other*
 // freestanding target.
-#[cfg(all(target_os = "none", not(target_arch = "riscv64")))]
-compile_error!("nub_rt supports the freestanding riscv64 (PVM2) guest target only");
+//
+// `bpf` is admitted as a second freestanding arch purely so the
+// benchmark kernels can be cross-compiled for Solana's sBPF in
+// `bench-compare`. That build uses only `mod builtins` above — sBPF has
+// no libc, and Solana's `sol_memcpy_` is a platform-tools syscall we
+// cannot call — and its own entry shim, never `_start` or
+// `#[nub_rt::endpoint]`. `compile_error!` emits no code, so widening
+// this leaves every existing target byte-identical.
+#[cfg(all(
+    target_os = "none",
+    not(any(target_arch = "riscv64", target_arch = "bpf"))
+))]
+compile_error!("nub_rt supports the freestanding riscv64 (PVM2) and bpf (sBPF) guest targets only");
 
 #[cfg(all(target_os = "none", target_arch = "riscv64"))]
 #[panic_handler]
@@ -115,6 +126,16 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe {
         core::arch::asm!("li a0, 0xDEAD", "unimp", options(noreturn));
     }
+}
+
+/// sBPF has no trap instruction reachable from Rust, so a panic spins.
+/// The VM's instruction meter is what actually stops it — and a
+/// benchmark kernel that panics is a bug we want to see as a timeout
+/// rather than a silent wrong answer.
+#[cfg(all(target_os = "none", target_arch = "bpf"))]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    loop {}
 }
 
 // -- Default `_start` ---------------------------------------------------------
