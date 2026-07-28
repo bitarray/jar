@@ -491,6 +491,15 @@ pub fn render(root: &Path, programs: &[&str]) -> String {
          `native` is absent: a host `.so` is a different kind of object — ELF \
          program headers, relocations, a dynamic symbol table, and whatever of \
          `std` got linked in — not a bigger or smaller one.\n\n\
+         **The whole-blob table is not built from identical sources**, and the \
+         raw-code table is the fairer one for that reason too. pvm2 builds the \
+         kernel crate's own binary, so it carries nub's guest runtime — the \
+         entry trampoline, the endpoint table, the bump arena. The other three \
+         build the thin wrapper in `guests/`, which calls into the same kernel \
+         as a library. That is each format's honest artifact, since the nub-rt \
+         endpoint binary *is* the PVM2 ABI, but it means the data regions are \
+         not measuring the same thing and nub is carrying runtime the others \
+         are not.\n\n\
          **No compression is involved anywhere.** Trailing-zero trimming in \
          nub and PolkaVM is BSS elision, exactly what ELF does with \
          `p_filesz < p_memsz`, and wasm data segments carry no trailing zeros \
