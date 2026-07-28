@@ -7,14 +7,17 @@
 //! *emittable* — without a `GuestPersonality` there is nobody to build
 //! a frame for the compiled code to run in.
 //!
-//! Four pieces, which is the whole obligation:
+//! Four pieces, which is the whole obligation. Plain code spans, not
+//! doc links: every one of these modules is `cfg(target_os = "none")`
+//! and therefore absent from the host doc build that `cargo doc -D
+//! warnings` gates on.
 //!
 //! | module | trait | what it decides |
 //! |---|---|---|
-//! | [`store`] | `GuestStore` | how a published object is decoded and named |
-//! | [`mem`] | `FrameMem` | where a data page comes from, and how CoW works |
-//! | [`frame`] | `ExecFrame` | the address-space layout handed to the JIT |
-//! | [`personality`] | `GuestPersonality` | root frame, gas policy, exit meaning |
+//! | `store` | `GuestStore` | how a published object is decoded and named |
+//! | `mem` | `FrameMem` | where a data page comes from, and how CoW works |
+//! | `frame` | `ExecFrame` | the address-space layout handed to the JIT |
+//! | `personality` | `GuestPersonality` | root frame, gas policy, exit meaning |
 //!
 //! Host-visible surface: only [`test_abi`]; everything else is
 //! `cfg(target_os = "none")`.
