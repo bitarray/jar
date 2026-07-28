@@ -97,7 +97,30 @@ impl Family {
             Family::Polkavm64 => "polkavm",
         }
     }
+
+    /// Where `bench-build` puts this family's artifact for `program`.
+    pub fn artifact_path(self, root: &Path, program: &str) -> PathBuf {
+        root.join("artifacts")
+            .join(self.dir())
+            .join(format!("{program}.{}", self.ext()))
+    }
 }
+
+/// The families whose artifact size is comparable, in report order.
+///
+/// `Native` is absent, and that is not an oversight. A host `.so` is a
+/// different *kind* of object rather than a bigger or smaller one: ELF
+/// program headers, relocations, a dynamic symbol table, and whatever
+/// of `std` the linker pulled in. It is ~1.9 MB even for the workload
+/// whose entire PVM2 code is 126 bytes. Sizing it against three
+/// bytecode containers would produce a number with no meaning, the same
+/// reason `compilation` omits it.
+///
+/// An explicit array rather than [`Family`]'s derived `Ord`, so column
+/// order is a decision rather than a side effect of declaration order.
+/// nub first, matching the timing headline, which also puts the subject
+/// first.
+pub const SIZE_FAMILIES: [Family; 3] = [Family::Pvm2, Family::Polkavm64, Family::Wasm32];
 
 /// What a row can do, and what it costs to do it.
 #[derive(Debug, Clone, Copy)]

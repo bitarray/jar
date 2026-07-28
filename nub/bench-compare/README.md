@@ -31,6 +31,7 @@ cargo run --release -p bench-build     # fan every kernel out to 4 targets
 cargo run --release -- list            # what is available
 cargo run --release -- validate        # do all engines agree?
 cargo run --release -- run             # measure
+cargo run --release -- size            # artifact size (no measurement needed)
 cargo run --release -- report --write  # -> BENCHMARKS.md
 ```
 
@@ -205,6 +206,69 @@ failing every measurement.
 `nub_jit_compile` remains alongside it, measuring emission alone with
 no sandbox. The two answer different questions: how fast the
 recompiler *emits*, versus what a full cold invocation costs.
+
+## Artifact size
+
+Speed is half the story; for a chain VM the other half is how big the
+program is, because the blob is what gets gossiped, stored and paid for.
+`report` emits two size tables, and `bench-compare size` prints the same
+ones without needing any measurement.
+
+**Whole blob** is the file on disk. **Raw code** excludes the data
+regions, and it is the figure to read — several kernels carry large
+initialized data that swamps everything else. `prime-sieve` is 214 bytes
+of nub code inside a 158,338-byte blob, 0.1% of it; comparing whole
+blobs there compares static lookup tables, not code generators.
+
+| family | code figure |
+|---|---|
+| `pvm2` | `code` |
+| `polkavm64` | `code` + jump table + bitmask |
+| `wasm32` | `Code`(10) + `Type`(1) + `Function`(3) + `Table`(4) + `Element`(9) + `Global`(6) |
+
+PolkaVM's two extras are code information held *outside* the instruction
+stream. Its instructions are variable-length, so the bitmask — one bit
+per code byte, marking instruction starts — is what makes the stream
+decodable at all; RV64EMC encodes that in the low two bits of each word.
+The jump table lists legal indirect-branch targets, which `jalr rd, rs1,
+imm` takes straight from a register. wasm's aux sections are the same
+argument: `Type`/`Function` hold signatures the register machines encode
+implicitly in their calling convention, and `Table`/`Element` are the
+direct analogue of PolkaVM's jump table.
+
+This is deliberately **broader than upstream PolkaVM's own
+disassembler**, which labels only `code` as "code size". That is why the
+breakdown tables exist: they show every component and every row
+reconciles to the file size, so the definition can be checked rather
+than taken on trust.
+
+`native` is excluded from both tables. A host `.so` is a different kind
+of object — ELF program headers, relocations, a dynamic symbol table,
+and whatever of `std` the linker pulled in — not a bigger or smaller
+one; it is ~1.9 MB even for the workload whose entire PVM2 code is 126
+bytes. Same reason `compilation` omits it.
+
+**No compression is involved in any of the three, and there is nothing
+to disable.** nub trims trailing zeros off `ro`/`rw` and PolkaVM stores
+only the initial non-zero prefix of its data sections; both are BSS
+elision, exactly what ELF does with `p_filesz < p_memsz`, and wasm data
+segments are explicitly offset so they carry no trailing zeros either.
+No entropy coder, dictionary or transform exists in any of these
+containers, and `polkavm_linker::Config` has no compression knob at all.
+
+The varint/LEB128 encoding in PolkaVM and wasm is **instruction
+encoding, not a container compressor.** It cannot be turned off — there
+is no alternative encoding — and would not be worth turning off if it
+could: it is precisely the axis these formats trade on. PolkaVM buys
+cheap small immediates with variable-length instructions and pays a
+12.5% bitmask; RISC-V pays fixed width and needs no side table. Both are
+raw code, and comparing them is the point.
+
+Guest wasm is built with debug info off and symbols stripped, so the
+whole-blob column is a like-for-like comparison. Without that it is not:
+PolkaVM strips at link (`Config::set_strip(true)`) and nub's linker
+never copies DWARF, so an unstripped wasm would be compared against two
+stripped formats — and DWARF was 86–98% of every `.wasm`.
 
 ## Engines deliberately excluded
 

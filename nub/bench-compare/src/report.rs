@@ -172,6 +172,10 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
     let mut out = String::new();
     out.push_str("# nub benchmark comparison\n\n");
     out.push_str(&headline(&records));
+    // Size is the second headline claim, and it is a property of the
+    // artifacts — so it sits directly above the section describing how
+    // those artifacts were built.
+    out.push_str(&crate::size::render(root, crate::PROGRAMS));
     out.push_str(&provenance(root)?);
     out.push_str(
         "\n## How to read this\n\n\
@@ -454,6 +458,29 @@ fn headline(records: &[Record]) -> String {
     out
 }
 
+/// Whether `artifacts/` has been rebuilt since the last measurement.
+///
+/// Compares the artifact manifest against the newest result file. False
+/// when either is missing — an absent answer is not evidence of
+/// staleness.
+fn artifacts_newer_than_results(root: &Path) -> bool {
+    let built =
+        match std::fs::metadata(root.join("artifacts/manifest.json")).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+    let newest_result = std::fs::read_dir(root.join("target/results"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max();
+    match newest_result {
+        Some(measured) => built > measured,
+        None => false,
+    }
+}
+
 fn provenance(root: &Path) -> Result<String> {
     let mut s = String::from("## Provenance\n\n");
     let manifest = root.join("artifacts/manifest.json");
@@ -463,6 +490,18 @@ fn provenance(root: &Path) -> Result<String> {
                 s.push_str(&format!("- Guest toolchain: `{rustc}`\n"));
             }
         }
+    }
+    if artifacts_newer_than_results(root) {
+        // The size tables are always current — they are read straight
+        // off disk. The timings are whatever the last sweep produced.
+        // When the artifacts have been rebuilt since, the two halves of
+        // this report describe different binaries, which is exactly the
+        // mistake worth catching automatically rather than remembering.
+        s.push_str(
+            "- **The artifacts are newer than the measurements.** The size tables \
+             below describe the current artifacts; the timings do not. Re-run \
+             `scripts/run.sh`.\n",
+        );
     }
     if let Ok(cpu) = std::fs::read_to_string("/proc/cpuinfo") {
         if let Some(model) = cpu
