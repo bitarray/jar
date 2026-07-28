@@ -24,12 +24,24 @@ mkdir -p target/results
 PROGRAMS=$("$BIN" list | sed -n 's/^  \([a-z0-9-]*\) *artifacts:.*/\1/p')
 ENGINES=$("$BIN" list | sed -n 's/^  \([a-z0-9_]*\) *family=.*/\1/p')
 
-for kind in runtime compilation; do
+# `cold` first: it is the bench target, so an interrupted sweep still
+# leaves the headline table complete.
+#
+# All four kinds go through this loop. An earlier version ran only
+# `runtime` and `compilation` here and left `cold`/`invoke` to be invoked
+# by hand — which meant the headline table was measured in ONE process
+# shared by every program and every engine, against a guest heap that is
+# never swept. That contaminated rows by up to 47%.
+#
+# `--exact` matters for the same reason: engine names nest
+# (`..._sync_gas` is a prefix of `..._sync_gas_full`), and a substring
+# filter naming the shorter one runs both in a single process.
+for kind in cold invoke runtime compilation; do
     for program in $PROGRAMS; do
         for engine in $ENGINES; do
             out="target/results/${kind}__${program}__${engine}.json"
             [ -f "$out" ] && continue
-            "$BIN" run "$kind/$program/$engine" --kinds "$kind"
+            "$BIN" run "$kind/$program/$engine" --kinds "$kind" --exact
         done
     done
 done

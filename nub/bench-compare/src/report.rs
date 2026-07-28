@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -31,34 +30,110 @@ pub struct Record {
     /// one, so the mean is biased upward by exactly the noise we are
     /// trying to exclude.
     pub median_ns: f64,
-    /// Fastest observed sample — the closest thing to an
-    /// interference-free measurement.
-    pub min_ns: f64,
-    pub max_ns: f64,
+    /// Bounds of criterion's bootstrap confidence interval on the
+    /// median. Reporting these is not decoration: a row whose interval
+    /// is 30% wide is not a measurement, and without them it looks
+    /// exactly as authoritative as one that is 1% wide.
+    pub median_lo_ns: f64,
+    pub median_hi_ns: f64,
+    /// Mean and standard deviation, for the rows where the gap between
+    /// mean and median is itself the interesting signal.
+    pub mean_ns: f64,
+    pub std_dev_ns: f64,
+}
+
+/// The shape of criterion's `new/estimates.json`.
+#[derive(Deserialize)]
+struct CriterionEstimates {
+    mean: CriterionStat,
+    median: CriterionStat,
+    std_dev: CriterionStat,
+}
+
+#[derive(Deserialize)]
+struct CriterionStat {
+    confidence_interval: CriterionCi,
+    point_estimate: f64,
+}
+
+#[derive(Deserialize)]
+struct CriterionCi {
+    lower_bound: f64,
+    upper_bound: f64,
 }
 
 impl Record {
-    pub fn from_samples(
+    /// Read back the estimates criterion just wrote for one row.
+    ///
+    /// criterion owns the statistics — warm-up, adaptive iteration
+    /// counts, bootstrap intervals, outlier classification — and this
+    /// only reshapes its output into the record the report renders
+    /// from, adding the two facts criterion has no way to know: whether
+    /// the engine is metered, and whether it rebuilds per run.
+    pub fn from_criterion(
+        criterion_dir: &Path,
         kind: &str,
         program: &str,
         engine: &str,
         metered: bool,
         rebuilds_per_run: bool,
-        samples: &[Duration],
-    ) -> Self {
-        let mut ns: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1e9).collect();
-        ns.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        Record {
+        samples: usize,
+    ) -> Result<Self> {
+        let path = criterion_dir
+            .join(kind)
+            .join(program)
+            .join(engine)
+            .join("new/estimates.json");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("read criterion estimates at {}", path.display()))?;
+        let est: CriterionEstimates =
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+        Ok(Record {
             kind: kind.into(),
             program: program.into(),
             engine: engine.into(),
             metered,
             rebuilds_per_run,
-            samples: ns.len(),
-            median_ns: ns[ns.len() / 2],
-            min_ns: *ns.first().unwrap_or(&0.0),
-            max_ns: *ns.last().unwrap_or(&0.0),
+            samples,
+            median_ns: est.median.point_estimate,
+            median_lo_ns: est.median.confidence_interval.lower_bound,
+            median_hi_ns: est.median.confidence_interval.upper_bound,
+            mean_ns: est.mean.point_estimate,
+            std_dev_ns: est.std_dev.point_estimate,
+        })
+    }
+
+    /// Half-width of the confidence interval on the median, as a
+    /// percentage of it — the one number that says whether this row
+    /// should be believed.
+    pub fn spread_pct(&self) -> f64 {
+        if self.median_ns <= 0.0 {
+            return 0.0;
         }
+        (self.median_hi_ns - self.median_lo_ns) / 2.0 / self.median_ns * 100.0
+    }
+
+    /// One-line console summary.
+    pub fn summary(&self) -> String {
+        format!(
+            "{:>12}  ±{:.1}%",
+            format_duration(self.median_ns),
+            self.spread_pct()
+        )
+    }
+}
+
+/// Render a confidence-interval half-width, flagging the ones that mean
+/// the row should not be read as a measurement.
+///
+/// The threshold is a judgement, not a statistic: below ~2% a row is
+/// solid, and past ~10% the difference between two engines is smaller
+/// than the difference between two runs of the same engine.
+pub fn format_spread(pct: f64) -> String {
+    if pct >= 10.0 {
+        format!("**±{pct:.0}%**")
+    } else {
+        format!("±{pct:.1}%")
     }
 }
 
@@ -179,8 +254,8 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                 .map(|r| r.median_ns);
 
             out.push_str(&format!("\n### {program}\n\n"));
-            out.push_str("| Engine | Metered | Time | vs fastest | vs native |\n");
-            out.push_str("|---|---|--:|--:|--:|\n");
+            out.push_str("| Engine | Metered | Time | ± | vs fastest | vs native |\n");
+            out.push_str("|---|---|--:|--:|--:|--:|\n");
             for r in &rows {
                 let vs_fastest = r.median_ns / fastest;
                 let vs_native = match native {
@@ -193,10 +268,11 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                     ""
                 };
                 out.push_str(&format!(
-                    "| `{}`{caveat} | {} | {} | {:.2}x | {} |\n",
+                    "| `{}`{caveat} | {} | {} | {} | {:.2}x | {} |\n",
                     r.engine,
                     if r.metered { "yes" } else { "no" },
                     format_duration(r.median_ns),
+                    format_spread(r.spread_pct()),
                     vs_fastest,
                     vs_native,
                 ));
@@ -231,7 +307,9 @@ const HEADLINE_ROWS: &[&str] = &[
 /// A program-by-engine matrix of compile+execute time, at the top of the
 /// report, because it is the number the engine is being built to win.
 fn headline(records: &[Record]) -> String {
-    let mut cell: BTreeMap<(&str, &str), f64> = BTreeMap::new();
+    // (median, confidence-interval half-width %) — the second is what
+    // says whether the first should be believed.
+    let mut cell: BTreeMap<(&str, &str), (f64, f64)> = BTreeMap::new();
     let mut programs: Vec<&str> = Vec::new();
     for r in records.iter().filter(|r| r.kind == "cold") {
         if !HEADLINE_ROWS.contains(&r.engine.as_str()) {
@@ -240,7 +318,7 @@ fn headline(records: &[Record]) -> String {
         if !programs.contains(&r.program.as_str()) {
             programs.push(&r.program);
         }
-        cell.insert((&r.program, &r.engine), r.median_ns);
+        cell.insert((&r.program, &r.engine), (r.median_ns, r.spread_pct()));
     }
     if cell.is_empty() {
         return String::new();
@@ -260,7 +338,11 @@ fn headline(records: &[Record]) -> String {
          evaluate than nub's pipeline simulation, so the `*_full` rows \
          (`CacheModel::L2Hit`, whose `memory_access_cost: 25` is exactly nub's \
          `MEM_CYCLES_BASE`) are the like-for-like comparison. Full tables for \
-         every engine and every measurement kind follow below.\n\n",
+         every engine and every measurement kind follow below.\n\n\
+         A cell carries a `±` only when its confidence interval is wider \
+         than 2% of the median. Where that happens the cell is a range, not \
+         a number, and two engines inside each other's interval are not \
+         separable by this measurement.\n\n",
     );
 
     out.push_str("| Program |");
@@ -278,18 +360,26 @@ fn headline(records: &[Record]) -> String {
         let best = HEADLINE_ROWS
             .iter()
             .filter_map(|e| cell.get(&(p, *e)))
-            .cloned()
+            .map(|(v, _)| *v)
             .fold(f64::INFINITY, f64::min);
         for e in HEADLINE_ROWS {
             match cell.get(&(p, *e)) {
-                Some(v) => {
+                Some((v, spread)) => {
                     let mark = if (*v - best).abs() < f64::EPSILON {
                         "**"
                     } else {
                         ""
                     };
+                    // Only surfaced when it matters — a ± on every cell
+                    // is noise, and a missing one on the cell that needs
+                    // it is a lie.
+                    let ci = if *spread >= 2.0 {
+                        format!(" ±{spread:.0}%")
+                    } else {
+                        String::new()
+                    };
                     out.push_str(&format!(
-                        " {mark}{}{mark} ({:.2}x) |",
+                        " {mark}{}{mark}{ci} ({:.2}x) |",
                         format_duration(*v),
                         v / best
                     ));
@@ -339,11 +429,20 @@ fn headline(records: &[Record]) -> String {
             out.push_str(&format!("| {p} |"));
             for e in HEADLINE_ROWS {
                 match (warm.get(&(p, *e)), cell.get(&(p, *e))) {
-                    (Some(w), Some(total)) => out.push_str(&format!(
-                        " {} (+{} recompile) |",
-                        format_duration(*w),
-                        format_duration((total - w).max(0.0))
-                    )),
+                    (Some(w), Some((total, _))) => {
+                        let delta = total - w;
+                        // A negative recompile cost is physically
+                        // impossible: `cold` does strictly more work
+                        // than `invoke`. Clamping it to zero would hide
+                        // exactly the instability that makes the pair
+                        // meaningless, so say so instead.
+                        let note = if delta < 0.0 {
+                            "(cold < invoke — unstable)".to_string()
+                        } else {
+                            format!("(+{} recompile)", format_duration(delta))
+                        };
+                        out.push_str(&format!(" {} {note} |", format_duration(*w)));
+                    }
                     (Some(w), None) => out.push_str(&format!(" {} |", format_duration(*w))),
                     _ => out.push_str(" - |"),
                 }

@@ -11,11 +11,12 @@ mod utils;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use backend::{Artifact, Engine, Family};
 use clap::{Parser, Subcommand};
+use criterion::{BatchSize, BenchmarkId, Criterion};
 
 /// Programs, in report order. Must match `bench-build`.
 const PROGRAMS: &[&str] = &[
@@ -34,8 +35,21 @@ const PROGRAMS: &[&str] = &[
 /// Samples for a compiled engine, and for an interpreter. Interpreters
 /// are 10-100x slower; taking the same sample count would triple the
 /// suite's wall-clock for no extra statistical power.
+///
+/// These are criterion *sample* counts, not iteration counts: criterion
+/// picks the iterations per sample itself from the measurement budget,
+/// so a 7 µs row and a 45 ms row both get statistically adequate
+/// treatment without either being hand-tuned.
 const SAMPLES_FAST: usize = 50;
 const SAMPLES_SLOW: usize = 10;
+
+/// How long criterion runs a row before it starts believing the clock,
+/// and how long it then measures for. Both are deliberately shorter
+/// than criterion's 3 s / 5 s defaults: this suite has ~500 rows and
+/// runs one process per row, so the defaults would put a full sweep
+/// well past an hour.
+const WARM_UP: Duration = Duration::from_millis(1000);
+const MEASUREMENT: Duration = Duration::from_millis(3000);
 
 #[derive(Parser)]
 #[command(
@@ -65,9 +79,20 @@ enum Command {
         #[arg(
             long,
             value_delimiter = ',',
-            default_value = "runtime,invoke,cold,compilation"
+            default_value = "cold,invoke,runtime,compilation"
         )]
         kinds: Vec<String>,
+        /// Treat `filter` as a complete `kind/program/engine` id rather
+        /// than a substring.
+        ///
+        /// Engine names nest — `polkavm64_recompiler_sync_gas` is a
+        /// prefix of `polkavm64_recompiler_sync_gas_full` — so a
+        /// substring filter naming the shorter one silently runs both.
+        /// `scripts/run.sh` relies on exactly one row per process
+        /// (nub's sandbox is a process-wide singleton), so it passes
+        /// this.
+        #[arg(long)]
+        exact: bool,
     },
     /// Render the measurements as markdown.
     Report {
@@ -88,7 +113,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::List => list(&root),
         Command::Validate { write } => validate(&root, write),
-        Command::Run { filter, kinds } => run(&root, filter.as_deref(), &kinds),
+        Command::Run {
+            filter,
+            kinds,
+            exact,
+        } => run(&root, filter.as_deref(), &kinds, exact),
         Command::Report { write } => report::render(&root, write),
     }
 }
@@ -263,6 +292,9 @@ fn validate(root: &Path, write: bool) -> Result<()> {
     }
 }
 
+/// A criterion benchmark group, measured against the wall clock.
+type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;
+
 /// Steady-state execution: one instance, invoked repeatedly.
 ///
 /// This is throughput once everything is warm — the number that says how
@@ -271,67 +303,75 @@ fn validate(root: &Path, write: bool) -> Result<()> {
 /// (nub allocates and copies a flat address space; Wasmtime maps a
 /// copy-on-write image) and folding the two together would report a
 /// difference in memory strategy as a difference in execution speed.
-/// [`measure_oneshot`] reports that other half.
+/// [`bench_invoke`] reports that other half.
 ///
 /// Requires the program to be re-runnable in one instance. The three
-/// guests with a never-freeing bump arena are not, and surface as a
-/// skip rather than a wrong number.
-fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let artifact = Artifact::load(path)?;
-    let compiled = engine.create()?.compile(&artifact)?;
+/// guests with a never-freeing bump arena are not — the second probe run
+/// below is what catches them, so they surface as a skip rather than a
+/// wrong number.
+fn bench_runtime(
+    g: &mut Group<'_>,
+    id: BenchmarkId,
+    engine: &dyn Engine,
+    artifact: &Artifact,
+) -> Result<()> {
+    let compiled = engine.create()?.compile(artifact)?;
     let mut instance = compiled.spawn()?;
-    // One untimed warm-up so the first sample is not the odd one out.
+    // Two probe runs, both untimed: the first warms, the second proves
+    // the program survives re-entry. Criterion does its own warm-up on
+    // top of this.
     instance.run()?;
-    let mut out = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let start = Instant::now();
-        let value = instance.run()?;
-        out.push(start.elapsed());
-        std::hint::black_box(value);
-    }
-    Ok(out)
+    instance.run()?;
+    g.bench_function(id, |b| {
+        b.iter(|| std::hint::black_box(instance.run().expect("run")))
+    });
+    Ok(())
 }
 
-/// Cold invocation: a fresh instance every sample, timed through `run`.
+/// Fresh instance every sample, timed through `run`.
 ///
-/// Named `invoke` rather than `oneshot` because it excludes compilation;
-/// [`measure_oneshot`] is the one that includes it.
-///
-/// This is nub's real production model — every invocation builds a new
-/// address space — and it is where an engine's instantiation strategy
-/// shows up. Measured for all engines identically, so the comparison
-/// is like-for-like even though the absolute penalty is very different
-/// per engine (for nub's interpreter it is roughly 2x its warm cost).
-fn measure_invoke(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let artifact = Artifact::load(path)?;
-    let compiled = engine.create()?.compile(&artifact)?;
-    let mut out = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let mut instance = compiled.spawn()?;
-        let start = Instant::now();
-        let value = instance.run()?;
-        out.push(start.elapsed());
-        std::hint::black_box(value);
-    }
-    Ok(out)
+/// Instantiation stays in the untimed `setup` half of `iter_batched`, so
+/// this measures execution against a cold address space without charging
+/// for building it. It is nub's real production model — every invocation
+/// builds a new address space — and it is where an engine's
+/// instantiation strategy shows up.
+fn bench_invoke(
+    g: &mut Group<'_>,
+    id: BenchmarkId,
+    engine: &dyn Engine,
+    artifact: &Artifact,
+) -> Result<()> {
+    let compiled = engine.create()?.compile(artifact)?;
+    // Probe outside the clock, so a failure is a skip rather than a
+    // panic from inside criterion's measurement loop.
+    compiled.spawn()?.run()?;
+    g.bench_function(id, |b| {
+        b.iter_batched(
+            || compiled.spawn().expect("spawn"),
+            |mut instance| std::hint::black_box(instance.run().expect("run")),
+            BatchSize::PerIteration,
+        )
+    });
+    Ok(())
 }
 
 /// Time `compile()` only.
-fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+fn bench_compilation(
+    g: &mut Group<'_>,
+    id: BenchmarkId,
+    engine: &dyn Engine,
+    artifact: &Artifact,
+) -> Result<()> {
     // Engine creation and artifact loading are outside the loop: the
     // first is a once-per-process cost in real use (and nub has no
     // engine object to pay it at all), the second is the harness's own
     // file I/O.
-    let artifact = Artifact::load(path)?;
     let compiler = engine.create()?;
-    let mut out = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let start = Instant::now();
-        let compiled = compiler.compile(&artifact)?;
-        out.push(start.elapsed());
-        std::hint::black_box(&compiled);
-    }
-    Ok(out)
+    compiler.compile(artifact)?;
+    g.bench_function(id, |b| {
+        b.iter(|| std::hint::black_box(compiler.compile(artifact).expect("compile")))
+    });
+    Ok(())
 }
 
 /// **Cold recompile + execute** — the bench target.
@@ -351,47 +391,64 @@ fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Resu
 /// inside the clock. nub compiles lazily on first entry, so its
 /// equivalent is: publish once up front (untimed), then evict the JIT
 /// cache before each sample (untimed) and let `run` recompile.
-fn measure_cold(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let artifact = Artifact::load(path)?;
+///
+/// `BatchSize::PerIteration` is load-bearing on the lazy path: one
+/// eviction serves exactly one sample, and batching would leave every
+/// sample after the first measuring an already-warm run.
+fn bench_cold(
+    g: &mut Group<'_>,
+    id: BenchmarkId,
+    engine: &dyn Engine,
+    artifact: &Artifact,
+) -> Result<()> {
     let compiler = engine.create()?;
-    let mut out = Vec::with_capacity(samples);
-
     if engine.caps().compiles_lazily {
         // Publish once, outside every timed region.
-        let compiled = compiler.compile(&artifact)?;
-        for _ in 0..samples {
-            // Untimed: drop the compiled code, so `run` recompiles.
-            compiled.reset_compilation()?;
-            let start = Instant::now();
-            let mut instance = compiled.spawn()?;
-            let value = instance.run()?;
-            out.push(start.elapsed());
-            std::hint::black_box(value);
-        }
+        let compiled = compiler.compile(artifact)?;
+        compiled.reset_compilation()?;
+        compiled.spawn()?.run()?;
+        g.bench_function(id, |b| {
+            b.iter_batched(
+                || compiled.reset_compilation().expect("reset compilation"),
+                |()| {
+                    let mut instance = compiled.spawn().expect("spawn");
+                    std::hint::black_box(instance.run().expect("run"))
+                },
+                BatchSize::PerIteration,
+            )
+        });
     } else {
-        for _ in 0..samples {
-            let start = Instant::now();
-            let compiled = compiler.compile(&artifact)?;
-            let mut instance = compiled.spawn()?;
-            let value = instance.run()?;
-            out.push(start.elapsed());
-            std::hint::black_box(value);
-        }
+        compiler.compile(artifact)?.spawn()?.run()?;
+        g.bench_function(id, |b| {
+            b.iter(|| {
+                let compiled = compiler.compile(artifact).expect("compile");
+                let mut instance = compiled.spawn().expect("spawn");
+                std::hint::black_box(instance.run().expect("run"))
+            })
+        });
     }
-    Ok(out)
+    Ok(())
 }
 
-fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
+fn run(root: &Path, filter: Option<&str>, kinds: &[String], exact: bool) -> Result<()> {
     let engines = backend::registry();
     let out_dir = root.join("target/results");
     std::fs::create_dir_all(&out_dir)?;
+    let criterion_dir = root.join("target/criterion");
+
+    // Plots are per-row SVG rendering we never look at, and this suite
+    // has ~500 rows.
+    let mut c = Criterion::default()
+        .output_directory(&criterion_dir)
+        .without_plots();
 
     for kind in kinds {
         for program in PROGRAMS {
             for engine in &engines {
                 let id = format!("{kind}/{program}/{}", engine.name());
                 if let Some(f) = filter {
-                    if !id.contains(f) {
+                    let hit = if exact { id == f } else { id.contains(f) };
+                    if !hit {
                         continue;
                     }
                 }
@@ -402,31 +459,48 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
                 if kind == "compilation" && !engine.caps().compiles {
                     continue;
                 }
+                let artifact = match Artifact::load(&path) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("{id:60} SKIP: {e:#}");
+                        continue;
+                    }
+                };
 
                 let samples = if engine.caps().slow {
                     SAMPLES_SLOW
                 } else {
                     SAMPLES_FAST
                 };
+                let mut group = c.benchmark_group(kind.as_str());
+                group.sample_size(samples);
+                group.warm_up_time(WARM_UP);
+                group.measurement_time(MEASUREMENT);
+                let bid = BenchmarkId::new(*program, engine.name());
+
                 let result = match kind.as_str() {
-                    "runtime" => measure_runtime(engine.as_ref(), &path, samples),
-                    "invoke" => measure_invoke(engine.as_ref(), &path, samples),
-                    "cold" => measure_cold(engine.as_ref(), &path, samples),
-                    "compilation" => measure_compilation(engine.as_ref(), &path, samples),
-                    other => bail!("unknown kind `{other}` (want runtime, oneshot or compilation)"),
+                    "runtime" => bench_runtime(&mut group, bid, engine.as_ref(), &artifact),
+                    "invoke" => bench_invoke(&mut group, bid, engine.as_ref(), &artifact),
+                    "cold" => bench_cold(&mut group, bid, engine.as_ref(), &artifact),
+                    "compilation" => bench_compilation(&mut group, bid, engine.as_ref(), &artifact),
+                    other => {
+                        bail!("unknown kind `{other}` (want runtime, invoke, cold or compilation)")
+                    }
                 };
+                group.finish();
 
                 match result {
-                    Ok(samples) => {
-                        let record = report::Record::from_samples(
+                    Ok(()) => {
+                        let record = report::Record::from_criterion(
+                            &criterion_dir,
                             kind,
                             program,
                             engine.name(),
                             engine.caps().metered,
                             engine.caps().rebuilds_per_run,
-                            &samples,
-                        );
-                        println!("{id:60} {:>12}", report::format_duration(record.median_ns));
+                            samples,
+                        )?;
+                        println!("{id:60} {}", record.summary());
                         let file = out_dir.join(format!("{}.json", id.replace('/', "__")));
                         std::fs::write(&file, serde_json::to_string_pretty(&record)?)?;
                     }
@@ -440,5 +514,6 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String]) -> Result<()> {
             }
         }
     }
+    c.final_summary();
     Ok(())
 }
