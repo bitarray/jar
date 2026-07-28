@@ -192,6 +192,33 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
          what an engine charges you.\n\n",
     );
 
+    // The sBPF rows carry two caveats that a reader scanning a table
+    // would otherwise miss, and both cut against reading them as
+    // like-for-like. Emitted only when those rows are present, so the
+    // report does not explain an engine it did not measure.
+    if records.iter().any(|r| r.engine.starts_with("sbpf")) {
+        out.push_str(
+            "### Reading the `sbpf_*` rows\n\n\
+             **Seven of ten kernels.** `prime-sieve` needs a writable global, which the \
+             sBPF container cannot express; `ecrecover` needs ~3.8 KB of k256 lookup \
+             tables in one frame against a 4 KiB limit (which is why Solana ships \
+             `secp256k1_recover` as a syscall); `ed25519-compact`'s field arithmetic is \
+             76 `u128` sites. All three are platform properties — Solana's own toolchain \
+             hits the same walls — not artifacts of how these were built.\n\n\
+             **Five of the seven run a different multiply.** LLVM's BPF backend cannot \
+             lower a 64x64 widening multiply, so `gp::mul` has a `cfg(target_arch = \
+             \"bpf\")` arm reassembling the product from four 32x32 partials. It is \
+             proven bit-identical, so every engine agrees on the same value — but \
+             `goldilocks-mul`, `poseidon2-perm`, `mini-verifier`, `poly-eval` and \
+             `fri-fold-tree` are measuring a *different program* here, not just a \
+             different VM. Do not read those five as like-for-like.\n\n\
+             Heap sizing (256 KiB, against Solana's on-chain 32 KiB default) is a \
+             harness choice so the workloads fit, in the same spirit as setting gas \
+             counters to maximum. Stack and frame limits are solana-sbpf's own \
+             defaults, because those are the ISA.\n\n",
+        );
+    }
+
     // kind -> program -> rows
     let mut by_kind: BTreeMap<String, BTreeMap<String, Vec<Record>>> = BTreeMap::new();
     for r in records {

@@ -27,7 +27,7 @@ Consequences, all intended:
 
 ```bash
 cd nub/bench-compare
-cargo run --release -p bench-build     # fan every kernel out to 4 targets
+cargo run --release -p bench-build     # fan every kernel out to 5 targets
 cargo run --release -- list            # what is available
 cargo run --release -- validate        # do all engines agree?
 cargo run --release -- run             # measure
@@ -42,13 +42,23 @@ rustup target add wasm32-unknown-unknown
 rustup component add rust-src
 ```
 
+The sBPF family additionally needs `bpf-linker`; without it that family
+is skipped and its rows do not appear. See [Solana sBPF](#solana-sbpf).
+
 ## How one kernel reaches every engine
 
 The compute kernels live in `nub/programs/*` as ordinary Rust libraries
-exposing a single `pub fn name() -> u32`. They contain no target
-conditionals in the kernel body and know nothing about any engine.
+exposing a single `pub fn name() -> u32`, and know nothing about any
+engine.
 
-`bench-build` compiles each to four artifact families:
+There is **exactly one target conditional** in kernel code, and it is
+worth knowing about: `gp::mul` has a `cfg(target_arch = "bpf")` arm,
+because LLVM's BPF backend cannot lower a 64x64 widening multiply. It
+is proven bit-identical to the `u128` path, but it does mean the five
+`gp`-backed kernels are a different program on the sBPF row. See
+[Solana sBPF](#solana-sbpf). Every other engine sees identical source.
+
+`bench-build` compiles each kernel to five artifact families:
 
 | family | artifact | consumed by |
 |---|---|---|
@@ -56,6 +66,7 @@ conditionals in the kernel body and know nothing about any engine.
 | `native` | `artifacts/native/<n>.so` | `native` |
 | `wasm32` | `artifacts/wasm32/<n>.wasm` | Wasmtime, Wasmer |
 | `polkavm64` | `artifacts/polkavm64/<n>.polkavm` | PolkaVM |
+| `sbpf` | `artifacts/sbpf/<n>.sbpf` | solana-sbpf (7 of 10 kernels) |
 
 The non-PVM2 families go through a thin wrapper crate in `guests/`
 which `include!`s `guests/bench-abi.rs` and exports a single
@@ -207,6 +218,72 @@ failing every measurement.
 no sandbox. The two answer different questions: how fast the
 recompiler *emits*, versus what a full cold invocation costs.
 
+### Solana sBPF
+
+`sbpf_interpreter` and `sbpf_jit`, via `solana-sbpf`. The other major
+production chain VM with a metered register machine, so the most
+obviously missing comparison.
+
+**Built by our own pinned compiler, not Solana's.** `cargo-build-sbf`
+ships a forked rustc (currently 1.84.1) and a forked LLVM; every other
+family here is built by the `1.95.0` in `rust-toolchain.toml`, and a row
+compiled by a different compiler *and* a different LLVM would attribute
+a codegen delta to the engine — a confound `manifest.json` cannot even
+express, since it records one rustc per run. Upstream rustc's own
+`bpfel-unknown-none` reaches SBPFv3 instead, because **v3 reverts every
+v2 divergence from stock eBPF**: `disable_lddw`, `disable_le`,
+`disable_neg`, `swap_sub_reg_imm_operands`,
+`move_memory_instruction_classes` and `enable_pqr` are all `self == V2`
+in solana-sbpf, and `call imm` under `static_syscalls()` is pc-relative
+— exactly what LLVM emits. So the old "different ISA" objection to this
+row was simply wrong.
+
+It needs one out-of-band tool, `bpf-linker`, from `$BPF_LINKER` or
+`PATH`:
+
+```bash
+# prebuilt, statically linked, user-local — no system change
+curl -sSL -o bl.tar.zst https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+tar --zstd -xf bl.tar.zst && export BPF_LINKER=$PWD/bpf-linker
+```
+
+Without it the sBPF artifacts are skipped and the rows simply do not
+appear. That is a real cost, but a far smaller one than a compiler fork:
+the *compiler* stays pinned, so only the linking step is out of band.
+
+**Read these rows with two caveats.**
+
+*Seven of ten kernels.* `prime-sieve` has a 100 KB writable
+`static mut` and the sBPF container has no writable segment at all — the
+strict v3 parser accepts exactly two `PT_LOAD` headers, `PF_R` and
+`PF_X`. `ecrecover` needs ~3.8 KB of k256 lookup tables in one frame
+against a 4 KiB limit, which is why Solana ships `secp256k1_recover` as
+a syscall rather than letting programs link k256. `ed25519-compact`'s
+field arithmetic is 76 `u128` sites. All three are properties of the
+platform; Solana's own toolchain hits the same walls.
+
+*Five of the seven run a different multiply.* LLVM's BPF backend cannot
+lower a 64x64 widening multiply — `__multi3` is unsupported at every CPU
+level it accepts — so `gp::mul` has a `cfg(target_arch = "bpf")` arm
+that reassembles the product from four 32x32 partials. It is proven
+bit-identical to the `u128` path (edge cases plus 200k pairs, in that
+module's tests), so every engine agrees on the same `u32` and `validate`
+passes. But `goldilocks-mul`, `poseidon2-perm`, `mini-verifier`,
+`poly-eval` and `fri-fold-tree` are therefore measuring a *different
+program* on this row, not just a different VM. Do not read them as
+like-for-like against the other engines.
+
+Memory sizing is the harness's choice, not Solana's on-chain policy:
+the heap is 256 KiB where on-chain defaults to 32 KiB, because two
+kernels exceed the latter and we are measuring the VM rather than the
+chain's resource policy — the same spirit as setting gas counters to
+maximum. Stack and frame limits are left at solana-sbpf's defaults,
+because those *are* the ISA.
+
+sBPF is absent from the **size** tables for the same reason `native` is:
+its artifact is a real ELF rather than a compact VM container, so a
+byte-exact container comparison would be measuring ELF packaging.
+
 ## Artifact size
 
 Speed is half the story; for a chain VM the other half is how big the
@@ -288,9 +365,6 @@ Recorded here so they are not re-litigated:
   the whole prover tree, and their executors are instrumented for trace
   emission, so a raw ns/op would measure "emulator + trace recording"
   and mislead.
-- **solana_rbpf** — different ISA, and building guests needs an
-  out-of-band Solana platform-tools download.
-
 `wasmi` and `ckb-vm` are wanted but not yet wired; `wasmi` has a
 feature flag reserved.
 
