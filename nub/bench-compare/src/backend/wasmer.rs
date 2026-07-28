@@ -11,12 +11,10 @@
 //! Unmetered: Singlepass has no fuel equivalent, so the row is flagged
 //! as such rather than pretending to be comparable to a metered one.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use wasmer::{imports, sys::EngineBuilder, Instance as WrInstance, Module, Store, TypedFunction};
 
-use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler, Engine, Family, Instance};
 
 pub fn engines() -> Vec<Box<dyn Engine>> {
     vec![Box::new(WasmerSinglepass)]
@@ -46,12 +44,14 @@ impl Engine for WasmerSinglepass {
 }
 
 impl Compiler for WasmerSinglepass {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
         let compiler = wasmer_compiler_singlepass::Singlepass::new();
         let store = Store::new(EngineBuilder::new(compiler));
-        let module = Module::new(&store, &bytes).context("wasmer compile")?;
-        Ok(Box::new(WasmerModule { bytes, module }))
+        let module = Module::new(&store, &artifact.bytes).context("wasmer compile")?;
+        Ok(Box::new(WasmerModule {
+            bytes: artifact.bytes.clone(),
+            module,
+        }))
     }
 }
 

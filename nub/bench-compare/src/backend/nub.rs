@@ -22,14 +22,13 @@
 //! `polkavm64_recompiler_{no,sync}_gas` and
 //! `wasmtime_cranelift{,_fuel}` pairs instead, which bracket it.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use nub_arch_local::{PreparedProgram, ProgramInstance};
 use nub_program::ProgramBlob;
 
-use crate::backend::{Caps, Compiled, Compiler as BcCompiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler as BcCompiler, Engine, Family, Instance};
 
 /// Gas ceiling. `i64::MAX`, not `u64::MAX`: the JIT's counter is an
 /// `i64` and detects exhaustion by sign, so `u64::MAX` would present as
@@ -55,9 +54,8 @@ pub fn engines() -> Vec<Box<dyn Engine>> {
     v
 }
 
-fn load(path: &Path) -> Result<ProgramBlob> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    ProgramBlob::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("decode {}: {e}", path.display()))
+fn load(bytes: &[u8]) -> Result<ProgramBlob> {
+    ProgramBlob::from_bytes(bytes).map_err(|e| anyhow::anyhow!("decode program blob: {e}"))
 }
 
 // ---- interpreter ------------------------------------------------------
@@ -88,9 +86,9 @@ impl Engine for NubInterp {
 }
 
 impl BcCompiler for NubInterp {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
         Ok(Box::new(InterpModule {
-            blob: Arc::new(load(path)?),
+            blob: Arc::new(load(&artifact.bytes)?),
         }))
     }
 }
@@ -188,8 +186,8 @@ mod jit {
     }
 
     impl BcCompiler for NubJitCompile {
-        fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-            let blob = super::load(path)?;
+        fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
+            let blob = super::load(&artifact.bytes)?;
             // Same load/store gas tier the interpreter derives, so the
             // emitted gas gates are the ones a real run would use.
             let mem_cycles = gas_const::mem_cycles_for(gas_const::accessible_pages(
@@ -256,12 +254,18 @@ mod sandbox {
             Family::Pvm2
         }
         fn caps(&self) -> Caps {
-            // Compiling happens lazily inside the guest on first entry,
-            // so there is no host-side compile step to time here —
-            // `nub_jit_compile` is that measurement. And every invoke
-            // builds a fresh frame, so `spawn` cannot hoist setup out
-            // of the timed region the way it can for other engines.
-            Caps::new().metered().preloaded().rebuilds_per_run()
+            // `compiles: true`, but note what it measures for this row:
+            // nub's `compile` step is **publish**, not codegen. The JIT
+            // runs lazily inside the guest on first entry, so publishing
+            // is where the equivalent up-front work happens — ship the
+            // blob across the VM boundary, decode it, content-hash it,
+            // and materialize its data image. That is the honest
+            // counterpart to `Module::from_blob`, and it is worth its
+            // own column because it dominates.
+            //
+            // Every invoke builds a fresh frame, so `spawn` cannot hoist
+            // setup out of the timed region as it can elsewhere.
+            Caps::new().metered().rebuilds_per_run()
         }
         fn create(&self) -> Result<Box<dyn BcCompiler>> {
             nub()?;
@@ -270,13 +274,12 @@ mod sandbox {
     }
 
     impl BcCompiler for NubJit {
-        fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
             // Publishing is idempotent and content-addressed, so
             // re-publishing the same program across samples is a
             // hash-table hit in the guest.
             let hash = nub()?
-                .put_object(&bytes)
+                .put_object(&artifact.bytes)
                 .map_err(|e| anyhow::anyhow!("publish: {e}"))?;
             Ok(Box::new(JitSandboxModule { hash }))
         }

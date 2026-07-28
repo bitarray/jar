@@ -10,13 +10,12 @@
 //! - `wasmtime_winch` — Wasmtime's own single-pass baseline compiler.
 //!   The like-for-like design comparison, at zero extra dependency.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wasmtime::{Config, Engine as WtEngine, Instance as WtInstance, Module, Store, TypedFunc};
 
-use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler, Engine, Family, Instance};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Strategy {
@@ -95,9 +94,8 @@ struct WasmtimeCompiler {
 }
 
 impl Compiler for WasmtimeCompiler {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let module = Module::new(&self.engine, &bytes)
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
+        let module = Module::new(&self.engine, &artifact.bytes)
             .map_err(|e| anyhow::anyhow!("wasmtime compile: {e}"))?;
         Ok(Box::new(WasmtimeModule {
             engine: Arc::clone(&self.engine),

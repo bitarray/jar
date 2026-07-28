@@ -153,9 +153,16 @@ pub fn render(root: &Path, write: bool) -> Result<()> {
                  which also pay instantiation.\n"
             }
             "compilation" => {
-                "\nTurning the program into executable form. Engine construction is \
-                 excluded (a once-per-process cost). `native` is absent: the OS \
-                 loader already did it.\n"
+                "\nTurning the program into executable form. Engine construction and \
+                 file loading are excluded (a once-per-process cost, and the \
+                 harness's own I/O). `native` is absent: the OS loader already did \
+                 it.\n\n\
+                 **`nub_jit` measures publishing here, not codegen.** nub keeps its \
+                 object store *inside* the sandbox, so the equivalent up-front work \
+                 is shipping the blob across the VM boundary, decoding it, \
+                 content-hashing it and materializing its data image — the JIT \
+                 itself runs lazily on first entry. `nub_jit_compile` is the \
+                 codegen-only figure.\n"
             }
             _ => "\n",
         });

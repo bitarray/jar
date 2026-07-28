@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use backend::{Engine, Family};
+use backend::{Artifact, Engine, Family};
 use clap::{Parser, Subcommand};
 
 /// Programs, in report order. Must match `bench-build`.
@@ -160,7 +160,8 @@ fn list(root: &Path) -> Result<()> {
 
 /// One `(engine, program)` execution, run once.
 fn probe(engine: &dyn Engine, path: &Path) -> Result<(u32, Option<u64>)> {
-    let compiled = engine.create()?.compile(path)?;
+    let artifact = Artifact::load(path)?;
+    let compiled = engine.create()?.compile(&artifact)?;
     let mut instance = compiled.spawn()?;
     let value = instance.run()?;
     Ok((value, instance.gas_used()))
@@ -276,7 +277,8 @@ fn validate(root: &Path, write: bool) -> Result<()> {
 /// guests with a never-freeing bump arena are not, and surface as a
 /// skip rather than a wrong number.
 fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let compiled = engine.create()?.compile(path)?;
+    let artifact = Artifact::load(path)?;
+    let compiled = engine.create()?.compile(&artifact)?;
     let mut instance = compiled.spawn()?;
     // One untimed warm-up so the first sample is not the odd one out.
     instance.run()?;
@@ -301,7 +303,8 @@ fn measure_runtime(engine: &dyn Engine, path: &Path, samples: usize) -> Result<V
 /// is like-for-like even though the absolute penalty is very different
 /// per engine (for nub's interpreter it is roughly 2x its warm cost).
 fn measure_invoke(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    let compiled = engine.create()?.compile(path)?;
+    let artifact = Artifact::load(path)?;
+    let compiled = engine.create()?.compile(&artifact)?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
         let mut instance = compiled.spawn()?;
@@ -315,13 +318,16 @@ fn measure_invoke(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Ve
 
 /// Time `compile()` only.
 fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
-    // Engine creation is outside the loop: it is a once-per-process cost
-    // in real use, and nub has no engine object to pay it at all.
+    // Engine creation and artifact loading are outside the loop: the
+    // first is a once-per-process cost in real use (and nub has no
+    // engine object to pay it at all), the second is the harness's own
+    // file I/O.
+    let artifact = Artifact::load(path)?;
     let compiler = engine.create()?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = Instant::now();
-        let compiled = compiler.compile(path)?;
+        let compiled = compiler.compile(&artifact)?;
         out.push(start.elapsed());
         std::hint::black_box(&compiled);
     }
@@ -336,14 +342,15 @@ fn measure_compilation(engine: &dyn Engine, path: &Path, samples: usize) -> Resu
 /// internally are reset first (see [`Compiled::reset_compilation`]), so
 /// no row gets to skip the compile half.
 fn measure_oneshot(engine: &dyn Engine, path: &Path, samples: usize) -> Result<Vec<Duration>> {
+    let artifact = Artifact::load(path)?;
     let compiler = engine.create()?;
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
         // Untimed: put the engine back in its cold state.
-        engine.create()?.compile(path)?.reset_compilation()?;
+        engine.create()?.compile(&artifact)?.reset_compilation()?;
 
         let start = Instant::now();
-        let compiled = compiler.compile(path)?;
+        let compiled = compiler.compile(&artifact)?;
         let mut instance = compiled.spawn()?;
         let value = instance.run()?;
         out.push(start.elapsed());

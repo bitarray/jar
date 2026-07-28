@@ -10,12 +10,10 @@
 //! Unmetered, and flagged as such: wasmi has fuel metering, but this
 //! row does not enable it.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wasmi::{Engine as WiEngine, Instance as WiInstance, Linker, Module, Store, TypedFunc};
 
-use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler, Engine, Family, Instance};
 
 pub fn engines() -> Vec<Box<dyn Engine>> {
     vec![Box::new(Wasmi)]
@@ -47,9 +45,8 @@ struct WasmiCompiler {
 }
 
 impl Compiler for WasmiCompiler {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let module = Module::new(&self.engine, &bytes[..])
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
+        let module = Module::new(&self.engine, &artifact.bytes[..])
             .map_err(|e| anyhow::anyhow!("wasmi compile: {e}"))?;
         Ok(Box::new(WasmiModule {
             engine: self.engine.clone(),

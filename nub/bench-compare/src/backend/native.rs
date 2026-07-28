@@ -12,11 +12,9 @@
 //! nothing. Going through a shared object makes the call opaque, which
 //! is also exactly what the other engines' FFI boundaries do.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 
-use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler, Engine, Family, Instance};
 
 #[derive(Clone, Copy)]
 pub struct Native;
@@ -42,9 +40,12 @@ impl Engine for Native {
 }
 
 impl Compiler for Native {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let library = unsafe { libloading::Library::new(path) }
-            .with_context(|| format!("dlopen {}", path.display()))?;
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
+        // dlopen genuinely needs a path, not bytes — this is the one
+        // engine that does. The file is already in page cache from the
+        // harness's load, so this is not a disk read.
+        let library = unsafe { libloading::Library::new(&artifact.path) }
+            .with_context(|| format!("dlopen {}", artifact.path.display()))?;
         Ok(Box::new(NativeModule { library }))
     }
 }

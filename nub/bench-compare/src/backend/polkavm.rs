@@ -25,8 +25,6 @@
 //! is the row that is genuinely like-for-like with `nub_interp`'s
 //! metering, and the Simple rows show what a cheaper model would buy.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use polkavm::{
     ArcBytes, CacheModel, Config, CostModel, CostModelKind, Engine as PvmEngine, Gas,
@@ -38,7 +36,7 @@ use polkavm::{
 /// `u64::MAX` — same reason nub uses `i64::MAX`.
 const GAS_MAX: Gas = Gas::MAX;
 
-use crate::backend::{Caps, Compiled, Compiler, Engine, Family, Instance};
+use crate::backend::{Artifact, Caps, Compiled, Compiler, Engine, Family, Instance};
 
 /// Which cost model a metered row charges against.
 #[derive(Clone, Copy, PartialEq)]
@@ -144,10 +142,8 @@ struct PolkaVmCompiler {
 }
 
 impl Compiler for PolkaVmCompiler {
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>> {
-        let bytes: ArcBytes = std::fs::read(path)
-            .with_context(|| format!("read {}", path.display()))?
-            .into();
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>> {
+        let bytes: ArcBytes = artifact.bytes.clone().into();
         let blob = ProgramBlob::parse(bytes).map_err(|e| anyhow::anyhow!("parse blob: {e}"))?;
 
         let mut module_config = ModuleConfig::default();

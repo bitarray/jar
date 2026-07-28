@@ -40,9 +40,30 @@
 //! the comparison, not a confounder to normalize away — see the fairness
 //! rules in `README.md`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+
+/// One built artifact, loaded once and reused across every sample.
+///
+/// Carries both forms because engines want different ones: `dlopen`
+/// needs a real path on disk, everyone else takes bytes. Loading is the
+/// harness's job so that no engine is charged for a file read inside a
+/// timed region.
+pub struct Artifact {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+impl Artifact {
+    pub fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        Ok(Artifact {
+            path: path.to_path_buf(),
+            bytes,
+        })
+    }
+}
 
 /// Which artifact family an engine consumes. One kernel is compiled to
 /// each of these; see `bench-build`.
@@ -153,8 +174,16 @@ pub trait Engine {
 
 /// A live engine, ready to compile programs.
 pub trait Compiler {
-    /// Load and compile one program. This is the `compilation` measurement.
-    fn compile(&self, path: &Path) -> Result<Box<dyn Compiled>>;
+    /// Compile one already-loaded program. This is the `compilation`
+    /// measurement.
+    ///
+    /// Takes a loaded [`Artifact`], not a path: reading the file is the
+    /// harness's job and happens once, outside every timed region.
+    /// Leaving it here charged every engine for a file read on each
+    /// sample — and for nub, whose `put_object` content-hashes what it
+    /// is handed, a 158 KiB read *plus* a hash of those bytes was
+    /// landing in the "compile" column on every iteration.
+    fn compile(&self, artifact: &Artifact) -> Result<Box<dyn Compiled>>;
 }
 
 /// A compiled program, ready to be instantiated.
