@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["lib", "cdylib"]
+# A plain rlib. The kernel is a *library* consumed by the engine
+# wrappers in `bench-compare/guests/*`, which are themselves the
+# cdylibs. Listing `cdylib` here made the kernel a final artifact in its
+# own right, and under the polkavm target (whose spec sets
+# `only-cdylib`) that meant it had to supply a `#[global_allocator]` it
+# has no business owning — which is exactly how it broke.
+crate-type = ["lib"]
 
 [dependencies]
 gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" }

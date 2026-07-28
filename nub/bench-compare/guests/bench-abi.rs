@@ -13,6 +13,62 @@
 // `#[nub_rt::endpoint(0)]` binary *is* the ABI, so `bench-build`
 // builds that directly.
 
+// A global allocator for the polkavm build.
+//
+// Three kernels (`ecrecover`, `poly-eval`, `fri-fold-tree`) use `alloc`
+// internally, so on a freestanding target something has to provide
+// `#[global_allocator]`. The native and wasm families link `std` and
+// get one for free; the PVM2 family gets one from the kernel binary's
+// own `nub_rt::bump_allocator!`. polkavm is the only build that has
+// neither — it is `no_std` with `-Zbuild-std=core,alloc` — and without
+// this it fails to link with "no global memory allocator found".
+//
+// Deliberately not `nub_rt::bump_allocator!`: `nub-rt` is the PVM2
+// guest runtime, and its `_start` trampoline and `.nub.endpoints`
+// section are gated on `target_os = "none"` + `riscv64`, which the
+// polkavm target also matches. Depending on it here would inject the
+// PVM2 entry ABI into a polkavm blob.
+//
+// A bump arena because these kernels run once and exit: allocation is a
+// pointer bump and nothing is ever freed. The arena lives in `.bss`, so
+// it costs nothing in the blob.
+#[cfg(target_env = "polkavm")]
+const GUEST_HEAP_BYTES: usize = 256 * 1024;
+
+#[cfg(target_env = "polkavm")]
+struct BumpAlloc {
+    heap: core::cell::UnsafeCell<[u8; GUEST_HEAP_BYTES]>,
+    pos: core::cell::UnsafeCell<usize>,
+}
+
+// SAFETY: guests are single-threaded — polkavm runs one instruction
+// stream and a guest has no way to create a thread.
+#[cfg(target_env = "polkavm")]
+unsafe impl Sync for BumpAlloc {}
+
+#[cfg(target_env = "polkavm")]
+unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let pos = unsafe { &mut *self.pos.get() };
+        let aligned = (*pos + layout.align() - 1) & !(layout.align() - 1);
+        let next = aligned + layout.size();
+        if next > GUEST_HEAP_BYTES {
+            return core::ptr::null_mut();
+        }
+        *pos = next;
+        unsafe { (*self.heap.get()).as_mut_ptr().add(aligned) }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
+
+#[cfg(target_env = "polkavm")]
+#[global_allocator]
+static GUEST_HEAP: BumpAlloc = BumpAlloc {
+    heap: core::cell::UnsafeCell::new([0; GUEST_HEAP_BYTES]),
+    pos: core::cell::UnsafeCell::new(0),
+};
+
 /// Define the `run` export for whichever target we are building.
 macro_rules! bench_entry {
     ($kernel:path) => {
