@@ -7,6 +7,7 @@
 
 mod backend;
 mod report;
+mod size;
 mod utils;
 
 use std::collections::BTreeMap;
@@ -94,6 +95,9 @@ enum Command {
         #[arg(long)]
         exact: bool,
     },
+    /// Artifact size across engines. Reads `artifacts/`; needs no
+    /// measurements and writes nothing.
+    Size,
     /// Render the measurements as markdown.
     Report {
         /// Overwrite `BENCHMARKS.md`.
@@ -103,11 +107,20 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    // Must happen before anything allocates a mapping we care about.
-    utils::disable_aslr_and_restart();
-    refuse_debug_build()?;
-
     let cli = Cli::parse();
+
+    // Timing hygiene, and only the measuring commands need it.
+    // Re-exec'ing the process and refusing a debug build to print a
+    // table of byte counts would be wrong — and `refuse_debug_build`
+    // would block `cargo run -- size` during development. Parsing args
+    // first is safe: `exec` replaces the whole image, and no engine has
+    // been constructed yet.
+    if matches!(cli.command, Command::Run { .. } | Command::Validate { .. }) {
+        // Must happen before anything allocates a mapping we care about.
+        utils::disable_aslr_and_restart();
+        refuse_debug_build()?;
+    }
+
     let root = workspace_root()?;
 
     match cli.command {
@@ -118,6 +131,10 @@ fn main() -> Result<()> {
             kinds,
             exact,
         } => run(&root, filter.as_deref(), &kinds, exact),
+        Command::Size => {
+            print!("{}", size::render(&root, PROGRAMS));
+            Ok(())
+        }
         Command::Report { write } => report::render(&root, write),
     }
 }
@@ -139,12 +156,6 @@ fn refuse_debug_build() -> Result<()> {
 
 fn workspace_root() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
-}
-
-fn artifact_path(root: &Path, program: &str, family: Family) -> PathBuf {
-    root.join("artifacts")
-        .join(family.dir())
-        .join(format!("{program}.{}", family.ext()))
 }
 
 fn list(root: &Path) -> Result<()> {
@@ -171,7 +182,7 @@ fn list(root: &Path) -> Result<()> {
             Family::Polkavm64,
         ]
         .into_iter()
-        .filter(|f| artifact_path(root, p, *f).exists())
+        .filter(|f| f.artifact_path(root, p).exists())
         .map(|f| f.dir())
         .collect();
         if have.len() < 4 {
@@ -204,7 +215,7 @@ fn validate(root: &Path, write: bool) -> Result<()> {
     for program in PROGRAMS {
         let mut values: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
         for engine in &engines {
-            let path = artifact_path(root, program, engine.family());
+            let path = engine.family().artifact_path(root, program);
             if !path.exists() {
                 continue;
             }
@@ -452,7 +463,7 @@ fn run(root: &Path, filter: Option<&str>, kinds: &[String], exact: bool) -> Resu
                         continue;
                     }
                 }
-                let path = artifact_path(root, program, engine.family());
+                let path = engine.family().artifact_path(root, program);
                 if !path.exists() {
                     continue;
                 }
