@@ -333,6 +333,7 @@ const HEADLINE_ROWS: &[&str] = &[
     "polkavm64_recompiler_sync_gas_full",
     "polkavm64_recompiler_async_gas_full",
     "wasmtime_cranelift_fuel",
+    "sbpf_jit",
 ];
 
 /// A program-by-engine matrix of compile+execute time, at the top of the
@@ -373,7 +374,13 @@ fn headline(records: &[Record]) -> String {
          A cell carries a `±` only when its confidence interval is wider \
          than 2% of the median. Where that happens the cell is a range, not \
          a number, and two engines inside each other's interval are not \
-         separable by this measurement.\n\n",
+         separable by this measurement.\n\n\
+         **`sbpf_jit` is not like-for-like on every row.** It is missing three \
+         kernels the sBPF platform cannot express, and on the five \
+         `gp`-backed ones it runs a different multiply, because LLVM's BPF \
+         backend has no widening multiply. Those cells measure a different \
+         program, not only a different VM — see *Reading the `sbpf_*` rows* \
+         below before drawing a conclusion from them.\n\n",
     );
 
     out.push_str("| Program |");
