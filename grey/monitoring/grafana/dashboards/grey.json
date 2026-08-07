@@ -1,0 +1,211 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Grey JAM node monitoring dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Block Height",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "grey_block_height",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Finalized Height",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "grey_finalized_height",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Finality Lag",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "grey_finality_lag",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 50,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 30 }
+            ]
+          },
+          "unit": "slots"
+        }
+      }
+    },
+    {
+      "title": "Connected Peers",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "grey_peer_count",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Blocks Produced / Imported",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "expr": "rate(grey_blocks_produced_total[5m])",
+          "legendFormat": "produced {{instance}}"
+        },
+        {
+          "expr": "rate(grey_blocks_imported_total[5m])",
+          "legendFormat": "imported {{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "blocks/s"
+        }
+      }
+    },
+    {
+      "title": "GRANDPA Round",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "expr": "grey_grandpa_round",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Work Packages Submitted / Accumulated",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "rate(grey_work_packages_submitted_total[5m])",
+          "legendFormat": "submitted {{instance}}"
+        },
+        {
+          "expr": "rate(grey_work_packages_accumulated_total[5m])",
+          "legendFormat": "accumulated {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "PVM Gas Used",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "expr": "rate(grey_pvm_gas_used_total[5m])",
+          "legendFormat": "gas/s {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "State Transition Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "grey_state_transition_last_seconds",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "RPC Latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(grey_rpc_request_seconds_bucket[5m])) by (le, method))",
+          "legendFormat": "{{method}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Database Size",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "expr": "grey_stored_blocks",
+          "legendFormat": "blocks {{instance}}"
+        },
+        {
+          "expr": "grey_stored_states",
+          "legendFormat": "states {{instance}}"
+        },
+        {
+          "expr": "grey_stored_chunks",
+          "legendFormat": "chunks {{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Gossipsub Messages",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "targets": [
+        {
+          "expr": "rate(grey_gossipsub_messages_total[5m])",
+          "legendFormat": "{{topic}} {{instance}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["grey", "jam", "blockchain"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Grey JAM Node",
+  "uid": "grey-jam-node",
+  "version": 1
+}

@@ -1,0 +1,22 @@
+# Prometheus scrape configuration for Grey JAM node testnet.
+#
+# Scrapes all 6 validators in the docker-compose testnet.
+# Each validator exposes /metrics on port 9615.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "grey-validators"
+    static_configs:
+      - targets:
+          - "grey-validator-0:9615"
+          - "grey-validator-1:9615"
+          - "grey-validator-2:9615"
+          - "grey-validator-3:9615"
+          - "grey-validator-4:9615"
+          - "grey-validator-5:9615"
+        labels:
+          network: "testnet"
+    metrics_path: /metrics
