@@ -1,0 +1,32 @@
+# Prometheus scrape configuration for Grey JAM node
+#
+# Usage:
+#   1. Copy to prometheus.yml
+#   2. Run: prometheus --config.file=prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Grey node metrics (exposed on port 9615 by default)
+  - job_name: 'grey'
+    static_configs:
+      # Single validator
+      - targets: ['localhost:9615']
+        labels:
+          instance: 'grey-validator-0'
+
+      # For a multi-validator testnet, add all validators:
+      # - targets:
+      #   - '172.28.0.10:9615'  # validator-0
+      #   - '172.28.0.11:9615'  # validator-1
+      #   - '172.28.0.12:9615'  # validator-2
+      # etc.
+
+    # Metric relabeling (optional)
+    metric_relabel_configs:
+      # Drop histogram buckets to reduce storage (optional)
+      # - source_labels: [__name__]
+      #   regex: 'grey_rpc_request_seconds_bucket'
+      #   action: drop

@@ -1,0 +1,18 @@
+# Grafana provisioning configuration for Grey JAM node dashboard
+# Place this file in /etc/grafana/provisioning/dashboards/ when running Grafana
+# Or mount it as a volume when running Grafana in Docker
+
+apiVersion: 1
+
+providers:
+  - name: 'Grey JAM Node'
+    orgId: 1
+    folder: ''
+    folderUid: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
